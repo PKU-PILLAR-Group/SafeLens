@@ -326,6 +326,10 @@ output, cache = model.run_with_cache({"text": "hello"})
 ```text
 src/SafeLens/core/hooks.py
 src/SafeLens/core/patching.py
+src/SafeLens/core/hooked_root.py
+src/SafeLens/core/factored_matrix.py
+src/SafeLens/core/analysis.py
+src/SafeLens/core/kv_cache.py
 ```
 
 主要接口：
@@ -346,6 +350,12 @@ src/SafeLens/core/patching.py
 - `logit_attrs`：将 residual component 投影到 token residual direction。
 - `temporary_hooks`：上下文式临时 hook 注册，退出时保证移除 hook。
 - `cache_activations`：运行模型并缓存指定层的 activation。
+- `HookedRoot`：集中管理命名 `HookPoint`，支持临时 hook、永久 hook、批量 hook、cache hook 和 hook 名校验。
+- `FactoredMatrix`：支持 `A @ B` 形式的矩阵分解表达、dense product、转置、组合、SVD、norm 和 corner inspection。
+- `KeyValueCache` / `KeyValueCacheEntry`：提供自回归分析需要的 per-layer key/value cache 容器。
+- `softmax`、`logits_to_log_probs`、`cross_entropy_loss`、`logit_diff`、`topk_tokens`：提供基础 logit/loss/token 分析工具。
+- `residual_stack_to_logits`、`direct_logit_attribution`：支持 logit lens 和 direct logit attribution 工作流。
+- `zero_ablation_hook`、`mean_ablation_hook`、`replace_activation_hook`：提供常见 ablation/intervention hook。
 - `PatchSpec`：描述一次 patch 操作，包括目标层、目标 index、来源 index、模式和缩放。
 - `run_activation_patch`：执行一次 patched forward 并返回 `PatchResult`。
 - `generic_activation_patch`：批量执行 patch grid，适合后续实现 causal tracing、residual stream patching、attention/head patching 等方法。

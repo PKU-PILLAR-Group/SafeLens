@@ -22,8 +22,13 @@ nav:
       - Config Validation: api/config.md
       - Core: api/core.md
       - Hooks And Cache: api/hooks.md
+      - Hooked Root: api/hooked_root.md
       - Activation Patching: api/patching.md
+      - Factored Matrix: api/factored_matrix.md
+      - Analysis Utilities: api/analysis.md
+      - KV Cache: api/kv_cache.md
       - Registry: api/registry.md
       - Pipeline Runner: api/runner.md
       - Model Wrapper: api/model_wrapper.md
+      - Model Adapter Registry: api/model_registry.md
       - FlagSafe Adapter: api/flagsafe_adapter.md

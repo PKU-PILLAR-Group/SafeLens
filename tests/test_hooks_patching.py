@@ -148,6 +148,13 @@ def test_hook_point_runs_orders_and_removes_hooks() -> None:
     assert hook.ctx == {}
 
 
+def test_hook_point_accepts_single_argument_hooks() -> None:
+    hook = HookPoint("blocks.0.hook_resid_pre")
+    hook.add_hook(lambda activation: activation + [1])
+
+    assert hook([0]) == [0, 1]
+
+
 def test_activation_name_shorthands_resolve_to_transformerlens_and_safelens_names() -> None:
     assert get_act_name("q", 2) == "blocks.2.attn.hook_q"
     assert get_act_name("attn", 1) == "blocks.1.attn.hook_pattern"
@@ -317,6 +324,15 @@ def test_dummy_wrapper_keeps_legacy_keyword_hooks() -> None:
     assert captured["layer"] == 0
     assert captured["batch"] == {"text": "hello"}
     assert captured["cache"] == {"layer_0": {"batch": {"text": "hello"}}}
+
+
+def test_dummy_wrapper_accepts_activation_hook_signature() -> None:
+    model = DummyModelWrapper()
+
+    model.add_hook(0, lambda activation, hook: {"patched": activation["batch"], "hook": hook})
+    _output, cache = model.run_with_cache({"text": "hello"}, layers=[0])
+
+    assert cache["layer_0"] == {"patched": {"text": "hello"}, "hook": None}
 
 
 def test_apply_patch_replaces_index_from_clean_cache() -> None:

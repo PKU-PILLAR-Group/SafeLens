@@ -1,5 +1,19 @@
 """Core SafeLens contracts and registries."""
 
+from SafeLens.core.analysis import (
+    cross_entropy_loss,
+    direct_logit_attribution,
+    log_softmax,
+    logit_diff,
+    logits_to_log_probs,
+    mean_ablation_hook,
+    per_token_cross_entropy_loss,
+    replace_activation_hook,
+    residual_stack_to_logits,
+    softmax,
+    topk_tokens,
+    zero_ablation_hook,
+)
 from SafeLens.core.base import (
     AttributionResult,
     BaseAttributor,
@@ -18,6 +32,8 @@ from SafeLens.core.base import (
     SafetyReport,
     TokenAttribution,
 )
+from SafeLens.core.factored_matrix import FactoredMatrix
+from SafeLens.core.hooked_root import HookedRoot
 from SafeLens.core.hooks import (
     ActivationCache,
     ActivationKey,
@@ -36,6 +52,7 @@ from SafeLens.core.hooks import (
     stack_values,
     temporary_hooks,
 )
+from SafeLens.core.kv_cache import KeyValueCache, KeyValueCacheEntry
 from SafeLens.core.patching import (
     ActivationNameStyle,
     AxisName,
@@ -113,6 +130,10 @@ __all__ = [
     "BaseProbe",
     "HookDirection",
     "HookPoint",
+    "HookedRoot",
+    "FactoredMatrix",
+    "KeyValueCache",
+    "KeyValueCacheEntry",
     "LensHandle",
     "MethodSpec",
     "ModelLoadConfig",
@@ -138,9 +159,11 @@ __all__ = [
     "apply_patch",
     "cache_activations",
     "component_activation_patch",
+    "cross_entropy_loss",
     "create_attributor",
     "create_monitor",
     "create_probe",
+    "direct_logit_attribution",
     "get_attributor",
     "get_monitor",
     "get_probe",
@@ -180,18 +203,28 @@ __all__ = [
     "list_attributors",
     "list_monitors",
     "list_probes",
+    "log_softmax",
+    "logit_diff",
+    "logits_to_log_probs",
     "make_cache_hook",
     "make_component_patch_specs",
     "make_patch_hook",
     "make_patch_specs",
     "matches_names_filter",
+    "mean_ablation_hook",
+    "per_token_cross_entropy_loss",
     "register_attributor",
     "register_monitor",
     "register_probe",
     "replace_patch_setter",
+    "replace_activation_hook",
+    "residual_stack_to_logits",
     "run_activation_patch",
     "run_with_hooks",
     "safelens_act_name",
+    "softmax",
     "stack_values",
     "temporary_hooks",
+    "topk_tokens",
+    "zero_ablation_hook",
 ]

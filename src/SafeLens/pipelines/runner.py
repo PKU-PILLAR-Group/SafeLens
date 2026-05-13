@@ -7,8 +7,7 @@ from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
-import yaml
-
+from SafeLens.config import validate_pipeline_config_file
 from SafeLens.core.base import (
     AttributionResult,
     MonitoringSignal,
@@ -30,9 +29,7 @@ from SafeLens.utils import build_model_wrapper
 
 def load_pipeline_config(path: str | Path) -> PipelineConfig:
     """Load and validate a YAML pipeline config."""
-    with Path(path).open("r", encoding="utf-8") as handle:
-        raw = yaml.safe_load(handle) or {}
-    return PipelineConfig.model_validate(raw)
+    return validate_pipeline_config_file(path)
 
 
 class PipelineRunner:

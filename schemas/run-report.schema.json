@@ -1,0 +1,278 @@
+{
+  "$defs": {
+    "AttributionResult": {
+      "additionalProperties": false,
+      "description": "Attribution output for input or training-data influence.",
+      "properties": {
+        "attribution_score": {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Attribution Score",
+          "type": "number"
+        },
+        "details": {
+          "additionalProperties": true,
+          "title": "Details",
+          "type": "object"
+        },
+        "method": {
+          "title": "Method",
+          "type": "string"
+        },
+        "tokens": {
+          "items": {
+            "$ref": "#/$defs/TokenAttribution"
+          },
+          "title": "Tokens",
+          "type": "array"
+        }
+      },
+      "required": [
+        "method",
+        "attribution_score"
+      ],
+      "title": "AttributionResult",
+      "type": "object"
+    },
+    "MonitoringSignal": {
+      "additionalProperties": false,
+      "description": "Per-step safety signal emitted by a monitor.",
+      "properties": {
+        "details": {
+          "additionalProperties": true,
+          "title": "Details",
+          "type": "object"
+        },
+        "evidence_tokens": {
+          "items": {
+            "type": "integer"
+          },
+          "title": "Evidence Tokens",
+          "type": "array"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "risk_category": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Risk Category",
+          "type": "array"
+        },
+        "risk_score": {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Risk Score",
+          "type": "number"
+        },
+        "triggered": {
+          "default": false,
+          "title": "Triggered",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "name",
+        "risk_score"
+      ],
+      "title": "MonitoringSignal",
+      "type": "object"
+    },
+    "ProbeResult": {
+      "additionalProperties": false,
+      "description": "Result returned by an endogenous safety probe.",
+      "properties": {
+        "critical_layers": {
+          "items": {
+            "type": "integer"
+          },
+          "title": "Critical Layers",
+          "type": "array"
+        },
+        "details": {
+          "additionalProperties": true,
+          "title": "Details",
+          "type": "object"
+        },
+        "intervention_applied": {
+          "default": false,
+          "title": "Intervention Applied",
+          "type": "boolean"
+        },
+        "risk_score": {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Risk Score",
+          "type": "number"
+        }
+      },
+      "required": [
+        "risk_score"
+      ],
+      "title": "ProbeResult",
+      "type": "object"
+    },
+    "SafetyReport": {
+      "additionalProperties": false,
+      "description": "Standard report shape consumed by downstream adapters such as FlagSafe.",
+      "properties": {
+        "attribution_score": {
+          "anyOf": [
+            {
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Attribution Score"
+        },
+        "attributions": {
+          "items": {
+            "$ref": "#/$defs/AttributionResult"
+          },
+          "title": "Attributions",
+          "type": "array"
+        },
+        "evidence_tokens": {
+          "items": {
+            "type": "integer"
+          },
+          "title": "Evidence Tokens",
+          "type": "array"
+        },
+        "flagged": {
+          "default": false,
+          "title": "Flagged",
+          "type": "boolean"
+        },
+        "metadata": {
+          "additionalProperties": true,
+          "title": "Metadata",
+          "type": "object"
+        },
+        "monitoring_signals": {
+          "items": {
+            "$ref": "#/$defs/MonitoringSignal"
+          },
+          "title": "Monitoring Signals",
+          "type": "array"
+        },
+        "probe_results": {
+          "items": {
+            "$ref": "#/$defs/ProbeResult"
+          },
+          "title": "Probe Results",
+          "type": "array"
+        },
+        "risk_category": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Risk Category",
+          "type": "array"
+        },
+        "risk_score": {
+          "default": 0.0,
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Risk Score",
+          "type": "number"
+        },
+        "sample_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sample Id"
+        }
+      },
+      "title": "SafetyReport",
+      "type": "object"
+    },
+    "TokenAttribution": {
+      "additionalProperties": false,
+      "description": "Token-level attribution evidence.",
+      "properties": {
+        "metadata": {
+          "additionalProperties": true,
+          "title": "Metadata",
+          "type": "object"
+        },
+        "score": {
+          "title": "Score",
+          "type": "number"
+        },
+        "source": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source"
+        },
+        "token_index": {
+          "minimum": 0,
+          "title": "Token Index",
+          "type": "integer"
+        },
+        "token_text": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Token Text"
+        }
+      },
+      "required": [
+        "token_index",
+        "score"
+      ],
+      "title": "TokenAttribution",
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Aggregate report written by a pipeline run.",
+  "properties": {
+    "generated_at": {
+      "format": "date-time",
+      "title": "Generated At",
+      "type": "string"
+    },
+    "reports": {
+      "items": {
+        "$ref": "#/$defs/SafetyReport"
+      },
+      "title": "Reports",
+      "type": "array"
+    },
+    "summary": {
+      "additionalProperties": true,
+      "title": "Summary",
+      "type": "object"
+    }
+  },
+  "title": "RunReport",
+  "type": "object"
+}

@@ -12,6 +12,8 @@ Core utilities:
 
 - `HookPoint`: dependency-free identity hook point with temporary/permanent hooks,
   context storage, prepend ordering, direction filters, and layer-name parsing.
+- `HookedRoot`: root-level manager for named hook points, temporary hooks, and
+  activation caching hooks.
 - `ActivationCache`: dictionary-like activation store.
 - `make_cache_hook`: creates a hook that captures an activation.
 - `temporary_hooks`: registers hooks for one context and always removes them.

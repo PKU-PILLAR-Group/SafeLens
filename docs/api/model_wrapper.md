@@ -6,6 +6,7 @@ Available wrappers:
 
 - `DummyModelWrapper`: test and CI wrapper with no external dependencies.
 - `HuggingFaceModelWrapper`: loads models directly with Transformers.
+- `LocalModelWrapper`: loads a local Transformers-compatible model directory.
 - `Qwen3DenseModelWrapper`: adapts Qwen3 dense models up to 35B with SafeLens
   component hooks for residual streams, MLP output, attention output, and
   `q/k/v/z` head vectors.
@@ -18,6 +19,18 @@ Select a wrapper through `model.source` in the YAML config:
 model:
   source: modelscope
   name: Qwen/Qwen2.5-0.5B-Instruct
+```
+
+Adapters also declare static capabilities through `ModelAdapterRegistry`.
+
+```bash
+safelens models list-supported --json
+```
+
+Static inspection does not load model weights:
+
+```bash
+safelens inspect-model --model Qwen/Qwen3-8B --json
 ```
 
 Minimal Python usage:

@@ -4,6 +4,7 @@ from typing import Any
 
 import pytest
 
+from SafeLens.core.analysis import zero_ablation_hook
 from SafeLens.core.base import PipelineConfig
 from SafeLens.utils import (
     Qwen3DenseModelWrapper,
@@ -87,6 +88,12 @@ class _FakeQwen3CausalLM:
         self.model = _FakeBackbone()
         self.config = _FakeConfig()
 
+    def __call__(self, **_kwargs: Any) -> dict[str, Any]:
+        mlp = self.model.layers[0].mlp
+        first = mlp.run_forward(["first"])
+        second = mlp.run_forward(["second"])
+        return {"first": first, "second": second}
+
 
 def _wrapper_with_fake_model() -> Qwen3DenseModelWrapper:
     wrapper = Qwen3DenseModelWrapper(name="Qwen/Qwen3-8B")
@@ -153,6 +160,24 @@ def test_qwen3_attention_and_mlp_component_hooks_patch_outputs() -> None:
     assert layer.self_attn.q_proj.run_forward(["x"]) == ["x", "q"]
     assert layer.self_attn.k_proj.run_forward(["x"]) == ["x", "k"]
     assert layer.self_attn.o_proj.run_pre(["x"]) == ["x", "z"]
+
+
+def test_qwen3_component_hooks_accept_standard_activation_hook_signature() -> None:
+    wrapper = _wrapper_with_fake_model()
+    layer = wrapper.model.model.layers[0]
+
+    wrapper.add_hook("layer_0.mlp_out", zero_ablation_hook)
+
+    assert layer.mlp.run_forward([1, 2, 3]) == [0, 0, 0]
+
+
+def test_qwen3_run_with_cache_component_hooks_do_not_patch_outputs() -> None:
+    wrapper = _wrapper_with_fake_model()
+
+    output, cache = wrapper.run_with_cache({"text": "hello"}, layers=["layer_0.mlp_out"])
+
+    assert output == {"first": ["first"], "second": ["second"]}
+    assert cache == {"layer_0.mlp_out": ["second"]}
 
 
 def test_qwen3_attention_pattern_hooks_are_explicitly_unsupported() -> None:

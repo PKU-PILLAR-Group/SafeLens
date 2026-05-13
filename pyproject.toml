@@ -86,6 +86,10 @@ SafeLens = ["py.typed"]
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
+markers = [
+  "integration: tests that touch external providers, real downloads, or deployed services",
+  "slow: tests that load large models or take materially longer than unit tests"
+]
 
 [tool.coverage.run]
 branch = true

@@ -7,6 +7,7 @@ from collections.abc import Callable, Iterable, Iterator, MutableMapping, Sequen
 from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass
+from inspect import Parameter, signature
 from typing import Any, Literal, Protocol
 
 from SafeLens.core.base import Batch, HookFn, LayerRef, ModelWrapper
@@ -666,6 +667,8 @@ def extract_hook_output(args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
     """Extract an activation from either PyTorch-style or keyword-style hook calls."""
     if len(args) >= 3:
         return args[2]
+    if len(args) == 2 and isinstance(args[1], HookPoint):
+        return args[0]
     if "output" in kwargs:
         return kwargs["output"]
     if "activation" in kwargs:
@@ -729,10 +732,36 @@ def stack_values(values: Sequence[Any]) -> Any:
 
 
 def _call_hookpoint_fn(hook_fn: HookFn, activation: Any, hook: HookPoint) -> Any:
+    hook_kwargs = {"activation": activation, "output": activation, "hook": hook}
+    try:
+        hook_signature = signature(hook_fn)
+    except (TypeError, ValueError):
+        return hook_fn(activation, hook)
+
+    parameters = hook_signature.parameters.values()
+    if any(param.kind == Parameter.VAR_KEYWORD for param in parameters):
+        return hook_fn(**hook_kwargs)
+
+    parameters = hook_signature.parameters.values()
+    accepted_names = {
+        param.name
+        for param in parameters
+        if param.kind in (Parameter.POSITIONAL_OR_KEYWORD, Parameter.KEYWORD_ONLY)
+    }
+    required_names = {
+        param.name
+        for param in hook_signature.parameters.values()
+        if param.default is Parameter.empty
+        and param.kind in (Parameter.POSITIONAL_OR_KEYWORD, Parameter.KEYWORD_ONLY)
+    }
+    filtered_kwargs = {name: value for name, value in hook_kwargs.items() if name in accepted_names}
+    if required_names.issubset(filtered_kwargs):
+        return hook_fn(**filtered_kwargs)
+
     try:
         return hook_fn(activation, hook)
     except TypeError:
-        return hook_fn(activation=activation, output=activation, hook=hook)
+        return hook_fn(**hook_kwargs)
 
 
 def _handle_matches(

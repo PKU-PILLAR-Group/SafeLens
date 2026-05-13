@@ -12,10 +12,13 @@ from SafeLens.config import (
     ConfigValidationError,
     config_summary,
     pipeline_config_json_schema,
+    run_report_json_schema,
     validate_pipeline_config_file,
     write_pipeline_config_json_schema,
 )
+from SafeLens.core.base import ModelLoadConfig
 from SafeLens.pipelines.runner import PipelineRunner
+from SafeLens.utils import get_model_adapter_registry
 
 
 def _load_jsonl(path: str | None) -> list[dict[str, Any]] | None:
@@ -53,10 +56,43 @@ def build_parser() -> argparse.ArgumentParser:
         help="print or write the JSON Schema for YAML pipeline configs",
     )
     schema_parser.add_argument(
+        "--kind",
+        choices=["pipeline-config", "run-report"],
+        default="pipeline-config",
+        help="Schema kind to emit",
+    )
+    schema_parser.add_argument(
         "--output",
         "-o",
         help="Optional output path. Prints to stdout when omitted.",
     )
+
+    models_parser = subparsers.add_parser("models", help="inspect model adapter support")
+    models_subparsers = models_parser.add_subparsers(dest="models_command", required=True)
+    list_parser = models_subparsers.add_parser(
+        "list-supported",
+        help="list registered model adapters and their capabilities",
+    )
+    list_parser.add_argument("--json", action="store_true", help="Print JSON output")
+
+    inspect_parser = subparsers.add_parser(
+        "inspect-model",
+        help="inspect static adapter support for a model without downloading it",
+    )
+    inspect_parser.add_argument("--model", required=True, help="Model ID or local model path")
+    inspect_parser.add_argument(
+        "--source",
+        help="Optional model source override, such as huggingface, modelscope, qwen3_dense, local",
+    )
+    inspect_parser.add_argument(
+        "--cache-dir",
+        help="Optional cache directory used in the resolved download plan",
+    )
+    inspect_parser.add_argument(
+        "--local-dir",
+        help="Optional local directory used by local or ModelScope adapters",
+    )
+    inspect_parser.add_argument("--json", action="store_true", help="Print JSON output")
     return parser
 
 
@@ -79,11 +115,82 @@ def main(argv: Sequence[str] | None = None) -> None:
             print(f"Config is valid: {args.config}")
             print(json.dumps(summary, indent=2))
     elif args.command == "schema":
+        schema = (
+            pipeline_config_json_schema()
+            if args.kind == "pipeline-config"
+            else run_report_json_schema()
+        )
         if args.output:
-            write_pipeline_config_json_schema(args.output)
+            if args.kind == "pipeline-config":
+                write_pipeline_config_json_schema(args.output)
+            else:
+                Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+                Path(args.output).write_text(
+                    json.dumps(schema, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
             print(f"Wrote JSON Schema to {args.output}")
         else:
-            print(json.dumps(pipeline_config_json_schema(), indent=2, sort_keys=True))
+            print(json.dumps(schema, indent=2, sort_keys=True))
+    elif args.command == "models":
+        registry = get_model_adapter_registry()
+        adapters = registry.list_supported()
+        if args.json:
+            print(json.dumps({"adapters": adapters}, indent=2))
+        else:
+            _print_model_adapter_list(adapters)
+    elif args.command == "inspect-model":
+        registry = get_model_adapter_registry()
+        source = args.source
+        model_config = None
+        if source is not None:
+            model_config = ModelLoadConfig(
+                source=source,
+                name=args.model,
+                cache_dir=args.cache_dir,
+                local_dir=args.local_dir,
+            )
+        result = registry.inspect_model(args.model, source=source, config=model_config)
+        if args.json:
+            print(json.dumps(result, indent=2))
+        else:
+            _print_model_inspection(result)
+
+
+def _print_model_adapter_list(adapters: list[dict[str, Any]]) -> None:
+    print("Supported model adapters:")
+    for adapter in adapters:
+        capabilities = adapter["capabilities"]
+        aliases = ", ".join(adapter["aliases"]) or "-"
+        hooks = ", ".join(capabilities["supported_hooks"]) or "-"
+        print(f"- {adapter['name']} ({adapter['display_name']})")
+        print(f"  aliases: {aliases}")
+        print(f"  hooks: {hooks}")
+        print(f"  attention_pattern: {capabilities['supports_attention_pattern']}")
+        print(f"  cache_policy: {capabilities['cache_policy']}")
+
+
+def _print_model_inspection(result: dict[str, Any]) -> None:
+    adapter = result["adapter"]
+    print(f"Model: {result['model']}")
+    print(f"Adapter: {adapter['name']} ({adapter['display_name']})")
+    print(f"Supported: {result['supported']}")
+    print(f"Family: {result['model_family']}")
+    if result.get("parameter_size_b") is not None:
+        print(f"Parameter size: {result['parameter_size_b']}B")
+    print("Download plan:")
+    for key, value in result["download_plan"].items():
+        print(f"  {key}: {value}")
+    warnings = result.get("warnings") or []
+    if warnings:
+        print("Warnings:")
+        for warning in warnings:
+            print(f"  - {warning}")
+    errors = result.get("errors") or []
+    if errors:
+        print("Errors:")
+        for error in errors:
+            print(f"  - {error}")
 
 
 if __name__ == "__main__":

@@ -10,7 +10,7 @@ from typing import Any
 import yaml
 from pydantic import ValidationError
 
-from SafeLens.core.base import LayerRef, MethodSpec, PipelineConfig
+from SafeLens.core.base import LayerRef, MethodSpec, PipelineConfig, RunReport
 from SafeLens.core.registry import (
     RegistryError,
     get_attributor,
@@ -28,6 +28,13 @@ class ConfigValidationError(ValueError):
 def pipeline_config_json_schema() -> dict[str, Any]:
     """Return the JSON Schema for SafeLens YAML pipeline configs."""
     schema = PipelineConfig.model_json_schema()
+    schema["$schema"] = "https://json-schema.org/draft/2020-12/schema"
+    return schema
+
+
+def run_report_json_schema() -> dict[str, Any]:
+    """Return the JSON Schema for SafeLens run reports."""
+    schema = RunReport.model_json_schema()
     schema["$schema"] = "https://json-schema.org/draft/2020-12/schema"
     return schema
 

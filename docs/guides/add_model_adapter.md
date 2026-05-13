@@ -44,5 +44,33 @@ document:
 - required optional dependencies
 - whether `trust_remote_code` is needed
 
+SafeLens uses `ModelAdapterRegistry` for built-in adapters. A production adapter
+should register a `ModelAdapterSpec` with capability metadata:
+
+```python
+from SafeLens.utils.model_registry import ModelAdapterCapabilities, ModelAdapterSpec
+
+spec = ModelAdapterSpec(
+    name="my_adapter",
+    display_name="My Adapter",
+    aliases=("my",),
+    description="Short adapter description.",
+    dependencies=("torch>=2",),
+    capabilities=ModelAdapterCapabilities(
+        supported_hooks=("integer decoder layer refs",),
+        supported_patches=("module output replace",),
+        supports_attention_pattern=False,
+        supports_remote_download=True,
+    ),
+    build=lambda config: MyModelWrapper(),
+    inspect=lambda model_name, config: {
+        "model": model_name,
+        "source": "my_adapter",
+        "supported": True,
+        "model_family": "my_family",
+    },
+)
+```
+
 Adapter tests should use fake modules or tiny local objects. Do not make default
 CI download model weights.

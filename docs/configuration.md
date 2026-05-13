@@ -37,6 +37,13 @@ Generate the JSON Schema used by editors and CI:
 safelens schema --output schemas/pipeline-config.schema.json
 ```
 
+Inspect model adapter support and cache behavior without downloading weights:
+
+```bash
+safelens models list-supported
+safelens inspect-model --model Qwen/Qwen3-8B
+```
+
 ## Model Sources
 
 `model.source` controls how the model is loaded.
@@ -72,6 +79,9 @@ Install dependencies with:
 ```bash
 python -m pip install -e ".[models]"
 ```
+
+If `cache_dir` is omitted, SafeLens resolves a default provider cache under
+`.cache/safelens/models/huggingface`.
 
 ### Qwen3 Dense
 
@@ -128,6 +138,9 @@ model:
   modelscope_kwargs:
     allow_file_pattern: "*.json"
 ```
+
+If `cache_dir` is omitted, SafeLens resolves a default provider cache under
+`.cache/safelens/models/modelscope`.
 
 ### Local
 

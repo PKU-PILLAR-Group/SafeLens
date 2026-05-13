@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable, Sequence
+from contextlib import nullcontext
 from inspect import Parameter, signature
 from typing import Any
 
 from SafeLens.core.base import (
-    SUPPORTED_MODEL_SOURCES,
     Batch,
     HookFn,
     LayerRef,
@@ -16,6 +16,12 @@ from SafeLens.core.base import (
     ModelWrapper,
 )
 from SafeLens.core.hooks import activation_name_for_layer
+from SafeLens.utils.model_registry import (
+    ModelAdapterCapabilities,
+    ModelAdapterSpec,
+    get_model_adapter_registry,
+    resolve_model_download_plan,
+)
 
 _QWEN3_DENSE_MAX_PARAMS_B = 35.0
 _QWEN3_PATCHABLE_COMPONENTS = {
@@ -132,6 +138,7 @@ def _call_dummy_hook(
         "cache": cache,
         "activation": activation,
         "output": activation,
+        "hook": None,
     }
     try:
         hook_signature = signature(hook_fn)
@@ -155,10 +162,13 @@ def _call_dummy_hook(
         and param.kind in (Parameter.POSITIONAL_OR_KEYWORD, Parameter.KEYWORD_ONLY)
     }
     filtered_kwargs = {name: value for name, value in hook_kwargs.items() if name in accepted_names}
-    if filtered_kwargs and required_names.issubset(hook_kwargs):
+    if required_names.issubset(filtered_kwargs):
         return hook_fn(**filtered_kwargs)
 
-    return hook_fn(None, None, activation)
+    try:
+        return hook_fn(activation, None)
+    except TypeError:
+        return hook_fn(None, None, activation)
 
 
 class HuggingFaceModelWrapper(ModelWrapper):
@@ -174,6 +184,7 @@ class HuggingFaceModelWrapper(ModelWrapper):
         trust_remote_code: bool = False,
         load_kwargs: dict[str, Any] | None = None,
         tokenizer_kwargs: dict[str, Any] | None = None,
+        pretrained_path: str | None = None,
     ) -> None:
         self.name = name
         self.dtype = dtype
@@ -183,6 +194,7 @@ class HuggingFaceModelWrapper(ModelWrapper):
         self.trust_remote_code = trust_remote_code
         self.load_kwargs = load_kwargs or {}
         self.tokenizer_kwargs = tokenizer_kwargs or {}
+        self.pretrained_path = pretrained_path
         self.model: Any = None
         self.tokenizer: Any = None
         self._hooks: list[Any] = []
@@ -226,7 +238,7 @@ class HuggingFaceModelWrapper(ModelWrapper):
         return self.model
 
     def _resolve_pretrained_path(self) -> str:
-        return self.name
+        return self.pretrained_path or self.name
 
     def _pretrained_kwargs(self) -> dict[str, Any]:
         kwargs: dict[str, Any] = {}
@@ -268,10 +280,8 @@ class HuggingFaceModelWrapper(ModelWrapper):
             temp_handles.append(module.register_forward_hook(cache_hook))
 
         try:
-            import torch
-
             model_inputs = self._prepare_model_inputs(batch)
-            with torch.no_grad():
+            with _no_grad_context():
                 output = model(**model_inputs)
         finally:
             for handle in temp_handles:
@@ -395,18 +405,13 @@ class Qwen3DenseModelWrapper(HuggingFaceModelWrapper):
                 self._register_qwen3_component_hook(
                     layer_index,
                     component,
-                    lambda cache_key=cache_name, **kwargs: cache.setdefault(
-                        cache_key,
-                        kwargs["activation"],
-                    ),
+                    _make_qwen3_cache_hook(cache, cache_name),
                 )
             )
 
         try:
-            import torch
-
             model_inputs = self._prepare_model_inputs(batch)
-            with torch.no_grad():
+            with _no_grad_context():
                 output = model(**model_inputs)
         finally:
             for handle in temp_handles:
@@ -739,15 +744,50 @@ def _call_qwen3_component_hook(
     layer: int,
     component: str,
 ) -> Any:
+    hook_kwargs = {
+        "activation": activation,
+        "output": activation,
+        "hook": None,
+        "layer": layer,
+        "component": component,
+    }
     try:
-        return hook_fn(
-            activation=activation,
-            output=activation,
-            layer=layer,
-            component=component,
-        )
+        hook_signature = signature(hook_fn)
+    except (TypeError, ValueError):
+        return hook_fn(**hook_kwargs)
+
+    parameters = hook_signature.parameters.values()
+    if any(param.kind == Parameter.VAR_KEYWORD for param in parameters):
+        return hook_fn(**hook_kwargs)
+
+    parameters = hook_signature.parameters.values()
+    accepted_names = {
+        param.name
+        for param in parameters
+        if param.kind in (Parameter.POSITIONAL_OR_KEYWORD, Parameter.KEYWORD_ONLY)
+    }
+    required_names = {
+        param.name
+        for param in hook_signature.parameters.values()
+        if param.default is Parameter.empty
+        and param.kind in (Parameter.POSITIONAL_OR_KEYWORD, Parameter.KEYWORD_ONLY)
+    }
+    filtered_kwargs = {name: value for name, value in hook_kwargs.items() if name in accepted_names}
+    if required_names.issubset(filtered_kwargs):
+        return hook_fn(**filtered_kwargs)
+
+    try:
+        return hook_fn(activation, None)
     except TypeError:
         return hook_fn(None, None, activation)
+
+
+def _make_qwen3_cache_hook(cache: dict[str, Any], cache_name: str) -> HookFn:
+    def cache_hook(*, activation: Any, **_kwargs: Any) -> None:
+        cache[cache_name] = activation
+        return None
+
+    return cache_hook
 
 
 def _get_qwen3_layers(model: Any) -> Any:
@@ -789,6 +829,19 @@ def _merge_qwen3_heads(activation: Any, reference: Any) -> Any:
     if reference_shape is not None:
         hidden_size = int(reference_shape[-1])
     return activation.reshape(*shape[:-2], hidden_size)
+
+
+def _no_grad_context() -> Any:
+    try:
+        import torch
+
+        return torch.no_grad()
+    except ImportError:
+        return nullcontext()
+
+
+class LocalModelWrapper(HuggingFaceModelWrapper):
+    """Transformers-compatible local directory wrapper with no provider download."""
 
 
 class ModelScopeModelWrapper(HuggingFaceModelWrapper):
@@ -844,56 +897,298 @@ class ModelScopeModelWrapper(HuggingFaceModelWrapper):
 
 def build_model_wrapper(config: ModelLoadConfig) -> ModelWrapper:
     """Build the configured model wrapper."""
-    source = config.source.lower()
-    if source in {"dummy", "mock", "none"} or config.name.lower() in {"dummy", "mock", "none"}:
+    register_builtin_model_adapters()
+    if config.name.lower() in {"dummy", "mock", "none"}:
         return DummyModelWrapper(name=config.name)
-    if source in {"huggingface", "hf"}:
-        return HuggingFaceModelWrapper(
-            name=config.name,
-            dtype=config.dtype,
-            device=config.device,
-            revision=config.revision,
-            cache_dir=config.cache_dir,
-            trust_remote_code=config.trust_remote_code,
-            load_kwargs=config.load_kwargs,
-            tokenizer_kwargs=config.tokenizer_kwargs,
+    return get_model_adapter_registry().create(config)
+
+
+_MODEL_ADAPTERS_REGISTERED = False
+
+
+def register_builtin_model_adapters() -> None:
+    """Register SafeLens built-in model adapters once."""
+    global _MODEL_ADAPTERS_REGISTERED
+    if _MODEL_ADAPTERS_REGISTERED:
+        return
+
+    registry = get_model_adapter_registry()
+    registry.register(
+        ModelAdapterSpec(
+            name="dummy",
+            display_name="Dummy",
+            aliases=("mock", "none"),
+            description="In-memory adapter for tests, CI, and architecture demos.",
+            dependencies=(),
+            model_name_patterns=("dummy", "mock", "none"),
+            capabilities=ModelAdapterCapabilities(
+                supported_hooks=("integer layer refs", "string layer refs"),
+                supported_patches=("replace", "add"),
+                supports_local_path=False,
+                supports_remote_download=False,
+                cache_policy="no external cache",
+                notes=("Does not download or execute model code.",),
+            ),
+            build=_build_dummy_wrapper,
+            inspect=_inspect_dummy_model,
+            matches_model_name=lambda name: name.lower() in {"dummy", "mock", "none"},
+            priority=100,
         )
-    if source == "local":
-        return HuggingFaceModelWrapper(
-            name=config.local_dir or config.name,
-            dtype=config.dtype,
-            device=config.device,
-            revision=config.revision,
-            cache_dir=config.cache_dir,
-            trust_remote_code=config.trust_remote_code,
-            load_kwargs=config.load_kwargs,
-            tokenizer_kwargs=config.tokenizer_kwargs,
-        )
-    if source in {"qwen3", "qwen3_dense", "qwen3-dense"}:
-        return Qwen3DenseModelWrapper(
-            name=config.name,
-            dtype=config.dtype,
-            device=config.device,
-            revision=config.revision,
-            cache_dir=config.cache_dir,
-            trust_remote_code=config.trust_remote_code,
-            load_kwargs=config.load_kwargs,
-            tokenizer_kwargs=config.tokenizer_kwargs,
-        )
-    if source in {"modelscope", "ms"}:
-        return ModelScopeModelWrapper(
-            name=config.name,
-            dtype=config.dtype,
-            device=config.device,
-            revision=config.revision,
-            cache_dir=config.cache_dir,
-            local_dir=config.local_dir,
-            trust_remote_code=config.trust_remote_code,
-            load_kwargs=config.load_kwargs,
-            tokenizer_kwargs=config.tokenizer_kwargs,
-            modelscope_kwargs=config.modelscope_kwargs,
-        )
-    raise ValueError(
-        "Unsupported model source "
-        f"{config.source!r}. Expected one of: {', '.join(SUPPORTED_MODEL_SOURCES)}."
     )
+    registry.register(
+        ModelAdapterSpec(
+            name="qwen3_dense",
+            display_name="Qwen3 Dense",
+            aliases=("qwen3", "qwen3-dense"),
+            description="Qwen3 dense <=35B adapter with component-level hooks.",
+            dependencies=("torch>=2", "transformers>=4.40"),
+            model_name_patterns=("Qwen/Qwen3-{0.6,1.7,4,8,14,32}B",),
+            capabilities=ModelAdapterCapabilities(
+                supported_hooks=tuple(qwen3_supported_hook_components()),
+                supported_patches=(
+                    "resid_pre",
+                    "resid_mid",
+                    "resid_post",
+                    "attn_out",
+                    "mlp_out",
+                    "q",
+                    "k",
+                    "v",
+                    "z",
+                ),
+                supports_attention_pattern=False,
+                supports_attention_scores=False,
+                supports_local_path=False,
+                supports_remote_download=True,
+                cache_policy="SafeLens cache_dir -> .cache/safelens/models/huggingface",
+                notes=(
+                    "Attention pattern and score hooks are planned but not exposed "
+                    "by the raw Transformers module wrapper yet.",
+                ),
+            ),
+            build=_build_qwen3_dense_wrapper,
+            inspect=_inspect_qwen3_dense_model,
+            matches_model_name=lambda name: "qwen3" in name.lower(),
+            priority=200,
+        )
+    )
+    registry.register(
+        ModelAdapterSpec(
+            name="huggingface",
+            display_name="HuggingFace Transformers",
+            aliases=("hf",),
+            description="Generic Transformers causal language model adapter.",
+            dependencies=("torch>=2", "transformers>=4.40"),
+            model_name_patterns=("organization/model-name",),
+            capabilities=ModelAdapterCapabilities(
+                supported_hooks=("integer decoder layer refs", "model.named_modules() names"),
+                supported_patches=("module output replace", "module output add"),
+                supports_attention_pattern=False,
+                supports_attention_scores=False,
+                supports_local_path=False,
+                supports_remote_download=True,
+                cache_policy="SafeLens cache_dir -> .cache/safelens/models/huggingface",
+                notes=("Component hooks require a family-specific adapter.",),
+            ),
+            build=_build_huggingface_wrapper,
+            inspect=_inspect_huggingface_model,
+            matches_model_name=lambda name: "/" in name and not name.startswith((".", "/", "~")),
+            priority=10,
+        )
+    )
+    registry.register(
+        ModelAdapterSpec(
+            name="modelscope",
+            display_name="ModelScope",
+            aliases=("ms",),
+            description="ModelScope snapshot download followed by Transformers loading.",
+            dependencies=("modelscope>=1.15", "torch>=2", "transformers>=4.40"),
+            model_name_patterns=("namespace/model-name",),
+            capabilities=ModelAdapterCapabilities(
+                supported_hooks=("integer decoder layer refs", "model.named_modules() names"),
+                supported_patches=("module output replace", "module output add"),
+                supports_attention_pattern=False,
+                supports_attention_scores=False,
+                supports_local_path=False,
+                supports_remote_download=True,
+                cache_policy="SafeLens cache_dir -> .cache/safelens/models/modelscope",
+                notes=("Use modelscope_kwargs for provider-specific snapshot filters.",),
+            ),
+            build=_build_modelscope_wrapper,
+            inspect=_inspect_modelscope_model,
+            matches_model_name=lambda _name: False,
+            priority=5,
+        )
+    )
+    registry.register(
+        ModelAdapterSpec(
+            name="local",
+            display_name="Local Transformers Directory",
+            aliases=(),
+            description="Local Transformers-compatible model directory.",
+            dependencies=("torch>=2", "transformers>=4.40"),
+            model_name_patterns=("./models/local-causal-lm", "/abs/path/to/model"),
+            capabilities=ModelAdapterCapabilities(
+                supported_hooks=("integer decoder layer refs", "model.named_modules() names"),
+                supported_patches=("module output replace", "module output add"),
+                supports_attention_pattern=False,
+                supports_attention_scores=False,
+                supports_local_path=True,
+                supports_remote_download=False,
+                cache_policy="No provider download; local_dir or name is used directly.",
+                notes=("Keep local model paths and weights out of git.",),
+            ),
+            build=_build_local_wrapper,
+            inspect=_inspect_local_model,
+            matches_model_name=lambda name: name.startswith((".", "/", "~")),
+            priority=50,
+        )
+    )
+    _MODEL_ADAPTERS_REGISTERED = True
+
+
+def _build_dummy_wrapper(config: ModelLoadConfig) -> ModelWrapper:
+    return DummyModelWrapper(name=config.name)
+
+
+def _build_huggingface_wrapper(config: ModelLoadConfig) -> ModelWrapper:
+    plan = resolve_model_download_plan(config)
+    return HuggingFaceModelWrapper(
+        name=config.name,
+        dtype=config.dtype,
+        device=config.device,
+        revision=config.revision,
+        cache_dir=plan.cache_dir,
+        trust_remote_code=config.trust_remote_code,
+        load_kwargs=config.load_kwargs,
+        tokenizer_kwargs=config.tokenizer_kwargs,
+        pretrained_path=plan.pretrained_path,
+    )
+
+
+def _build_local_wrapper(config: ModelLoadConfig) -> ModelWrapper:
+    plan = resolve_model_download_plan(config)
+    return LocalModelWrapper(
+        name=config.name,
+        dtype=config.dtype,
+        device=config.device,
+        revision=config.revision,
+        cache_dir=None,
+        trust_remote_code=config.trust_remote_code,
+        load_kwargs=config.load_kwargs,
+        tokenizer_kwargs=config.tokenizer_kwargs,
+        pretrained_path=plan.pretrained_path,
+    )
+
+
+def _build_qwen3_dense_wrapper(config: ModelLoadConfig) -> ModelWrapper:
+    plan = resolve_model_download_plan(config)
+    return Qwen3DenseModelWrapper(
+        name=config.name,
+        dtype=config.dtype,
+        device=config.device,
+        revision=config.revision,
+        cache_dir=plan.cache_dir,
+        trust_remote_code=config.trust_remote_code,
+        load_kwargs=config.load_kwargs,
+        tokenizer_kwargs=config.tokenizer_kwargs,
+        pretrained_path=plan.pretrained_path,
+    )
+
+
+def _build_modelscope_wrapper(config: ModelLoadConfig) -> ModelWrapper:
+    plan = resolve_model_download_plan(config)
+    return ModelScopeModelWrapper(
+        name=config.name,
+        dtype=config.dtype,
+        device=config.device,
+        revision=config.revision,
+        cache_dir=plan.cache_dir,
+        local_dir=config.local_dir,
+        trust_remote_code=config.trust_remote_code,
+        load_kwargs=config.load_kwargs,
+        tokenizer_kwargs=config.tokenizer_kwargs,
+        modelscope_kwargs=config.modelscope_kwargs,
+    )
+
+
+def _inspect_dummy_model(model_name: str, config: ModelLoadConfig | None) -> dict[str, Any]:
+    return _inspection_payload(model_name, config, supported=True, model_family="dummy")
+
+
+def _inspect_huggingface_model(model_name: str, config: ModelLoadConfig | None) -> dict[str, Any]:
+    return _inspection_payload(
+        model_name,
+        config,
+        supported=True,
+        model_family="generic_transformers",
+        warnings=("Only module-level hooks are known statically for generic HF models.",),
+    )
+
+
+def _inspect_modelscope_model(model_name: str, config: ModelLoadConfig | None) -> dict[str, Any]:
+    return _inspection_payload(
+        model_name,
+        config,
+        supported=True,
+        model_family="modelscope_transformers",
+        warnings=("ModelScope support downloads a snapshot before Transformers loading.",),
+    )
+
+
+def _inspect_local_model(model_name: str, config: ModelLoadConfig | None) -> dict[str, Any]:
+    local_path = config.local_dir if config is not None and config.local_dir else model_name
+    return _inspection_payload(
+        model_name,
+        config,
+        supported=True,
+        model_family="local_transformers",
+        local_path=local_path,
+        warnings=("Static inspection does not verify that the local path exists.",),
+    )
+
+
+def _inspect_qwen3_dense_model(model_name: str, config: ModelLoadConfig | None) -> dict[str, Any]:
+    errors: list[str] = []
+    try:
+        validate_qwen3_dense_model_name(model_name)
+    except ValueError as exc:
+        errors.append(str(exc))
+    size_b = qwen3_dense_size_billion(model_name)
+    payload = _inspection_payload(
+        model_name,
+        config,
+        supported=not errors,
+        model_family="qwen3_dense",
+        parameter_size_b=size_b,
+        supported_dense_limit_b=_QWEN3_DENSE_MAX_PARAMS_B,
+        supported_hook_examples=qwen3_hook_name_examples(),
+        warnings=("Attention pattern and attention score hooks are not supported yet.",),
+    )
+    if errors:
+        payload["errors"] = errors
+    return payload
+
+
+def _inspection_payload(
+    model_name: str,
+    config: ModelLoadConfig | None,
+    *,
+    supported: bool,
+    model_family: str,
+    warnings: tuple[str, ...] = (),
+    **extra: Any,
+) -> dict[str, Any]:
+    effective_config = config or ModelLoadConfig(source="huggingface", name=model_name)
+    return {
+        "model": model_name,
+        "source": effective_config.source,
+        "supported": supported,
+        "model_family": model_family,
+        "download_plan": resolve_model_download_plan(effective_config).to_dict(),
+        "warnings": list(warnings),
+        **extra,
+    }
+
+
+register_builtin_model_adapters()
