@@ -1,0 +1,69 @@
+name: Bug report
+description: Report a reproducible problem in SafeLens.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a problem. Please include enough detail for maintainers to reproduce it without private data or large model downloads.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What went wrong?
+      placeholder: Describe the bug clearly.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Provide the smallest command, config, or code snippet that reproduces the issue.
+      placeholder: |
+        1. Run ...
+        2. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What should have happened?
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or traceback
+      description: Paste relevant logs. Remove secrets and private data.
+      render: shell
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - CLI
+        - Pipeline runner
+        - Config validation
+        - Hooks and patching
+        - Model wrapper
+        - HuggingFace backend
+        - ModelScope backend
+        - Qwen3 adapter
+        - Docs
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      placeholder: "Python 3.10, macOS/Linux, SafeLens commit, torch/transformers versions"
+  - type: checkboxes
+    id: terms
+    attributes:
+      label: Safety checklist
+      options:
+        - label: I removed credentials, private prompts, private datasets, and model access tokens from this report.
+          required: true

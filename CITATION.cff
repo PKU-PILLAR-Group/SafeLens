@@ -1,0 +1,18 @@
+cff-version: 1.2.0
+message: "If you use SafeLens in academic work, please cite it using this metadata."
+title: "SafeLens: Pluggable Safety Analysis Infrastructure for LLM Research Workflows"
+type: software
+authors:
+  - name: "SafeLens Team"
+repository-code: "https://github.com/PKU-PILLAR-Group/SafeLens"
+url: "https://github.com/PKU-PILLAR-Group/SafeLens"
+abstract: "SafeLens provides reusable infrastructure for LLM safety probing, monitoring, attribution, activation patching, model adaptation, and downstream safety report conversion."
+keywords:
+  - "large language models"
+  - "AI safety"
+  - "mechanistic interpretability"
+  - "activation patching"
+  - "model monitoring"
+license: MIT
+version: "0.1.0"
+date-released: 2026-05-13

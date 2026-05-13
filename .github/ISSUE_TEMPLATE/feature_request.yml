@@ -1,0 +1,47 @@
+name: Feature request
+description: Propose a new capability, interface, or workflow.
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What user need or research workflow does this solve?
+      placeholder: Describe the gap in the current project.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: What should SafeLens add or change?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What other approaches did you consider?
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Probe interface
+        - Monitor interface
+        - Attribution interface
+        - Model adapter
+        - Hook and patching primitives
+        - Pipeline runner
+        - CLI
+        - Documentation
+        - Other
+    validations:
+      required: true
+  - type: checkboxes
+    id: contribution
+    attributes:
+      label: Contribution
+      options:
+        - label: I am willing to help implement or test this feature.

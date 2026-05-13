@@ -1,0 +1,39 @@
+name: Model adapter request
+description: Request support for a new model family or hook mapping.
+title: "[Model Adapter]: "
+labels: ["model-adapter", "enhancement"]
+body:
+  - type: input
+    id: model_family
+    attributes:
+      label: Model family
+      placeholder: "Example: Qwen3 Dense, Llama, Gemma, Mistral"
+    validations:
+      required: true
+  - type: input
+    id: model_ids
+    attributes:
+      label: Target model IDs or local architecture names
+      placeholder: "Example: Qwen/Qwen3-8B"
+    validations:
+      required: true
+  - type: textarea
+    id: components
+    attributes:
+      label: Required components
+      description: Which activations or patch targets are needed?
+      placeholder: "resid_pre, resid_mid, resid_post, q, k, v, z, attn_out, mlp_out, pattern, attn_scores"
+    validations:
+      required: true
+  - type: textarea
+    id: constraints
+    attributes:
+      label: Constraints
+      description: Note parameter size limits, dense/MoE variants, required dependencies, or remote-code requirements.
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety checklist
+      options:
+        - label: This request does not include private model weights, private datasets, API keys, or access tokens.
+          required: true
