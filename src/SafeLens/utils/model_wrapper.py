@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+from inspect import Parameter, signature
 from typing import Any
 
 from SafeLens.core.base import Batch, HookFn, LayerRef, ModelLoadConfig, ModelWrapper
+from SafeLens.core.hooks import activation_name_for_layer
 
 
 class _RemovableHandle:
@@ -45,7 +47,9 @@ class DummyModelWrapper(ModelWrapper):
             self.load_model()
 
         selected_layers = list(layers or [layer for layer, _ in self._hooks])
-        cache = {f"layer_{layer}": {"batch": dict(batch)} for layer in selected_layers}
+        cache = {
+            activation_name_for_layer(layer): {"batch": dict(batch)} for layer in selected_layers
+        }
         model_output = {
             "text": batch.get("text") or batch.get("prompt") or "",
             "risk_score": float(batch.get("risk_score", 0.0)),
@@ -53,7 +57,17 @@ class DummyModelWrapper(ModelWrapper):
 
         for layer, hook_fn in list(self._hooks):
             if not selected_layers or layer in selected_layers:
-                hook_fn(layer=layer, batch=batch, cache=cache)
+                name = activation_name_for_layer(layer)
+                activation = cache.get(name, {"batch": dict(batch)})
+                patched = _call_dummy_hook(
+                    hook_fn,
+                    layer=layer,
+                    batch=batch,
+                    cache=cache,
+                    activation=activation,
+                )
+                if patched is not None:
+                    cache[name] = patched
 
         return model_output, cache
 
@@ -67,6 +81,49 @@ class DummyModelWrapper(ModelWrapper):
     def _remove_hook(self, item: tuple[LayerRef, HookFn]) -> None:
         if item in self._hooks:
             self._hooks.remove(item)
+
+
+def _call_dummy_hook(
+    hook_fn: HookFn,
+    *,
+    layer: LayerRef,
+    batch: Batch,
+    cache: dict[str, Any],
+    activation: Any,
+) -> Any:
+    hook_kwargs = {
+        "layer": layer,
+        "batch": batch,
+        "cache": cache,
+        "activation": activation,
+        "output": activation,
+    }
+    try:
+        hook_signature = signature(hook_fn)
+    except (TypeError, ValueError):
+        return hook_fn(**hook_kwargs)
+
+    parameters = hook_signature.parameters.values()
+    if any(param.kind == Parameter.VAR_KEYWORD for param in parameters):
+        return hook_fn(**hook_kwargs)
+
+    parameters = hook_signature.parameters.values()
+    accepted_names = {
+        param.name
+        for param in parameters
+        if param.kind in (Parameter.POSITIONAL_OR_KEYWORD, Parameter.KEYWORD_ONLY)
+    }
+    required_names = {
+        param.name
+        for param in hook_signature.parameters.values()
+        if param.default is Parameter.empty
+        and param.kind in (Parameter.POSITIONAL_OR_KEYWORD, Parameter.KEYWORD_ONLY)
+    }
+    filtered_kwargs = {name: value for name, value in hook_kwargs.items() if name in accepted_names}
+    if filtered_kwargs and required_names.issubset(hook_kwargs):
+        return hook_fn(**filtered_kwargs)
+
+    return hook_fn(None, None, activation)
 
 
 class HuggingFaceModelWrapper(ModelWrapper):
@@ -171,7 +228,7 @@ class HuggingFaceModelWrapper(ModelWrapper):
                 output: Any,
                 layer_ref: LayerRef = layer,
             ) -> None:
-                cache[str(layer_ref)] = output
+                cache[activation_name_for_layer(layer_ref)] = output
 
             temp_handles.append(module.register_forward_hook(cache_hook))
 
@@ -291,6 +348,118 @@ class ModelScopeModelWrapper(HuggingFaceModelWrapper):
         return {}
 
 
+class TransformerLensModelWrapper(ModelWrapper):
+    """TransformerLens-backed wrapper for HookedTransformer hook points."""
+
+    def __init__(
+        self,
+        name: str,
+        dtype: str = "auto",
+        device: str | None = None,
+        revision: str | None = None,
+        cache_dir: str | None = None,
+        load_kwargs: dict[str, Any] | None = None,
+    ) -> None:
+        self.name = name
+        self.dtype = dtype
+        self.device = device
+        self.revision = revision
+        self.cache_dir = cache_dir
+        self.load_kwargs = load_kwargs or {}
+        self.model: Any = None
+        self._hooks: list[str] = []
+
+    def load_model(self) -> Any:
+        try:
+            from transformer_lens import HookedTransformer
+        except ImportError as exc:
+            raise ImportError(
+                "TransformerLensModelWrapper requires TransformerLens. "
+                "Install it with `pip install -e '.[transformerlens]'`."
+            ) from exc
+
+        kwargs = dict(self.load_kwargs)
+        if self.device is not None:
+            kwargs.setdefault("device", self.device)
+        if self.revision is not None:
+            kwargs.setdefault("revision", self.revision)
+        if self.cache_dir is not None:
+            kwargs.setdefault("cache_dir", self.cache_dir)
+        if self.dtype != "auto":
+            import torch
+
+            dtype_map = {
+                "float16": torch.float16,
+                "bfloat16": torch.bfloat16,
+                "float32": torch.float32,
+            }
+            kwargs.setdefault("dtype", dtype_map.get(self.dtype, self.dtype))
+
+        self.model = HookedTransformer.from_pretrained(self.name, **kwargs)
+        return self.model
+
+    def add_hook(self, layer: LayerRef, hook_fn: HookFn) -> _RemovableHandle:
+        model = self._require_model()
+        hook_name = str(layer)
+
+        def transformer_lens_hook(activation: Any, hook: Any) -> Any:
+            patched = hook_fn(activation=activation, output=activation, hook=hook)
+            return activation if patched is None else patched
+
+        model.add_hook(hook_name, transformer_lens_hook)
+        self._hooks.append(hook_name)
+        return _RemovableHandle(self.remove_hooks)
+
+    def run_with_cache(
+        self,
+        batch: Batch,
+        layers: Sequence[LayerRef] | None = None,
+    ) -> tuple[Any, dict[str, Any]]:
+        model = self._require_model()
+        model_input = self._prepare_model_input(batch)
+        names_filter = [str(layer) for layer in layers] if layers is not None else None
+        output, cache = model.run_with_cache(model_input, names_filter=names_filter)
+        return output, self._cache_to_dict(cache)
+
+    def generate(self, prompt: str, **generation_kwargs: Any) -> Any:
+        model = self._require_model()
+        return model.generate(prompt, **generation_kwargs)
+
+    def remove_hooks(self) -> None:
+        if self.model is not None:
+            reset_hooks = getattr(self.model, "reset_hooks", None)
+            if callable(reset_hooks):
+                reset_hooks()
+        self._hooks.clear()
+
+    def _require_model(self) -> Any:
+        if self.model is None:
+            self.load_model()
+        return self.model
+
+    @staticmethod
+    def _prepare_model_input(batch: Batch) -> Any:
+        if "tokens" in batch:
+            return batch["tokens"]
+        if "input_ids" in batch:
+            return batch["input_ids"]
+        if "text" in batch:
+            return batch["text"]
+        if "prompt" in batch:
+            return batch["prompt"]
+        return dict(batch)
+
+    @staticmethod
+    def _cache_to_dict(cache: Any) -> dict[str, Any]:
+        to_dict = getattr(cache, "to_dict", None)
+        if callable(to_dict):
+            return dict(to_dict())
+        cache_dict = getattr(cache, "cache_dict", None)
+        if cache_dict is not None:
+            return dict(cache_dict)
+        return dict(cache)
+
+
 def build_model_wrapper(config: ModelLoadConfig) -> ModelWrapper:
     """Build the configured model wrapper."""
     source = config.source.lower()
@@ -320,7 +489,17 @@ def build_model_wrapper(config: ModelLoadConfig) -> ModelWrapper:
             tokenizer_kwargs=config.tokenizer_kwargs,
             modelscope_kwargs=config.modelscope_kwargs,
         )
+    if source in {"transformer_lens", "transformerlens", "tl"}:
+        return TransformerLensModelWrapper(
+            name=config.name,
+            dtype=config.dtype,
+            device=config.device,
+            revision=config.revision,
+            cache_dir=config.cache_dir,
+            load_kwargs=config.load_kwargs,
+        )
     raise ValueError(
         "Unsupported model source "
-        f"{config.source!r}. Expected one of: dummy, huggingface, modelscope."
+        f"{config.source!r}. Expected one of: dummy, huggingface, modelscope, "
+        "transformer_lens."
     )

@@ -16,7 +16,7 @@ model.
   `AttributionResult`, `SafetyReport`, and `RunReport`.
 - A plugin registry for loading probes, monitors, and attributors by name.
 - A YAML-driven pipeline runner exposed through `safelens run`.
-- Model loading wrappers for dummy, HuggingFace, and ModelScope sources.
+- Model loading wrappers for dummy, HuggingFace, ModelScope, and TransformerLens sources.
 - A FlagSafe adapter boundary for converting internal reports to policy payloads.
 - Tests, Ruff, mypy, pre-commit, GitHub Actions, and MkDocs configuration.
 
@@ -40,7 +40,7 @@ The command writes `safety_scan.json` and prints a summary like:
 
 ## Next Steps
 
-- Read [Configuration](configuration.md) to choose `dummy`, `huggingface`, or
-  `modelscope` model sources.
+- Read [Configuration](configuration.md) to choose `dummy`, `huggingface`,
+  `modelscope`, or `transformer_lens` model sources.
 - Read [Development](development.md) to add a new probe, monitor, or attributor.
 - Read the API reference for the exact class contracts.

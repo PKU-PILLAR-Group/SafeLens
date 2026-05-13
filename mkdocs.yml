@@ -13,6 +13,8 @@ nav:
   - Development: development.md
   - API Reference:
       - Core: api/core.md
+      - Hooks And Cache: api/hooks.md
+      - Activation Patching: api/patching.md
       - Registry: api/registry.md
       - Pipeline Runner: api/runner.md
       - Model Wrapper: api/model_wrapper.md

@@ -18,9 +18,12 @@ from SafeLens.core.base import (
     SafetyReport,
     TokenAttribution,
 )
+from SafeLens.core.hooks import ActivationCache
+from SafeLens.core.patching import PatchResult, PatchSpec
 
 __all__ = [
     "AttributionResult",
+    "ActivationCache",
     "BaseAttributor",
     "BaseMethodConfig",
     "BaseMonitor",
@@ -32,6 +35,8 @@ __all__ = [
     "OutputConfig",
     "PipelineConfig",
     "PipelineSectionConfig",
+    "PatchResult",
+    "PatchSpec",
     "ProbeResult",
     "RunReport",
     "SafetyReport",

@@ -8,6 +8,7 @@
 # Optional model extras:
 #   .conda/bin/python -m pip install -e ".[models]" --no-build-isolation
 #   .conda/bin/python -m pip install -e ".[modelscope]" --no-build-isolation
+#   .conda/bin/python -m pip install -e ".[transformerlens]" --no-build-isolation
 
 pydantic>=2,<3
 PyYAML>=6,<7

@@ -15,12 +15,14 @@
   <img alt="MkDocs" src="https://img.shields.io/badge/docs-MkDocs-526CFE">
   <img alt="HuggingFace" src="https://img.shields.io/badge/models-HuggingFace-FFCC4D">
   <img alt="ModelScope" src="https://img.shields.io/badge/models-ModelScope-624AFF">
+  <img alt="TransformerLens" src="https://img.shields.io/badge/hooks-TransformerLens-18A999">
 </p>
 
 <p>
   <a href="#overview">Overview</a> ·
   <a href="#quick-start">Quick Start</a> ·
   <a href="#model-sources">Model Sources</a> ·
+  <a href="#hook-and-patching-primitives">Hooks & Patching</a> ·
   <a href="#interfaces">Interfaces</a> ·
   <a href="#documentation">Documentation</a>
 </p>
@@ -48,7 +50,7 @@ systems such as FlagSafe.
     </td>
     <td width="33%">
       <b>Model Source Choice</b><br>
-      Use dummy, HuggingFace, or ModelScope backends without changing method code.
+      Use dummy, HuggingFace, ModelScope, or TransformerLens backends without changing method code.
     </td>
   </tr>
   <tr>
@@ -61,8 +63,8 @@ systems such as FlagSafe.
       Convert internal <code>SafetyReport</code> objects into policy-style payloads.
     </td>
     <td width="33%">
-      <b>Research Friendly</b><br>
-      Includes tests, Ruff, mypy, pre-commit, CI, and MkDocs scaffolding.
+      <b>Hook And Patch Primitives</b><br>
+      Cache activations, register temporary hooks, and run generic activation patches.
     </td>
   </tr>
 </table>
@@ -77,14 +79,78 @@ flowchart LR
     Registry --> Probe["BaseProbe"]
     Registry --> Monitor["BaseMonitor"]
     Registry --> Attributor["BaseAttributor"]
+    Runner --> Hooks["ActivationCache + Hooks"]
+    Hooks --> Patching["Generic Activation Patching"]
     Model --> HF["HuggingFace"]
     Model --> MS["ModelScope"]
+    Model --> TL["TransformerLens"]
     Model --> Dummy["Dummy"]
     Probe --> Report["SafetyReport"]
     Monitor --> Report
     Attributor --> Report
+    Patching --> Report
     Report --> JSON["RunReport JSON"]
     Report --> FlagSafe["FlagSafeAdapter"]
+```
+
+## Hook And Patching Primitives
+
+SafeLens includes a small TransformerLens-inspired operation layer that algorithms can reuse
+directly. It is intentionally independent of any specific safety method.
+The design follows the same broad concepts as TransformerLens hook points, activation
+caches, and generic activation patching while keeping SafeLens dependency-light.
+
+<table>
+  <tr>
+    <th>Primitive</th>
+    <th>Purpose</th>
+  </tr>
+  <tr>
+    <td><code>ActivationCache</code></td>
+    <td>Dictionary-like cache for named activations such as <code>layer_0</code>.</td>
+  </tr>
+  <tr>
+    <td><code>temporary_hooks</code></td>
+    <td>Register hooks for one run and always remove them afterward.</td>
+  </tr>
+  <tr>
+    <td><code>cache_activations</code></td>
+    <td>Run a model while collecting selected layer activations.</td>
+  </tr>
+  <tr>
+    <td><code>PatchSpec</code></td>
+    <td>Describe one activation replacement or additive patch.</td>
+  </tr>
+  <tr>
+    <td><code>generic_activation_patch</code></td>
+    <td>Run a grid of activation patches and score each patched output.</td>
+  </tr>
+  <tr>
+    <td><code>get_act_patch_*</code></td>
+    <td>Patch residual streams, MLP outputs, attention outputs, head vectors, patterns, and scores.</td>
+  </tr>
+</table>
+
+Supported component families include residual stream (`resid_pre`, `resid_mid`,
+`resid_post`), block outputs (`attn_out`, `mlp_out`), attention head vectors
+(`q`, `k`, `v`, `z`, `result`), attention patterns, and attention scores.
+The API can use SafeLens names such as `layer_0.resid_pre` or
+TransformerLens-style names such as `blocks.0.hook_resid_pre`.
+
+```python
+from SafeLens.core.hooks import ActivationCache
+from SafeLens.core.patching import get_act_patch_resid_pre
+
+clean_cache = ActivationCache({"layer_0.resid_pre": clean_resid_pre})
+
+results = get_act_patch_resid_pre(
+    model,
+    corrupted_batch,
+    clean_cache,
+    metric=lambda output: float(output["score"]),
+    layers=[0],
+    positions=[3],
+)
 ```
 
 ## Quick Start
@@ -132,6 +198,10 @@ Expected CLI summary:
     <td>ModelScope models</td>
     <td><code>python -m pip install -e ".[modelscope]" --no-build-isolation</code></td>
   </tr>
+  <tr>
+    <td>TransformerLens HookPoints</td>
+    <td><code>python -m pip install -e ".[transformerlens]" --no-build-isolation</code></td>
+  </tr>
 </table>
 
 ## Model Sources
@@ -174,6 +244,19 @@ model:
   trust_remote_code: true
   cache_dir: ./.cache/modelscope
   local_dir: ./models/qwen2.5-0.5b
+```
+
+### TransformerLens
+
+Use this backend when you need full HookPoint-level patching over residual streams,
+attention heads, attention patterns, and MLP outputs.
+
+```yaml
+model:
+  source: transformer_lens
+  name: gpt2-small
+  dtype: auto
+  device: cpu
 ```
 
 ## Pipeline Configuration
