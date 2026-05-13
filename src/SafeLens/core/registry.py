@@ -1,4 +1,4 @@
-"""Decorator-based registries for pluggable SafeProbe methods."""
+"""Decorator-based registries for pluggable SafeLens methods."""
 
 from __future__ import annotations
 

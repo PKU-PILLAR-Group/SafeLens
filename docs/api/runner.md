@@ -12,7 +12,7 @@ The pipeline runner is the executable vertical slice:
 Run it with:
 
 ```bash
-safeprobe run --config examples/config.yaml
+safelens run --config examples/config.yaml
 ```
 
 ::: SafeLens.pipelines.runner

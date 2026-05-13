@@ -1,4 +1,4 @@
-"""Core SafeProbe contracts and registries."""
+"""Core SafeLens contracts and registries."""
 
 from SafeLens.core.base import (
     AttributionResult,

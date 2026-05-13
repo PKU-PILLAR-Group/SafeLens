@@ -1,4 +1,4 @@
-site_name: SafeProbe
+site_name: SafeLens
 theme:
   name: material
 plugins:

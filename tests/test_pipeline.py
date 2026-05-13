@@ -66,7 +66,7 @@ def test_flagsafe_adapter_maps_action(tmp_path: Path) -> None:
     rule = FlagSafeAdapter.to_flagsafe_rule(report.reports[0])
 
     assert rule["action"] == "BLOCK"
-    assert rule["metadata"]["source"] == "safeprobe"
+    assert rule["metadata"]["source"] == "safelens"
 
 
 def test_build_model_wrapper_selects_huggingface() -> None:

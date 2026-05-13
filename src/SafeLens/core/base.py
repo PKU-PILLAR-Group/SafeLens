@@ -1,4 +1,4 @@
-"""Shared contracts for SafeProbe methods, reports, and pipelines."""
+"""Shared contracts for SafeLens methods, reports, and pipelines."""
 
 from __future__ import annotations
 
@@ -132,7 +132,7 @@ class OutputConfig(SerializableModel):
 
 
 class PipelineConfig(SerializableModel):
-    """Top-level YAML config for `safeprobe run`."""
+    """Top-level YAML config for `safelens run`."""
 
     model: ModelLoadConfig = Field(default_factory=ModelLoadConfig)
     pipeline: PipelineSectionConfig = Field(default_factory=PipelineSectionConfig)

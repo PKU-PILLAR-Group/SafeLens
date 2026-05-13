@@ -10,9 +10,9 @@
 建议采用 `src` 布局，避免路径污染：
 
 ```
-safe-probe/
+safelens/
 ├── src/
-│   └── safeprobe/              # 包名（可改）
+│   └── safelens/              # 包名（可改）
 │       ├── __init__.py
 │       ├── core/               # 基础接口、抽象类
 │       ├── probes/             # 内生探针模块 (佳然)
@@ -146,7 +146,7 @@ repos:
 1. 在仓库根目录创建 `docs/` 文件夹。
 2. `mkdocs.yml` 配置：
 ```yaml
-site_name: SafeProbe
+site_name: SafeLens
 theme:
   name: material
 plugins:
@@ -171,7 +171,7 @@ nav:
 
 ## 4. Pipeline 集成：让科研流一键跑通
 
-目标：提供命令 `safeprobe run --config config.yaml`，自动加载模型、挂载一组探针/监测器，对测试集跑完并输出报告。
+目标：提供命令 `safelens run --config config.yaml`，自动加载模型、挂载一组探针/监测器，对测试集跑完并输出报告。
 
 ### 你需要做的三件事：
 
@@ -248,7 +248,7 @@ def register_probe(name):
 
 ## 你（棋耀）第一周的启动清单
 
-- **Day 1-2**：创建仓库，如 `SafeProbe`，配置 `pyproject.toml`，安装依赖，推空骨架。
+- **Day 1-2**：创建仓库，如 `SafeLens`，配置 `pyproject.toml`，安装依赖，推空骨架。
 - **Day 3**：写出 `core/base.py` 全部抽象类 + `core/registry.py`，并加 docstring。
 - **Day 4**：完成 `utils/model_wrapper.py` 第一版（能加载一个 HF 模型并注册 forward hook）。
 - **Day 5**：写出 `pipelines/runner.py` 和一个 `examples/demo_pipeline.py`，确保能跑通一个虚拟探针。

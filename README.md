@@ -1,6 +1,6 @@
-# SafeProbe
+# SafeLens
 
-SafeProbe is the starter architecture for SafeLens safety research workflows. It provides:
+SafeLens is a pluggable safety analysis infrastructure for LLM research workflows. It provides:
 
 - shared contracts for probes, monitors, attribution methods, model wrappers, and reports
 - a decorator-based registry so research methods can plug into a common runner
@@ -15,7 +15,7 @@ conda create -p ./.conda python=3.10 -y
 conda run -p ./.conda python -m pip install -r requirements-dev.txt
 conda run -p ./.conda python -m pip install -e . --no-build-isolation
 conda run -p ./.conda pytest
-conda run -p ./.conda safeprobe run --config examples/config.yaml
+conda run -p ./.conda safelens run --config examples/config.yaml
 ```
 
 The default example uses `model.source: dummy`, so it does not download a model.
@@ -44,7 +44,7 @@ src/SafeLens/
 ## Running a Pipeline
 
 ```bash
-safeprobe run --config examples/config.yaml
+safelens run --config examples/config.yaml
 ```
 
 The runner loads the configured model wrapper, instantiates registered probes, monitors, and

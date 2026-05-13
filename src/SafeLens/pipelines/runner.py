@@ -70,7 +70,7 @@ class PipelineRunner:
         try:
             batches = list(dataset if dataset is not None else self.config.dataset)
             if not batches:
-                batches = [{"id": "demo", "text": "This is a benign SafeProbe demo sample."}]
+                batches = [{"id": "demo", "text": "This is a benign SafeLens demo sample."}]
 
             reports = [self._run_one(index, batch) for index, batch in enumerate(batches)]
             run_report = RunReport(reports=reports, summary=self._summarize(reports))

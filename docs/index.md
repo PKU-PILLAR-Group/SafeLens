@@ -1,6 +1,6 @@
-# SafeProbe
+# SafeLens
 
-SafeProbe is the infrastructure layer for SafeLens safety experiments. It gives the
+SafeLens is the infrastructure layer for LLM safety experiments. It gives the
 team a shared contract for model loading, probes, monitors, attribution methods,
 pipeline execution, report generation, and future FlagSafe integration.
 
@@ -15,7 +15,7 @@ model.
 - Serializable report models such as `ProbeResult`, `MonitoringSignal`,
   `AttributionResult`, `SafetyReport`, and `RunReport`.
 - A plugin registry for loading probes, monitors, and attributors by name.
-- A YAML-driven pipeline runner exposed through `safeprobe run`.
+- A YAML-driven pipeline runner exposed through `safelens run`.
 - Model loading wrappers for dummy, HuggingFace, and ModelScope sources.
 - A FlagSafe adapter boundary for converting internal reports to policy payloads.
 - Tests, Ruff, mypy, pre-commit, GitHub Actions, and MkDocs configuration.
@@ -25,7 +25,7 @@ model.
 Run the dependency-free dummy pipeline:
 
 ```bash
-safeprobe run --config examples/config.yaml
+safelens run --config examples/config.yaml
 ```
 
 The command writes `safety_scan.json` and prints a summary like:

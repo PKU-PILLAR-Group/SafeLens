@@ -1,6 +1,6 @@
 # Configuration
 
-SafeProbe pipelines are configured with YAML. A minimal config has four sections:
+SafeLens pipelines are configured with YAML. A minimal config has four sections:
 
 ```yaml
 model:

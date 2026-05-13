@@ -1,4 +1,4 @@
-"""SafeProbe package."""
+"""SafeLens package."""
 
 from SafeLens.core.base import (
     AttributionResult,

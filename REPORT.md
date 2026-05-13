@@ -1,13 +1,12 @@
-# SafeLens / SafeProbe Project Report
+# SafeLens Project Report
 
 ## 1. 项目概览
 
 SafeLens 当前实现的是一个可插拔的模型安全分析基础设施。它的目标不是先写某一个具体安全算法，而是先建立统一的工程骨架，让后续的内生探针、运行时监测、输入或训练数据溯源、steering vector、FlagSafe 适配等模块可以按同一套接口接入。
 
-当前仓库中的 Python 包名是 `SafeLens`，命令行入口保留为 `safeprobe`，同时也提供 `safelens`。项目发布名目前是 `safe-probe`。这意味着：
+当前仓库中的 Python 包名是 `SafeLens`，命令行入口是 `safelens`，项目发布名目前是 `safelens`。这意味着：
 
 ```bash
-safeprobe run --config examples/config.yaml
 safelens run --config examples/config.yaml
 ```
 
@@ -144,7 +143,7 @@ ModelScope 模型加载：
 ### 4.4 运行 dummy pipeline
 
 ```bash
-.conda/bin/safeprobe run --config examples/config.yaml
+.conda/bin/safelens run --config examples/config.yaml
 ```
 
 预期输出类似：
@@ -668,14 +667,13 @@ src/SafeLens/cli.py
 命令：
 
 ```bash
-safeprobe run --config examples/config.yaml
 safelens run --config examples/config.yaml
 ```
 
 支持 JSONL 数据集覆盖：
 
 ```bash
-safeprobe run --config examples/config.yaml --input-jsonl data.jsonl
+safelens run --config examples/config.yaml --input-jsonl data.jsonl
 ```
 
 JSONL 每行是一个 JSON object，例如：
@@ -912,7 +910,7 @@ rules = FlagSafeAdapter.to_flagsafe_batch(reports)
     "attribution_score": report.attribution_score,
     "metadata": {
         "sample_id": report.sample_id,
-        "source": "safeprobe",
+        "source": "safelens",
     },
 }
 ```

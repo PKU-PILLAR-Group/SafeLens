@@ -8,7 +8,7 @@ from SafeLens.core.base import SafetyReport
 
 
 class FlagSafeAdapter:
-    """Convert SafeProbe reports to a FlagSafe-compatible policy payload."""
+    """Convert SafeLens reports to a FlagSafe-compatible policy payload."""
 
     @staticmethod
     def to_flagsafe_rule(report: SafetyReport) -> dict[str, Any]:
@@ -21,7 +21,7 @@ class FlagSafeAdapter:
             "attribution_score": report.attribution_score,
             "metadata": {
                 "sample_id": report.sample_id,
-                "source": "safeprobe",
+                "source": "safelens",
             },
         }
 

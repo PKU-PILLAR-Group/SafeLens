@@ -1,4 +1,4 @@
-"""Command-line entry point for SafeProbe."""
+"""Command-line entry point for SafeLens."""
 
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ def _load_jsonl(path: str | None) -> list[dict[str, Any]] | None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="safeprobe")
+    parser = argparse.ArgumentParser(prog="safelens")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     run_parser = subparsers.add_parser("run", help="run a safety pipeline")
