@@ -1,0 +1,19 @@
+site_name: SafeProbe
+theme:
+  name: material
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [src]
+nav:
+  - Home: index.md
+  - Configuration: configuration.md
+  - Development: development.md
+  - API Reference:
+      - Core: api/core.md
+      - Registry: api/registry.md
+      - Pipeline Runner: api/runner.md
+      - Model Wrapper: api/model_wrapper.md
+      - FlagSafe Adapter: api/flagsafe_adapter.md

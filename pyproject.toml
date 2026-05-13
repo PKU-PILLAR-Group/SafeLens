@@ -1,0 +1,63 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "safe-probe"
+version = "0.1.0"
+description = "Pluggable safety probing, monitoring, attribution, and FlagSafe adapter scaffolding."
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+  { name = "SafeLens Team" }
+]
+dependencies = [
+  "pydantic>=2,<3",
+  "PyYAML>=6,<7"
+]
+
+[project.optional-dependencies]
+models = [
+  "torch>=2",
+  "transformers>=4.40"
+]
+modelscope = [
+  "modelscope>=1.15",
+  "torch>=2",
+  "transformers>=4.40"
+]
+dev = [
+  "mkdocs>=1.6",
+  "mkdocs-material>=9.5",
+  "mkdocstrings[python]>=0.25",
+  "mypy>=1.8",
+  "pre-commit>=3.6",
+  "pytest>=8",
+  "ruff>=0.5"
+]
+
+[project.scripts]
+safeprobe = "SafeLens.cli:main"
+safelens = "SafeLens.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+extend-exclude = [".conda", ".conda-pkgs", ".cache", "site"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["UP006", "UP007"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+ignore_missing_imports = true
+warn_return_any = false

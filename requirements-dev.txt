@@ -1,0 +1,21 @@
+# Development requirements for SafeLens.
+#
+# Recommended setup on a new machine:
+#   conda create -p ./.conda python=3.10 -y
+#   .conda/bin/python -m pip install -r requirements-dev.txt
+#   .conda/bin/python -m pip install -e . --no-build-isolation
+#
+# Optional model extras:
+#   .conda/bin/python -m pip install -e ".[models]" --no-build-isolation
+#   .conda/bin/python -m pip install -e ".[modelscope]" --no-build-isolation
+
+pydantic>=2,<3
+PyYAML>=6,<7
+
+mkdocs>=1.6
+mkdocs-material>=9.5
+mkdocstrings[python]>=0.25
+mypy>=1.8
+pre-commit>=3.6
+pytest>=8
+ruff>=0.5

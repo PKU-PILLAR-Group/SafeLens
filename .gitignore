@@ -1,0 +1,13 @@
+.conda/
+.conda-pkgs/
+.cache/
+.venv/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.pycache/
+__pycache__/
+*.py[cod]
+*.egg-info/
+site/
+safety_scan.json
