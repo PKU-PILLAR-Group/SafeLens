@@ -61,6 +61,30 @@ Install dependencies with:
 python -m pip install -e ".[models]"
 ```
 
+### Qwen3 Dense
+
+Use `qwen3_dense` for Qwen3 dense decoder-only models up to 35B parameters:
+
+```yaml
+model:
+  source: qwen3_dense
+  name: Qwen/Qwen3-8B
+  dtype: bfloat16
+  device: cuda
+  trust_remote_code: true
+```
+
+The wrapper exposes component hooks for `resid_pre`, `resid_mid`, `resid_post`,
+`attn_out`, `mlp_out`, `q`, `k`, `v`, and `z`. Supported dense sizes by name are
+`0.6B`, `1.7B`, `4B`, `8B`, `14B`, and `32B`; MoE variants such as
+`Qwen3-30B-A3B` are rejected.
+
+Install dependencies with:
+
+```bash
+python -m pip install -e ".[models]"
+```
+
 ### ModelScope
 
 Use `modelscope` to download with ModelScope first, then load the local snapshot

@@ -50,7 +50,7 @@ systems such as FlagSafe.
     </td>
     <td width="33%">
       <b>Model Source Choice</b><br>
-      Use dummy, HuggingFace, or ModelScope backends without changing method code.
+      Use dummy, HuggingFace, Qwen3 Dense, or ModelScope backends without changing method code.
     </td>
   </tr>
   <tr>
@@ -82,6 +82,7 @@ flowchart LR
     Runner --> Hooks["ActivationCache + Hooks"]
     Hooks --> Patching["Generic Activation Patching"]
     Model --> HF["HuggingFace"]
+    Model --> Qwen3["Qwen3 Dense"]
     Model --> MS["ModelScope"]
     Model --> Dummy["Dummy"]
     Probe --> Report["SafetyReport"]
@@ -232,6 +233,26 @@ model:
   trust_remote_code: true
   cache_dir: ./.cache/huggingface
 ```
+
+### Qwen3 Dense
+
+Use `qwen3_dense` for Qwen3 dense decoder-only models up to 35B parameters. The
+adapter exposes SafeLens component hooks for `resid_pre`, `resid_mid`,
+`resid_post`, `attn_out`, `mlp_out`, `q`, `k`, `v`, and `z`.
+
+```yaml
+model:
+  source: qwen3_dense
+  name: Qwen/Qwen3-8B
+  dtype: bfloat16
+  device: cuda
+  trust_remote_code: true
+```
+
+Supported dense sizes by name are `0.6B`, `1.7B`, `4B`, `8B`, `14B`, and `32B`.
+MoE variants such as `Qwen3-30B-A3B` are rejected by this wrapper. Attention
+`pattern` and `attn_scores` hooks are intentionally marked unsupported until the
+attention forward pass is instrumented directly.
 
 ### ModelScope
 

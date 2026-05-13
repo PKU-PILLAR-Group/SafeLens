@@ -2,12 +2,27 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Sequence
 from inspect import Parameter, signature
 from typing import Any
 
 from SafeLens.core.base import Batch, HookFn, LayerRef, ModelLoadConfig, ModelWrapper
 from SafeLens.core.hooks import activation_name_for_layer
+
+_QWEN3_DENSE_MAX_PARAMS_B = 35.0
+_QWEN3_PATCHABLE_COMPONENTS = {
+    "resid_pre",
+    "resid_mid",
+    "resid_post",
+    "attn_out",
+    "mlp_out",
+    "q",
+    "k",
+    "v",
+    "z",
+}
+_QWEN3_ATTENTION_COMPONENTS = {"pattern", "attn_scores"}
 
 
 class _RemovableHandle:
@@ -297,6 +312,400 @@ class HuggingFaceModelWrapper(ModelWrapper):
         raise KeyError(f"Could not resolve layer index {layer} for model {type(model).__name__}")
 
 
+class Qwen3DenseModelWrapper(HuggingFaceModelWrapper):
+    """Qwen3 dense wrapper exposing SafeLens component hook names.
+
+    Supported model family: Qwen3 dense language models up to 35B parameters
+    (`0.6B`, `1.7B`, `4B`, `8B`, `14B`, and `32B`). MoE variants such as
+    `30B-A3B` and non-dense/VL/Coder variants are intentionally rejected.
+    """
+
+    def load_model(self) -> Any:
+        validate_qwen3_dense_model_name(self.name)
+        model = super().load_model()
+        self._validate_loaded_qwen3_dense_model(model)
+        return model
+
+    def add_hook(self, layer: LayerRef, hook_fn: HookFn) -> Any:
+        component_ref = parse_qwen3_component_ref(layer)
+        if component_ref is None:
+            return super().add_hook(layer, hook_fn)
+        layer_index, component = component_ref
+        handle = self._register_qwen3_component_hook(layer_index, component, hook_fn)
+        self._hooks.append(handle)
+        return handle
+
+    def run_with_cache(
+        self,
+        batch: Batch,
+        layers: Sequence[LayerRef] | None = None,
+    ) -> tuple[Any, dict[str, Any]]:
+        model = self._require_model()
+        cache: dict[str, Any] = {}
+        temp_handles: list[Any] = []
+
+        for layer in layers or []:
+            component_ref = parse_qwen3_component_ref(layer)
+            if component_ref is None:
+                module = self._resolve_layer(model, layer)
+
+                def cache_hook(
+                    _module: Any,
+                    _inputs: Any,
+                    output: Any,
+                    layer_ref: LayerRef = layer,
+                ) -> None:
+                    cache[activation_name_for_layer(layer_ref)] = output
+
+                temp_handles.append(module.register_forward_hook(cache_hook))
+                continue
+
+            layer_index, component = component_ref
+            cache_name = str(layer)
+            temp_handles.append(
+                self._register_qwen3_component_hook(
+                    layer_index,
+                    component,
+                    lambda cache_key=cache_name, **kwargs: cache.setdefault(
+                        cache_key,
+                        kwargs["activation"],
+                    ),
+                )
+            )
+
+        try:
+            import torch
+
+            model_inputs = self._prepare_model_inputs(batch)
+            with torch.no_grad():
+                output = model(**model_inputs)
+        finally:
+            for handle in temp_handles:
+                handle.remove()
+
+        return output, cache
+
+    def _register_qwen3_component_hook(
+        self,
+        layer_index: int,
+        component: str,
+        hook_fn: HookFn,
+    ) -> Any:
+        if component in _QWEN3_ATTENTION_COMPONENTS:
+            raise NotImplementedError(
+                "Qwen3 dense attention pattern/scores hooks require attention-forward "
+                "instrumentation and are not exposed by raw Transformers modules yet."
+            )
+        if component not in _QWEN3_PATCHABLE_COMPONENTS:
+            raise KeyError(f"Unsupported Qwen3 dense component {component!r}.")
+
+        qwen_layer = self._qwen3_layer(layer_index)
+        if component == "resid_pre":
+            return self._register_input_hook(qwen_layer, layer_index, component, hook_fn)
+        if component == "resid_mid":
+            return self._register_input_hook(
+                qwen_layer.post_attention_layernorm,
+                layer_index,
+                component,
+                hook_fn,
+            )
+        if component == "resid_post":
+            return self._register_first_output_hook(qwen_layer, layer_index, component, hook_fn)
+        if component == "attn_out":
+            return self._register_first_output_hook(
+                qwen_layer.self_attn,
+                layer_index,
+                component,
+                hook_fn,
+            )
+        if component == "mlp_out":
+            return self._register_tensor_output_hook(
+                qwen_layer.mlp,
+                layer_index,
+                component,
+                hook_fn,
+            )
+        if component in {"q", "k", "v"}:
+            projection = getattr(qwen_layer.self_attn, f"{component}_proj")
+            return self._register_head_projection_hook(
+                projection,
+                layer_index,
+                component,
+                hook_fn,
+            )
+        return self._register_z_hook(qwen_layer.self_attn.o_proj, layer_index, hook_fn)
+
+    def _register_input_hook(
+        self,
+        module: Any,
+        layer_index: int,
+        component: str,
+        hook_fn: HookFn,
+    ) -> Any:
+        def pre_hook(_module: Any, inputs: tuple[Any, ...]) -> tuple[Any, ...] | None:
+            if not inputs:
+                return None
+            patched = _call_qwen3_component_hook(
+                hook_fn,
+                activation=inputs[0],
+                layer=layer_index,
+                component=component,
+            )
+            if patched is None:
+                return None
+            return (patched, *inputs[1:])
+
+        return module.register_forward_pre_hook(pre_hook)
+
+    def _register_first_output_hook(
+        self,
+        module: Any,
+        layer_index: int,
+        component: str,
+        hook_fn: HookFn,
+    ) -> Any:
+        def forward_hook(_module: Any, _inputs: Any, output: Any) -> Any:
+            activation = _first_output(output)
+            patched = _call_qwen3_component_hook(
+                hook_fn,
+                activation=activation,
+                layer=layer_index,
+                component=component,
+            )
+            if patched is None:
+                return None
+            return _replace_first_output(output, patched)
+
+        return module.register_forward_hook(forward_hook)
+
+    def _register_tensor_output_hook(
+        self,
+        module: Any,
+        layer_index: int,
+        component: str,
+        hook_fn: HookFn,
+    ) -> Any:
+        def forward_hook(_module: Any, _inputs: Any, output: Any) -> Any:
+            patched = _call_qwen3_component_hook(
+                hook_fn,
+                activation=output,
+                layer=layer_index,
+                component=component,
+            )
+            return None if patched is None else patched
+
+        return module.register_forward_hook(forward_hook)
+
+    def _register_head_projection_hook(
+        self,
+        module: Any,
+        layer_index: int,
+        component: str,
+        hook_fn: HookFn,
+    ) -> Any:
+        def forward_hook(_module: Any, _inputs: Any, output: Any) -> Any:
+            n_heads = self._heads_for_component(component)
+            activation = _split_qwen3_heads(output, n_heads)
+            patched = _call_qwen3_component_hook(
+                hook_fn,
+                activation=activation,
+                layer=layer_index,
+                component=component,
+            )
+            if patched is None:
+                return None
+            return _merge_qwen3_heads(patched, output)
+
+        return module.register_forward_hook(forward_hook)
+
+    def _register_z_hook(self, module: Any, layer_index: int, hook_fn: HookFn) -> Any:
+        def pre_hook(_module: Any, inputs: tuple[Any, ...]) -> tuple[Any, ...] | None:
+            if not inputs:
+                return None
+            activation = _split_qwen3_heads(inputs[0], self._heads_for_component("z"))
+            patched = _call_qwen3_component_hook(
+                hook_fn,
+                activation=activation,
+                layer=layer_index,
+                component="z",
+            )
+            if patched is None:
+                return None
+            return (_merge_qwen3_heads(patched, inputs[0]), *inputs[1:])
+
+        return module.register_forward_pre_hook(pre_hook)
+
+    def _qwen3_layer(self, layer_index: int) -> Any:
+        layers = _get_qwen3_layers(self._require_model())
+        try:
+            return layers[layer_index]
+        except IndexError as exc:
+            raise KeyError(f"Unknown Qwen3 dense layer index {layer_index}.") from exc
+
+    def _heads_for_component(self, component: str) -> int:
+        config = getattr(self._require_model(), "config", None)
+        if component in {"k", "v"}:
+            n_key_value_heads = getattr(config, "num_key_value_heads", None)
+            if n_key_value_heads is not None:
+                return int(n_key_value_heads)
+        n_heads = getattr(config, "num_attention_heads", None)
+        if n_heads is None:
+            raise ValueError("Qwen3 config does not expose num_attention_heads.")
+        return int(n_heads)
+
+    @staticmethod
+    def _validate_loaded_qwen3_dense_model(model: Any) -> None:
+        config = getattr(model, "config", None)
+        model_type = str(getattr(config, "model_type", "")).lower()
+        if model_type not in {"qwen3", ""}:
+            raise ValueError(f"Expected a Qwen3 dense model, got model_type={model_type!r}.")
+        if getattr(config, "num_experts", None) is not None:
+            raise ValueError("Qwen3 MoE models are not supported by Qwen3DenseModelWrapper.")
+
+
+def parse_qwen3_component_ref(layer: LayerRef) -> tuple[int, str] | None:
+    """Parse SafeLens or TransformerLens-style Qwen3 component hook names."""
+    if not isinstance(layer, str):
+        return None
+
+    safe_match = re.fullmatch(r"layer_(\d+)\.([a-z_]+)", layer)
+    if safe_match is not None:
+        return int(safe_match.group(1)), _normalize_qwen3_component(safe_match.group(2))
+
+    block_match = re.fullmatch(r"blocks\.(\d+)\.(?:([a-z_]+)\.)?hook_([a-z_]+)", layer)
+    if block_match is not None:
+        layer_index = int(block_match.group(1))
+        layer_type = block_match.group(2)
+        component = _normalize_qwen3_component(block_match.group(3), layer_type=layer_type)
+        return layer_index, component
+
+    return None
+
+
+def qwen3_dense_size_billion(model_name: str) -> float | None:
+    """Return the parsed Qwen3 model size in billions when present in the name."""
+    match = re.search(r"Qwen3[-_/](\d+(?:\.\d+)?)B", model_name, flags=re.IGNORECASE)
+    if match is None:
+        return None
+    return float(match.group(1))
+
+
+def is_supported_qwen3_dense_model_name(model_name: str) -> bool:
+    """Return whether a model name looks like a supported Qwen3 <=35B dense model."""
+    lowered = model_name.lower()
+    if "qwen3" not in lowered:
+        return False
+    if any(marker in lowered for marker in ("moe", "-a", "_a", "coder", "vl")):
+        return False
+    size_b = qwen3_dense_size_billion(model_name)
+    return size_b is None or size_b <= _QWEN3_DENSE_MAX_PARAMS_B
+
+
+def validate_qwen3_dense_model_name(model_name: str) -> None:
+    """Reject known unsupported Qwen3 MoE or >35B model names before loading."""
+    lowered = model_name.lower()
+    if "qwen3" not in lowered:
+        return
+    if any(marker in lowered for marker in ("moe", "-a", "_a", "coder", "vl")):
+        raise ValueError(f"Unsupported Qwen3 non-dense model name: {model_name!r}.")
+    size_b = qwen3_dense_size_billion(model_name)
+    if size_b is not None and size_b > _QWEN3_DENSE_MAX_PARAMS_B:
+        raise ValueError(
+            f"Unsupported Qwen3 model size {size_b:g}B. "
+            f"Only dense models <= {_QWEN3_DENSE_MAX_PARAMS_B:g}B are supported."
+        )
+
+
+def _normalize_qwen3_component(component: str, *, layer_type: str | None = None) -> str:
+    aliases = {
+        "hook_resid_pre": "resid_pre",
+        "hook_resid_mid": "resid_mid",
+        "hook_resid_post": "resid_post",
+        "resid_pre": "resid_pre",
+        "resid_mid": "resid_mid",
+        "resid_post": "resid_post",
+        "hook_attn_out": "attn_out",
+        "attn_out": "attn_out",
+        "hook_mlp_out": "mlp_out",
+        "mlp_out": "mlp_out",
+        "hook_q": "q",
+        "hook_k": "k",
+        "hook_v": "v",
+        "hook_z": "z",
+        "hook_pattern": "pattern",
+        "hook_attn_scores": "attn_scores",
+        "q": "q",
+        "k": "k",
+        "v": "v",
+        "z": "z",
+        "result": "z",
+        "pattern": "pattern",
+        "attn_scores": "attn_scores",
+    }
+    if layer_type == "mlp" and component in {"post", "hook_post"}:
+        return "mlp_out"
+    return aliases.get(component, component)
+
+
+def _call_qwen3_component_hook(
+    hook_fn: HookFn,
+    *,
+    activation: Any,
+    layer: int,
+    component: str,
+) -> Any:
+    try:
+        return hook_fn(
+            activation=activation,
+            output=activation,
+            layer=layer,
+            component=component,
+        )
+    except TypeError:
+        return hook_fn(None, None, activation)
+
+
+def _get_qwen3_layers(model: Any) -> Any:
+    base_model = getattr(model, "model", model)
+    layers = getattr(base_model, "layers", None)
+    if layers is None:
+        raise KeyError("Could not find Qwen3 decoder layers at `model.layers`.")
+    return layers
+
+
+def _first_output(output: Any) -> Any:
+    if isinstance(output, tuple):
+        return output[0]
+    return output
+
+
+def _replace_first_output(output: Any, patched: Any) -> Any:
+    if isinstance(output, tuple):
+        return (patched, *output[1:])
+    return patched
+
+
+def _split_qwen3_heads(activation: Any, n_heads: int) -> Any:
+    shape = getattr(activation, "shape", None)
+    view = getattr(activation, "view", None)
+    if shape is None or not callable(view):
+        return activation
+    head_dim = int(shape[-1]) // n_heads
+    return activation.view(*shape[:-1], n_heads, head_dim)
+
+
+def _merge_qwen3_heads(activation: Any, reference: Any) -> Any:
+    shape = getattr(activation, "shape", None)
+    reshape = getattr(activation, "reshape", None)
+    if shape is None or not callable(reshape) or len(shape) < 2:
+        return activation
+    reference_shape = getattr(reference, "shape", None)
+    hidden_size = int(shape[-2]) * int(shape[-1])
+    if reference_shape is not None:
+        hidden_size = int(reference_shape[-1])
+    return activation.reshape(*shape[:-2], hidden_size)
+
+
 class ModelScopeModelWrapper(HuggingFaceModelWrapper):
     """ModelScope-backed wrapper that downloads a snapshot, then loads it with Transformers."""
 
@@ -364,6 +773,17 @@ def build_model_wrapper(config: ModelLoadConfig) -> ModelWrapper:
             load_kwargs=config.load_kwargs,
             tokenizer_kwargs=config.tokenizer_kwargs,
         )
+    if source in {"qwen3", "qwen3_dense", "qwen3-dense"}:
+        return Qwen3DenseModelWrapper(
+            name=config.name,
+            dtype=config.dtype,
+            device=config.device,
+            revision=config.revision,
+            cache_dir=config.cache_dir,
+            trust_remote_code=config.trust_remote_code,
+            load_kwargs=config.load_kwargs,
+            tokenizer_kwargs=config.tokenizer_kwargs,
+        )
     if source in {"modelscope", "ms"}:
         return ModelScopeModelWrapper(
             name=config.name,
@@ -379,5 +799,5 @@ def build_model_wrapper(config: ModelLoadConfig) -> ModelWrapper:
         )
     raise ValueError(
         "Unsupported model source "
-        f"{config.source!r}. Expected one of: dummy, huggingface, modelscope."
+        f"{config.source!r}. Expected one of: dummy, huggingface, qwen3_dense, modelscope."
     )

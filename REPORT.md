@@ -23,7 +23,7 @@ from SafeLens.pipelines.runner import PipelineRunner
 - 插件注册机制。
 - YAML 驱动的 pipeline runner。
 - dummy 纵向切片，可在不下载模型的情况下验证全流程。
-- HuggingFace 和 ModelScope 两种真实模型来源接口。
+- HuggingFace、Qwen3 Dense 和 ModelScope 真实模型来源接口。
 - TransformerLens 风格的 activation cache、临时 hook 和 generic activation patch 基础操作。
 - FlagSafe 适配器骨架。
 - README、MkDocs 文档、测试、CI、pre-commit、Ruff、mypy 配置。
@@ -41,7 +41,7 @@ SafeLens 面向的是模型安全研究和工程集成之间的中间层。它�
 - 方法实现依赖抽象接口，而不是直接依赖具体模型或具体 pipeline。
 - 所有结果返回统一的 Pydantic 数据结构，便于序列化和跨系统传输。
 - 方法通过注册表按名字加载，配置文件可以决定运行哪些 probe、monitor、attributor。
-- 模型来源可配置，支持 dummy、HuggingFace、ModelScope。
+- 模型来源可配置，支持 dummy、HuggingFace、Qwen3 Dense、ModelScope。
 - hook 和 patching 操作先作为基础层实现，具体算法复用这些操作。
 - FlagSafe 相关逻辑在 adapter 层隔离，避免污染核心研究接口。
 
@@ -204,7 +204,7 @@ output:
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
-| `source` | `str` | 模型来源。支持 `dummy`、`huggingface`、`hf`、`modelscope`、`ms` |
+| `source` | `str` | 模型来源。支持 `dummy`、`huggingface`、`hf`、`qwen3_dense`、`qwen3`、`modelscope`、`ms` |
 | `name` | `str` | 模型名或 dummy 名称 |
 | `dtype` | `str` | 精度。常见值为 `float32`、`float16`、`bfloat16`、`auto` |
 | `device` | `str | null` | 设备，如 `cpu`、`cuda`、`mps` |
@@ -765,7 +765,7 @@ JSONL 每行是一个 JSON object，例如：
 src/SafeLens/utils/model_wrapper.py
 ```
 
-当前支持三类来源。
+当前支持四类来源。
 
 ### 10.1 Dummy
 
@@ -828,7 +828,28 @@ AutoModelForCausalLM.from_pretrained(...)
 - `device` 只做 `.to(device)`，没有自动 device_map 分片。
 - 大模型加载需要自行在 `load_kwargs` 中传入量化、低显存或 device_map 参数。
 
-### 10.3 ModelScope
+### 10.3 Qwen3 Dense
+
+配置：
+
+```yaml
+model:
+  source: qwen3_dense
+  name: Qwen/Qwen3-8B
+  dtype: bfloat16
+  device: cuda
+  trust_remote_code: true
+```
+
+适配范围：
+
+- 支持 Qwen3 dense decoder-only 模型，已按名称限制在 `0.6B`、`1.7B`、`4B`、`8B`、`14B`、`32B` 这类小于等于 35B 的 dense 模型。
+- 明确拒绝 MoE 名称，例如 `Qwen3-30B-A3B`。
+- 暴露 SafeLens 组件 hook：`layer_i.resid_pre`、`layer_i.resid_mid`、`layer_i.resid_post`、`layer_i.attn_out`、`layer_i.mlp_out`、`layer_i.q`、`layer_i.k`、`layer_i.v`、`layer_i.z`。
+- 同时支持 TransformerLens 风格名称解析，例如 `blocks.0.attn.hook_q`。
+- `pattern` 和 `attn_scores` 当前明确报 `NotImplementedError`，因为 raw Transformers 的 Qwen3 attention 默认不会把可修改的 attention probability/scores 作为模块边界暴露出来。
+
+### 10.4 ModelScope
 
 配置：
 
@@ -1082,7 +1103,7 @@ pre-commit 配置位于：
 | Pydantic | v2 |
 | YAML | PyYAML |
 | Torch | 可选，仅真实模型需要 |
-| Transformers | 可选，仅 HuggingFace / ModelScope 真实模型需要 |
+| Transformers | 可选，仅 HuggingFace / Qwen3 Dense / ModelScope 真实模型需要 |
 | ModelScope | 可选，仅 ModelScope 下载需要 |
 
 ### 15.2 模型兼容
@@ -1091,6 +1112,7 @@ pre-commit 配置位于：
 | --- | --- | --- | --- |
 | Dummy | `dummy` | 无下载 | 内存模拟 |
 | HuggingFace | `huggingface` / `hf` | Transformers 内部处理 | `AutoModelForCausalLM.from_pretrained` |
+| Qwen3 Dense | `qwen3_dense` / `qwen3` | Transformers 内部处理 | `AutoModelForCausalLM.from_pretrained` + SafeLens component hooks |
 | ModelScope | `modelscope` / `ms` | `modelscope.snapshot_download` | 本地路径传给 Transformers |
 
 ### 15.3 方法兼容
@@ -1142,4 +1164,4 @@ report.to_dict()
 
 SafeLens 当前已经具备一个可协作、可测试、可扩展的安全分析基础架构。它完成了从 YAML 配置到模型包装、插件实例化、方法执行、报告生成、外部适配的最小闭环。
 
-从工程状态看，项目已经可以支持团队成员并行开发真实方法。后续工作的重点不再是补基础骨架，而是把真实安全研究方法接入现有接口，并通过真实 HuggingFace / ModelScope 模型验证接口是否足够顺手和稳定。
+从工程状态看，项目已经可以支持团队成员并行开发真实方法。后续工作的重点不再是补基础骨架，而是把真实安全研究方法接入现有接口，并通过真实 HuggingFace / Qwen3 Dense / ModelScope 模型验证接口是否足够顺手和稳定。
