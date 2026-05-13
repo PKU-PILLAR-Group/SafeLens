@@ -1,0 +1,26 @@
+model:
+  source: local
+  # Use either `name` or `local_dir` for a local Transformers-compatible model.
+  name: ./models/local-causal-lm
+  local_dir: ./models/local-causal-lm
+  dtype: float16
+  device: cpu
+  trust_remote_code: false
+
+pipeline:
+  risk_threshold: 0.5
+  probes:
+    - name: dummy_probe
+      config:
+        layers: [0]
+        risk_terms: ["jailbreak", "attack", "harmful"]
+        risk_category: ["jailbreak"]
+  monitors: []
+  attributors: []
+
+dataset:
+  - id: local-demo
+    text: "Explain why private model paths should stay out of committed configs."
+
+output:
+  report_path: "./safety_scan.json"

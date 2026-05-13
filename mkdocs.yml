@@ -10,8 +10,16 @@ plugins:
 nav:
   - Home: index.md
   - Configuration: configuration.md
+  - Guides:
+      - Add A Probe: guides/add_probe.md
+      - Add A Monitor: guides/add_monitor.md
+      - Add A Model Adapter: guides/add_model_adapter.md
+      - Hook Naming Convention: guides/hook_naming.md
+      - Qwen3 Dense Support Matrix: guides/qwen3_support.md
+  - Privacy And Security: privacy.md
   - Development: development.md
   - API Reference:
+      - Config Validation: api/config.md
       - Core: api/core.md
       - Hooks And Cache: api/hooks.md
       - Activation Patching: api/patching.md

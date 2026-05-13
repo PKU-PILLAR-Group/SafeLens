@@ -9,6 +9,13 @@
 __pycache__/
 *.py[cod]
 *.egg-info/
+*.bin
+*.ckpt
+*.gguf
+*.onnx
+*.pt
+*.pth
+*.safetensors
 build/
 dist/
 htmlcov/
@@ -17,3 +24,12 @@ coverage.xml
 .coverage.*
 site/
 safety_scan.json
+outputs/
+checkpoints/
+models/
+wandb/
+mlruns/
+runs/
+*.env
+.env
+.env.*

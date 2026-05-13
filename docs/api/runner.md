@@ -15,4 +15,19 @@ Run it with:
 safelens run --config examples/config.yaml
 ```
 
+Validate before running:
+
+```bash
+safelens validate --config examples/config.yaml
+```
+
+Use the runner from Python:
+
+```python
+from SafeLens.pipelines import run_from_config
+
+report = run_from_config("examples/config.yaml")
+print(report.summary)
+```
+
 ::: SafeLens.pipelines.runner

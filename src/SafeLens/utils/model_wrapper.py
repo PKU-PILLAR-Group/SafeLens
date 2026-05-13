@@ -7,7 +7,14 @@ from collections.abc import Callable, Sequence
 from inspect import Parameter, signature
 from typing import Any
 
-from SafeLens.core.base import Batch, HookFn, LayerRef, ModelLoadConfig, ModelWrapper
+from SafeLens.core.base import (
+    SUPPORTED_MODEL_SOURCES,
+    Batch,
+    HookFn,
+    LayerRef,
+    ModelLoadConfig,
+    ModelWrapper,
+)
 from SafeLens.core.hooks import activation_name_for_layer
 
 _QWEN3_DENSE_MAX_PARAMS_B = 35.0
@@ -23,6 +30,19 @@ _QWEN3_PATCHABLE_COMPONENTS = {
     "z",
 }
 _QWEN3_ATTENTION_COMPONENTS = {"pattern", "attn_scores"}
+_QWEN3_COMPONENT_EXAMPLES = (
+    "layer_0.resid_pre",
+    "layer_0.resid_mid",
+    "layer_0.resid_post",
+    "layer_0.attn_out",
+    "layer_0.mlp_out",
+    "layer_0.q",
+    "layer_0.k",
+    "layer_0.v",
+    "layer_0.z",
+    "blocks.0.hook_resid_pre",
+    "blocks.0.attn.hook_q",
+)
 
 
 class _RemovableHandle:
@@ -298,7 +318,13 @@ class HuggingFaceModelWrapper(ModelWrapper):
         if isinstance(layer, str):
             modules = dict(model.named_modules())
             if layer not in modules:
-                raise KeyError(f"Unknown module '{layer}'")
+                examples = ", ".join(list(modules)[:8])
+                raise KeyError(
+                    f"Unknown module or hook name {layer!r}. Use an integer layer index, "
+                    "a module name from model.named_modules(), or a component hook name "
+                    "supported by the selected model adapter. "
+                    f"First available module names: {examples}"
+                )
             return modules[layer]
 
         for path in ("model.layers", "transformer.h", "gpt_neox.layers"):
@@ -309,7 +335,10 @@ class HuggingFaceModelWrapper(ModelWrapper):
                 return target[layer]
             except (AttributeError, IndexError, TypeError):
                 continue
-        raise KeyError(f"Could not resolve layer index {layer} for model {type(model).__name__}")
+        raise KeyError(
+            f"Could not resolve layer index {layer} for model {type(model).__name__}. "
+            "Known decoder-layer paths tried: model.layers, transformer.h, gpt_neox.layers."
+        )
 
 
 class Qwen3DenseModelWrapper(HuggingFaceModelWrapper):
@@ -397,7 +426,12 @@ class Qwen3DenseModelWrapper(HuggingFaceModelWrapper):
                 "instrumentation and are not exposed by raw Transformers modules yet."
             )
         if component not in _QWEN3_PATCHABLE_COMPONENTS:
-            raise KeyError(f"Unsupported Qwen3 dense component {component!r}.")
+            supported = ", ".join(qwen3_supported_hook_components())
+            examples = ", ".join(_QWEN3_COMPONENT_EXAMPLES[:4])
+            raise KeyError(
+                f"Unsupported Qwen3 dense component {component!r}. "
+                f"Supported components: {supported}. Example hook names: {examples}."
+            )
 
         qwen_layer = self._qwen3_layer(layer_index)
         if component == "resid_pre":
@@ -580,6 +614,57 @@ def parse_qwen3_component_ref(layer: LayerRef) -> tuple[int, str] | None:
         return layer_index, component
 
     return None
+
+
+def qwen3_supported_hook_components(*, include_attention: bool = False) -> list[str]:
+    """Return component names accepted by the Qwen3 dense adapter."""
+    components = sorted(_QWEN3_PATCHABLE_COMPONENTS)
+    if include_attention:
+        components.extend(sorted(_QWEN3_ATTENTION_COMPONENTS))
+    return components
+
+
+def qwen3_hook_name_examples() -> list[str]:
+    """Return example SafeLens and TransformerLens-style Qwen3 hook names."""
+    return list(_QWEN3_COMPONENT_EXAMPLES)
+
+
+def validate_qwen3_hook_ref(layer: LayerRef) -> None:
+    """Validate a static Qwen3 dense layer or component hook reference."""
+    if isinstance(layer, int):
+        if layer < 0:
+            raise ValueError("Qwen3 layer indices must be non-negative integers.")
+        return
+    if not isinstance(layer, str):
+        raise ValueError(
+            f"Qwen3 hook references must be integers or strings, got {type(layer).__name__}."
+        )
+
+    component_ref = parse_qwen3_component_ref(layer)
+    if component_ref is None:
+        if layer.startswith("layer_") or layer.startswith("blocks."):
+            examples = ", ".join(_QWEN3_COMPONENT_EXAMPLES[:6])
+            raise ValueError(
+                f"Invalid Qwen3 hook name {layer!r}. Expected SafeLens names such as "
+                f"`layer_0.resid_pre` or TransformerLens-style names such as "
+                f"`blocks.0.attn.hook_q`. Examples: {examples}."
+            )
+        return
+
+    _layer_index, component = component_ref
+    if component in _QWEN3_ATTENTION_COMPONENTS:
+        raise ValueError(
+            f"Qwen3 hook {layer!r} targets {component!r}, which is documented but not "
+            "available through raw Transformers modules yet. Use q/k/v/z, attn_out, "
+            "mlp_out, resid_pre, resid_mid, or resid_post for now."
+        )
+    if component not in _QWEN3_PATCHABLE_COMPONENTS:
+        supported = ", ".join(qwen3_supported_hook_components())
+        examples = ", ".join(_QWEN3_COMPONENT_EXAMPLES[:6])
+        raise ValueError(
+            f"Unsupported Qwen3 hook component {component!r} in {layer!r}. "
+            f"Supported components: {supported}. Examples: {examples}."
+        )
 
 
 def qwen3_dense_size_billion(model_name: str) -> float | None:
@@ -773,6 +858,17 @@ def build_model_wrapper(config: ModelLoadConfig) -> ModelWrapper:
             load_kwargs=config.load_kwargs,
             tokenizer_kwargs=config.tokenizer_kwargs,
         )
+    if source == "local":
+        return HuggingFaceModelWrapper(
+            name=config.local_dir or config.name,
+            dtype=config.dtype,
+            device=config.device,
+            revision=config.revision,
+            cache_dir=config.cache_dir,
+            trust_remote_code=config.trust_remote_code,
+            load_kwargs=config.load_kwargs,
+            tokenizer_kwargs=config.tokenizer_kwargs,
+        )
     if source in {"qwen3", "qwen3_dense", "qwen3-dense"}:
         return Qwen3DenseModelWrapper(
             name=config.name,
@@ -799,5 +895,5 @@ def build_model_wrapper(config: ModelLoadConfig) -> ModelWrapper:
         )
     raise ValueError(
         "Unsupported model source "
-        f"{config.source!r}. Expected one of: dummy, huggingface, qwen3_dense, modelscope."
+        f"{config.source!r}. Expected one of: {', '.join(SUPPORTED_MODEL_SOURCES)}."
     )

@@ -5,6 +5,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from datetime import datetime, timezone
+from difflib import get_close_matches
 from typing import Any, ClassVar
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -12,12 +13,25 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 Batch = Mapping[str, Any]
 HookFn = Callable[..., Any]
 LayerRef = int | str
+SUPPORTED_MODEL_SOURCES = (
+    "dummy",
+    "mock",
+    "none",
+    "huggingface",
+    "hf",
+    "local",
+    "qwen3",
+    "qwen3_dense",
+    "qwen3-dense",
+    "modelscope",
+    "ms",
+)
 
 
 class SerializableModel(BaseModel):
     """Pydantic base model with a stable dictionary export helper."""
 
-    model_config = ConfigDict(arbitrary_types_allowed=True)
+    model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-serializable representation."""
@@ -96,15 +110,19 @@ class BaseMethodConfig(SerializableModel):
 class MethodSpec(SerializableModel):
     """Name and config payload for a registered method."""
 
-    name: str
+    name: str = Field(min_length=1)
     config: dict[str, Any] = Field(default_factory=dict)
 
 
 class ModelLoadConfig(SerializableModel):
     """Configuration for model wrapper construction."""
 
-    name: str = "dummy"
-    source: str = "huggingface"
+    name: str = Field(default="dummy", min_length=1)
+    source: str = Field(
+        default="huggingface",
+        description="Model backend selector.",
+        json_schema_extra={"enum": list(SUPPORTED_MODEL_SOURCES)},
+    )
     dtype: str = "float32"
     device: str | None = None
     revision: str | None = None
@@ -114,6 +132,17 @@ class ModelLoadConfig(SerializableModel):
     load_kwargs: dict[str, Any] = Field(default_factory=dict)
     tokenizer_kwargs: dict[str, Any] = Field(default_factory=dict)
     modelscope_kwargs: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("source")
+    @classmethod
+    def validate_source(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized in SUPPORTED_MODEL_SOURCES:
+            return normalized
+        suggestion = get_close_matches(normalized, SUPPORTED_MODEL_SOURCES, n=1)
+        hint = f" Did you mean {suggestion[0]!r}?" if suggestion else ""
+        expected = ", ".join(SUPPORTED_MODEL_SOURCES)
+        raise ValueError(f"Unsupported model.source {value!r}. Expected one of: {expected}.{hint}")
 
 
 class PipelineSectionConfig(SerializableModel):

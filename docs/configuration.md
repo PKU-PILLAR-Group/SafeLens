@@ -25,6 +25,18 @@ output:
   report_path: "./safety_scan.json"
 ```
 
+Validate a config without loading a real model:
+
+```bash
+safelens validate --config examples/config.yaml
+```
+
+Generate the JSON Schema used by editors and CI:
+
+```bash
+safelens schema --output schemas/pipeline-config.schema.json
+```
+
 ## Model Sources
 
 `model.source` controls how the model is loaded.
@@ -117,6 +129,22 @@ model:
     allow_file_pattern: "*.json"
 ```
 
+### Local
+
+Use `local` for a local Transformers-compatible model directory:
+
+```yaml
+model:
+  source: local
+  name: ./models/local-causal-lm
+  local_dir: ./models/local-causal-lm
+  dtype: float16
+  device: cpu
+```
+
+Keep model directories outside git. The default `.gitignore` excludes `models/`
+and common weight files.
+
 ## Method Lists
 
 Each method is loaded from a registry by `name`:
@@ -137,3 +165,13 @@ pipeline:
       config:
         risk_terms: ["jailbreak", "attack"]
 ```
+
+## Example Configs
+
+| File | Purpose |
+| --- | --- |
+| `examples/config.yaml` | Dependency-free dummy pipeline for CI and demos. |
+| `examples/huggingface_config.yaml` | Direct Transformers/HuggingFace loading. |
+| `examples/modelscope_config.yaml` | ModelScope snapshot download plus Transformers loading. |
+| `examples/qwen3_dense_config.yaml` | Qwen3 Dense component hook examples. |
+| `examples/local_model_config.yaml` | Local model directory loading. |

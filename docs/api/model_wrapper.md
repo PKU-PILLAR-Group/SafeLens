@@ -20,4 +20,15 @@ model:
   name: Qwen/Qwen2.5-0.5B-Instruct
 ```
 
+Minimal Python usage:
+
+```python
+from SafeLens.core.base import ModelLoadConfig
+from SafeLens.utils import build_model_wrapper
+
+model = build_model_wrapper(ModelLoadConfig(source="dummy", name="dummy"))
+model.load_model()
+output, cache = model.run_with_cache({"text": "hello"}, layers=[0])
+```
+
 ::: SafeLens.utils.model_wrapper

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from difflib import get_close_matches
 from typing import Any, TypeVar
 
 from SafeLens.core.base import BaseAttributor, BaseMonitor, BaseProbe
@@ -18,6 +19,13 @@ _ATTRIBUTOR_REGISTRY: dict[str, type[BaseAttributor]] = {}
 
 class RegistryError(KeyError):
     """Raised when a method registry lookup or registration fails."""
+
+
+def load_builtin_methods() -> None:
+    """Import built-in plugins so their registration decorators run."""
+    import SafeLens.attribution.dummy  # noqa: F401
+    import SafeLens.monitors.dummy  # noqa: F401
+    import SafeLens.probes.dummy  # noqa: F401
 
 
 def _register(
@@ -61,7 +69,7 @@ def get_probe(name: str) -> type[BaseProbe]:
     try:
         return _PROBE_REGISTRY[name]
     except KeyError as exc:
-        raise RegistryError(f"Unknown probe '{name}'. Available: {list_probes()}") from exc
+        raise RegistryError(_unknown_name_message("probe", name, list_probes())) from exc
 
 
 def get_monitor(name: str) -> type[BaseMonitor]:
@@ -69,7 +77,7 @@ def get_monitor(name: str) -> type[BaseMonitor]:
     try:
         return _MONITOR_REGISTRY[name]
     except KeyError as exc:
-        raise RegistryError(f"Unknown monitor '{name}'. Available: {list_monitors()}") from exc
+        raise RegistryError(_unknown_name_message("monitor", name, list_monitors())) from exc
 
 
 def get_attributor(name: str) -> type[BaseAttributor]:
@@ -77,8 +85,7 @@ def get_attributor(name: str) -> type[BaseAttributor]:
     try:
         return _ATTRIBUTOR_REGISTRY[name]
     except KeyError as exc:
-        available = list_attributors()
-        raise RegistryError(f"Unknown attributor '{name}'. Available: {available}") from exc
+        raise RegistryError(_unknown_name_message("attributor", name, list_attributors())) from exc
 
 
 def create_probe(name: str, config: dict[str, Any] | None = None) -> BaseProbe:
@@ -109,3 +116,14 @@ def list_monitors() -> list[str]:
 def list_attributors() -> list[str]:
     """List registered attributor names."""
     return sorted(_ATTRIBUTOR_REGISTRY)
+
+
+def _unknown_name_message(kind: str, name: str, available: list[str]) -> str:
+    if not available:
+        return (
+            f"Unknown {kind} {name!r}. No {kind}s are registered. "
+            "Import the plugin module or call load_builtin_methods() for built-ins."
+        )
+    suggestion = get_close_matches(name, available, n=1)
+    hint = f" Did you mean {suggestion[0]!r}?" if suggestion else ""
+    return f"Unknown {kind} {name!r}. Available {kind}s: {available}.{hint}"

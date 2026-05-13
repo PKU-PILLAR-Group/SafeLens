@@ -1,0 +1,36 @@
+model:
+  source: qwen3_dense
+  name: Qwen/Qwen3-8B
+  dtype: bfloat16
+  device: cuda
+  trust_remote_code: true
+  cache_dir: ./.cache/huggingface
+
+pipeline:
+  risk_threshold: 0.5
+  probes:
+    - name: dummy_probe
+      config:
+        layers:
+          - layer_0.resid_pre
+          - layer_0.attn_out
+          - layer_0.mlp_out
+          - blocks.0.attn.hook_q
+        risk_terms: ["jailbreak", "attack", "harmful"]
+        risk_category: ["jailbreak"]
+  monitors:
+    - name: dummy_monitor
+      config:
+        threshold: 0.5
+        risk_category: ["jailbreak"]
+  attributors:
+    - name: dummy_attributor
+      config:
+        risk_terms: ["jailbreak", "attack", "harmful"]
+
+dataset:
+  - id: qwen3-demo
+    text: "Explain activation patching for safety analysis."
+
+output:
+  report_path: "./safety_scan.json"

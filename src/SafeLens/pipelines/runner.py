@@ -17,15 +17,15 @@ from SafeLens.core.base import (
     RunReport,
     SafetyReport,
 )
-from SafeLens.core.registry import create_attributor, create_monitor, create_probe
+from SafeLens.core.registry import (
+    create_attributor,
+    create_monitor,
+    create_probe,
+)
+from SafeLens.core.registry import (
+    load_builtin_methods as load_builtin_methods,
+)
 from SafeLens.utils import build_model_wrapper
-
-
-def load_builtin_methods() -> None:
-    """Import built-in plugins so their registration decorators run."""
-    import SafeLens.attribution.dummy  # noqa: F401
-    import SafeLens.monitors.dummy  # noqa: F401
-    import SafeLens.probes.dummy  # noqa: F401
 
 
 def load_pipeline_config(path: str | Path) -> PipelineConfig:
