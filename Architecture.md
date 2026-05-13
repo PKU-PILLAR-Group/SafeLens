@@ -1,4 +1,4 @@
-如果你在团队里是“棋耀”的角色（或负责基础架构），那么要做的是**先把骨架搭好，让佳然、健晖的方法能像插件一样接入，同时保证代码质量和文档，并为 FlagSafe 预留好对接口径**。
+如果你在团队里是 `Infrastructure Owner` 的角色（或负责基础架构），那么要做的是**先把骨架搭好，让 `Probe Method Owner`、`Monitoring/Attribution Method Owner` 的方法能像插件一样接入，同时保证代码质量和文档，并为 FlagSafe 预留好对接口径**。
 
 下面按五个方面，给出可以直接执行的启动步骤。
 
@@ -15,10 +15,10 @@ safelens/
 │   └── safelens/              # 包名（可改）
 │       ├── __init__.py
 │       ├── core/               # 基础接口、抽象类
-│       ├── probes/             # 内生探针模块 (佳然)
-│       ├── monitors/           # 安全监测模块 (健晖)
-│       ├── steering/           # steering vector (佳然)
-│       ├── attribution/        # 数据溯源 (健晖)
+│       ├── probes/             # 内生探针模块 (Probe Method Owner)
+│       ├── monitors/           # 安全监测模块 (Monitoring Method Owner)
+│       ├── steering/           # steering vector (Steering Method Owner)
+│       ├── attribution/        # 数据溯源 (Attribution Method Owner)
 │       ├── pipelines/          # 流程编排
 │       ├── utils/              # 模型加载、hook工具
 │       └── app/                # 第二阶段 Demo (暂空)
@@ -41,7 +41,7 @@ safelens/
 
 ## 2. 基础接口定义：让所有人写的代码遵循同一契约
 
-这是整库的骨架，必须先写并由团队评审，因为佳然、健晖会基于它来开发具体方法。
+这是整库的骨架，必须先写并由团队评审，因为 method owners 会基于它来开发具体方法。
 
 ### 需要定义的抽象类
 1. **模型包装器 `ModelWrapper`**  
@@ -102,7 +102,7 @@ class BaseProbe(ABC):
         ...
 ```
 
-同时为 monitor、attributor 定义类似结构。这些抽象类一写完，就可以让佳然他们基于此写自己的方法，保证后续 Pipeline 可以统一调用。
+同时为 monitor、attributor 定义类似结构。这些抽象类一写完，就可以让 method owners 基于此写自己的方法，保证后续 Pipeline 可以统一调用。
 
 ---
 
@@ -198,7 +198,7 @@ output:
 
 **(b) 编写 `pipelines/runner.py`**
 - 加载模型 → 实例化所有 Probe/Monitor（根据 name 从注册表中查找）→ 执行 attach → 遍历数据集 → 执行 detect/step → 收集结果 → 生成报告。
-- 注意：这个 runner 需要和健晖等人约定的抽象接口对接，每个方法必须有一个唯一的 `name`，并通过简单的注册装饰器注册（如 `@register_probe("linear_probe")`）。
+- 注意：这个 runner 需要和 monitoring/attribution owners 约定的抽象接口对接，每个方法必须有一个唯一的 `name`，并通过简单的注册装饰器注册（如 `@register_probe("linear_probe")`）。
 
 **(c) 创建一个简单的注册机制**（`core/registry.py`）
 ```python
@@ -219,7 +219,7 @@ def register_probe(name):
 
 ## 5. 后期 FlagSafe 适配：预留接口，定义数据格式
 
-智源的 FlagSafe 很可能是一个内容安全防火墙，输入是 prompt+response，输出是安全评分或拦截规则。我们的库需要能作为它的“增强分析层”。
+`FlagSafe provider` 侧的 FlagSafe 很可能是一个内容安全防火墙，输入是 prompt+response，输出是安全评分或拦截规则。我们的库需要能作为它的“增强分析层”。
 
 **适配策略：**
 1. **定义标准输出协议**：我们扫描完一个样本后，生成的 `SafetyReport` 需要包含 FlagSafe 能直接消费的字段，例如：
@@ -242,17 +242,17 @@ def register_probe(name):
 3. **确保所有 Probe/Monitor 返回的数据可序列化**（用 pydantic 并含 `.to_dict()`）。
 4. **保留演示入口**：`app/` 中未来会调用该 Adapter，把前端 Demo 的点击翻译成 FlagSafe 规则下发。
 
-现阶段只要**定义好 `SafetyReport` 的数据结构和 Adapter 接口**，等 9 月与智源对接时直接填充转换细节即可。
+现阶段只要**定义好 `SafetyReport` 的数据结构和 Adapter 接口**，等后续与 `FlagSafe provider` 对接时直接填充转换细节即可。
 
 ---
 
-## 你（棋耀）第一周的启动清单
+## 你（Infrastructure Owner）第一周的启动清单
 
 - **Day 1-2**：创建仓库，如 `SafeLens`，配置 `pyproject.toml`，安装依赖，推空骨架。
 - **Day 3**：写出 `core/base.py` 全部抽象类 + `core/registry.py`，并加 docstring。
 - **Day 4**：完成 `utils/model_wrapper.py` 第一版（能加载一个 HF 模型并注册 forward hook）。
 - **Day 5**：写出 `pipelines/runner.py` 和一个 `examples/demo_pipeline.py`，确保能跑通一个虚拟探针。
 - **Day 6**：配置 CI（pre-commit + ruff + mypy）+ MkDocs 基础结构，并尝试用 GitHub Pages 预览。
-- **Day 7**：与佳然、健晖对齐接口，把抽象类发给他们，让他们分别在自己的分支上实现一个真实方法试试能不能跑通。
+- **Day 7**：与 probe/monitoring/attribution owners 对齐接口，把抽象类发给他们，让他们分别在自己的分支上实现一个真实方法试试能不能跑通。
 
 做到这一步，基础设施就立住了，团队可以并行开发，也不会跑偏。
