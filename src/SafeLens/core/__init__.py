@@ -20,13 +20,20 @@ from SafeLens.core.base import (
 )
 from SafeLens.core.hooks import (
     ActivationCache,
+    ActivationKey,
+    HookDirection,
+    HookPoint,
+    LensHandle,
     NamesFilter,
     activation_name_for_layer,
     cache_activations,
+    get_act_name,
     has_hook_output,
     make_cache_hook,
     matches_names_filter,
     run_with_hooks,
+    safelens_act_name,
+    stack_values,
     temporary_hooks,
 )
 from SafeLens.core.patching import (
@@ -96,6 +103,7 @@ from SafeLens.core.registry import (
 
 __all__ = [
     "ActivationNameStyle",
+    "ActivationKey",
     "AttributionResult",
     "ActivationCache",
     "AxisName",
@@ -103,6 +111,9 @@ __all__ = [
     "BaseMethodConfig",
     "BaseMonitor",
     "BaseProbe",
+    "HookDirection",
+    "HookPoint",
+    "LensHandle",
     "MethodSpec",
     "ModelLoadConfig",
     "ModelWrapper",
@@ -133,6 +144,7 @@ __all__ = [
     "get_attributor",
     "get_monitor",
     "get_probe",
+    "get_act_name",
     "generic_activation_patch",
     "get_act_patch_attn_head_all_pos_every",
     "get_act_patch_attn_head_by_pos_every",
@@ -179,5 +191,7 @@ __all__ = [
     "replace_patch_setter",
     "run_activation_patch",
     "run_with_hooks",
+    "safelens_act_name",
+    "stack_values",
     "temporary_hooks",
 ]

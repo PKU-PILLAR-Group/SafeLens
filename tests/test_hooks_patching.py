@@ -7,9 +7,12 @@ from typing import Any, cast
 from SafeLens.core.base import Batch, HookFn, LayerRef, ModelWrapper
 from SafeLens.core.hooks import (
     ActivationCache,
+    HookPoint,
     cache_activations,
+    get_act_name,
     make_cache_hook,
     matches_names_filter,
+    safelens_act_name,
     temporary_hooks,
 )
 from SafeLens.core.patching import (
@@ -121,6 +124,143 @@ def test_activation_cache_and_name_filter() -> None:
     assert cache.select("layer_1").to_dict() == {"layer_1": [2]}
     assert cache.select(lambda name: name.endswith("_0")).to_dict() == {"layer_0": [1]}
     assert matches_names_filter("layer_0", ["layer_0", "layer_2"])
+
+
+def test_hook_point_runs_orders_and_removes_hooks() -> None:
+    hook = HookPoint("blocks.3.attn.hook_q")
+    hook.ctx["seen"] = True
+    hook.add_hook(lambda activation, _hook: activation + [2])
+    hook.add_hook(lambda activation, _hook: activation + [1], prepend=True, level=1)
+    permanent = hook.add_perma_hook(lambda activation, _hook: activation + [3])
+
+    assert hook([0]) == [0, 1, 2, 3]
+    assert hook.layer() == 3
+    assert hook.has_hooks()
+
+    hook.remove_hooks(level=1)
+    assert hook([0]) == [0, 2, 3]
+    hook.remove_hooks()
+    assert hook([0]) == [0, 3]
+    hook.remove_hooks(including_permanent=True)
+    assert hook([0]) == [0]
+    assert permanent.removed
+    hook.clear_context()
+    assert hook.ctx == {}
+
+
+def test_activation_name_shorthands_resolve_to_transformerlens_and_safelens_names() -> None:
+    assert get_act_name("q", 2) == "blocks.2.attn.hook_q"
+    assert get_act_name("attn", 1) == "blocks.1.attn.hook_pattern"
+    assert get_act_name("scale", 0, "ln1") == "blocks.0.ln1.hook_scale"
+    assert safelens_act_name("attn", 1) == "layer_1.pattern"
+
+
+def test_activation_cache_resolves_tuple_keys_and_matching_keys() -> None:
+    cache = ActivationCache(
+        {
+            "layer_0.resid_pre": [1],
+            "blocks.1.attn.hook_q": [2],
+            "layer_1.mlp_out": [3],
+        }
+    )
+
+    assert cache[("resid_pre", 0)] == [1]
+    assert cache[("q", 1)] == [2]
+    assert cache.resolve_key(("mlp_out", 1)) == "layer_1.mlp_out"
+    assert cache.keys_matching(lambda name: "layer_" in name) == [
+        "layer_0.resid_pre",
+        "layer_1.mlp_out",
+    ]
+
+
+def test_activation_cache_batch_dim_helpers() -> None:
+    cache = ActivationCache({"layer_0": [[1, 2]]})
+    without_batch = cache.remove_batch_dim()
+
+    assert without_batch.to_dict() == {"layer_0": [1, 2]}
+    assert not without_batch.has_batch_dim
+
+    batched = ActivationCache({"layer_0": [[[1], [2]], [[3], [4]]]})
+    sliced = batched.apply_slice_to_batch_dim(1)
+
+    assert sliced.to_dict() == {"layer_0": [[3], [4]]}
+    assert not sliced.has_batch_dim
+
+
+def test_activation_cache_stack_activation_and_accumulated_resid() -> None:
+    cache = ActivationCache(
+        {
+            "layer_0.resid_pre": [[1, 10]],
+            "layer_0.resid_mid": [[2, 20]],
+            "layer_1.resid_pre": [[3, 30]],
+            "layer_1.resid_post": [[4, 40]],
+        }
+    )
+
+    assert cache.stack_activation("resid_pre") == [[[1, 10]], [[3, 30]]]
+
+    stack, labels = cache.accumulated_resid(incl_mid=True, return_labels=True)
+
+    assert labels == ["0_pre", "0_mid", "1_pre", "final_post"]
+    assert stack == [[[1, 10]], [[2, 20]], [[3, 30]], [[4, 40]]]
+
+
+def test_activation_cache_residual_decomposition() -> None:
+    cache = ActivationCache(
+        {
+            "hook_embed": [[1, 0]],
+            "hook_pos_embed": [[0, 1]],
+            "layer_0.attn_out": [[2, 0]],
+            "layer_0.mlp_out": [[0, 3]],
+        }
+    )
+
+    stack, labels = cache.decompose_resid(return_labels=True)
+
+    assert labels == ["embed", "pos_embed", "0_attn_out", "0_mlp_out"]
+    assert stack == [[[1, 0]], [[0, 1]], [[2, 0]], [[0, 3]]]
+
+
+def test_activation_cache_head_and_neuron_decomposition() -> None:
+    cache = ActivationCache(
+        {
+            "layer_0.result": [[[[1, 10], [2, 20]]]],
+            "layer_0.post": [[[5, 6]]],
+        }
+    )
+
+    head_stack, head_labels = cache.stack_head_results(return_labels=True)
+    neuron_stack, neuron_labels = cache.stack_neuron_results(return_labels=True)
+
+    assert head_labels == ["L0H0", "L0H1"]
+    assert head_stack == [[[[1, 10]]], [[[2, 20]]]]
+    assert neuron_labels == ["L0N0", "L0N1"]
+    assert neuron_stack == [[[5]], [[6]]]
+
+
+def test_activation_cache_full_residual_decomposition_and_logit_attrs() -> None:
+    cache = ActivationCache(
+        {
+            "hook_embed": [[1, 0]],
+            "layer_0.result": [[[[2, 0]]]],
+            "layer_0.post": [[[0, 3]]],
+        }
+    )
+
+    stack, labels = cache.get_full_resid_decomposition(return_labels=True)
+    attrs = cache.logit_attrs([[1, 2], [3, 4]], [[10, 1], [1, 10]], apply_ln=False)
+
+    assert labels == ["embed", "L0H0", "L0N0", "L0N1"]
+    assert stack == [[[1, 0]], [[[2, 0]]], [[0]], [[3]]]
+    assert attrs == [12.0, 43.0]
+
+
+def test_activation_cache_apply_ln_and_value_transforms() -> None:
+    cache = ActivationCache({"ln_final.hook_scale": [2, 4], "layer_0": [1, 2]})
+
+    assert cache.apply_ln_to_stack([8, 16], scale_key="ln_final.hook_scale") == [4.0, 4.0]
+    assert cache.apply_to_values(lambda value: value + [9]).to_dict()["layer_0"] == [1, 2, 9]
+    assert cache.detach().to_dict() == cache.to_dict()
 
 
 def test_cache_hook_captures_torch_style_output() -> None:
@@ -282,9 +422,7 @@ def test_attention_head_vector_patch_runs_all_positions() -> None:
 
 def test_attention_pattern_patch_runs_by_dest_and_source_position() -> None:
     model = ComponentWrapper([[[[0, 0], [0, 0]], [[0, 0], [0, 0]]]])
-    clean_cache = ActivationCache(
-        {"layer_0.pattern": [[[[1, 2], [3, 4]], [[5, 6], [7, 8]]]]}
-    )
+    clean_cache = ActivationCache({"layer_0.pattern": [[[[1, 2], [3, 4]], [[5, 6], [7, 8]]]]})
 
     results = get_act_patch_attn_head_pattern_dest_src_pos(
         model,

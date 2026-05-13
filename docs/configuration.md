@@ -93,25 +93,6 @@ model:
     allow_file_pattern: "*.json"
 ```
 
-### TransformerLens
-
-Use `transformer_lens` when patching needs TransformerLens HookPoint names such as
-`blocks.0.hook_resid_pre` or `blocks.0.attn.hook_q`:
-
-```yaml
-model:
-  source: transformer_lens
-  name: gpt2-small
-  dtype: auto
-  device: cpu
-```
-
-Install dependencies with:
-
-```bash
-python -m pip install -e ".[transformerlens]"
-```
-
 ## Method Lists
 
 Each method is loaded from a registry by `name`:

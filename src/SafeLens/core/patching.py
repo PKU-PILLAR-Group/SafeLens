@@ -1169,7 +1169,7 @@ def shape_of(value: Any) -> tuple[int, ...]:
     shape = getattr(value, "shape", None)
     if shape is not None:
         return tuple(int(dim) for dim in shape)
-    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+    if isinstance(value, Sequence) and not isinstance(value, str | bytes):
         if not value:
             return (0,)
         return (len(value), *shape_of(value[0]))

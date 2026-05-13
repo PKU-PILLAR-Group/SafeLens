@@ -50,7 +50,7 @@ systems such as FlagSafe.
     </td>
     <td width="33%">
       <b>Model Source Choice</b><br>
-      Use dummy, HuggingFace, ModelScope, or TransformerLens backends without changing method code.
+      Use dummy, HuggingFace, or ModelScope backends without changing method code.
     </td>
   </tr>
   <tr>
@@ -83,7 +83,6 @@ flowchart LR
     Hooks --> Patching["Generic Activation Patching"]
     Model --> HF["HuggingFace"]
     Model --> MS["ModelScope"]
-    Model --> TL["TransformerLens"]
     Model --> Dummy["Dummy"]
     Probe --> Report["SafetyReport"]
     Monitor --> Report
@@ -106,8 +105,12 @@ caches, and generic activation patching while keeping SafeLens dependency-light.
     <th>Purpose</th>
   </tr>
   <tr>
+    <td><code>HookPoint</code></td>
+    <td>Independent identity hook point with removable, permanent, and ordered hooks.</td>
+  </tr>
+  <tr>
     <td><code>ActivationCache</code></td>
-    <td>Dictionary-like cache for named activations such as <code>layer_0</code>.</td>
+    <td>Dictionary-like cache with shorthand lookup, slicing, stacking, and residual decomposition.</td>
   </tr>
   <tr>
     <td><code>temporary_hooks</code></td>
@@ -136,6 +139,9 @@ Supported component families include residual stream (`resid_pre`, `resid_mid`,
 (`q`, `k`, `v`, `z`, `result`), attention patterns, and attention scores.
 The API can use SafeLens names such as `layer_0.resid_pre` or
 TransformerLens-style names such as `blocks.0.hook_resid_pre`.
+Cache utilities also cover TransformerLens-style workflows such as accumulated
+residual streams, residual decomposition, head/neuron result stacking, layer-norm
+application, and logit attribution.
 
 ```python
 from SafeLens.core.hooks import ActivationCache
@@ -198,10 +204,6 @@ Expected CLI summary:
     <td>ModelScope models</td>
     <td><code>python -m pip install -e ".[modelscope]" --no-build-isolation</code></td>
   </tr>
-  <tr>
-    <td>TransformerLens HookPoints</td>
-    <td><code>python -m pip install -e ".[transformerlens]" --no-build-isolation</code></td>
-  </tr>
 </table>
 
 ## Model Sources
@@ -244,19 +246,6 @@ model:
   trust_remote_code: true
   cache_dir: ./.cache/modelscope
   local_dir: ./models/qwen2.5-0.5b
-```
-
-### TransformerLens
-
-Use this backend when you need full HookPoint-level patching over residual streams,
-attention heads, attention patterns, and MLP outputs.
-
-```yaml
-model:
-  source: transformer_lens
-  name: gpt2-small
-  dtype: auto
-  device: cpu
 ```
 
 ## Pipeline Configuration

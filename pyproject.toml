@@ -26,10 +26,6 @@ modelscope = [
   "torch>=2",
   "transformers>=4.40"
 ]
-transformerlens = [
-  "transformer-lens>=2",
-  "torch>=2"
-]
 dev = [
   "mkdocs>=1.6",
   "mkdocs-material>=9.5",

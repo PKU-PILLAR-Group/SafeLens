@@ -23,7 +23,7 @@ from SafeLens.pipelines.runner import PipelineRunner
 - 插件注册机制。
 - YAML 驱动的 pipeline runner。
 - dummy 纵向切片，可在不下载模型的情况下验证全流程。
-- HuggingFace、ModelScope 和 TransformerLens 三种真实模型来源接口。
+- HuggingFace 和 ModelScope 两种真实模型来源接口。
 - TransformerLens 风格的 activation cache、临时 hook 和 generic activation patch 基础操作。
 - FlagSafe 适配器骨架。
 - README、MkDocs 文档、测试、CI、pre-commit、Ruff、mypy 配置。
@@ -41,7 +41,7 @@ SafeLens 面向的是模型安全研究和工程集成之间的中间层。它�
 - 方法实现依赖抽象接口，而不是直接依赖具体模型或具体 pipeline。
 - 所有结果返回统一的 Pydantic 数据结构，便于序列化和跨系统传输。
 - 方法通过注册表按名字加载，配置文件可以决定运行哪些 probe、monitor、attributor。
-- 模型来源可配置，支持 dummy、HuggingFace、ModelScope、TransformerLens。
+- 模型来源可配置，支持 dummy、HuggingFace、ModelScope。
 - hook 和 patching 操作先作为基础层实现，具体算法复用这些操作。
 - FlagSafe 相关逻辑在 adapter 层隔离，避免污染核心研究接口。
 
@@ -142,12 +142,6 @@ ModelScope 模型加载：
 .conda/bin/python -m pip install -e ".[modelscope]" --no-build-isolation
 ```
 
-TransformerLens HookPoint 模型加载：
-
-```bash
-.conda/bin/python -m pip install -e ".[transformerlens]" --no-build-isolation
-```
-
 ### 4.4 运行 dummy pipeline
 
 ```bash
@@ -210,7 +204,7 @@ output:
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
-| `source` | `str` | 模型来源。支持 `dummy`、`huggingface`、`hf`、`modelscope`、`ms`、`transformer_lens`、`tl` |
+| `source` | `str` | 模型来源。支持 `dummy`、`huggingface`、`hf`、`modelscope`、`ms` |
 | `name` | `str` | 模型名或 dummy 名称 |
 | `dtype` | `str` | 精度。常见值为 `float32`、`float16`、`bfloat16`、`auto` |
 | `device` | `str | null` | 设备，如 `cpu`、`cuda`、`mps` |
@@ -336,7 +330,20 @@ src/SafeLens/core/patching.py
 
 主要接口：
 
+- `HookPoint`：独立的 identity hook point，支持临时 hook、永久 hook、prepend 顺序、方向过滤、上下文 `ctx`、层号解析。
+- `get_act_name` / `safelens_act_name`：支持 TransformerLens 风格和 SafeLens 风格的 activation shorthand。
 - `ActivationCache`：字典式 activation 缓存，支持 `select()`、`clone()` 和 `to_dict()`。
+- `ActivationCache` tuple key：支持 `cache[("resid_pre", 0)]`、`cache[("q", 2)]` 这类索引。
+- `keys_matching`、`apply_to_values`、`detach`、`cpu`、`to`：支持 cache 过滤和批量变换。
+- `remove_batch_dim`、`apply_slice_to_batch_dim`：支持批量维度处理。
+- `stack_activation`：按层堆叠同类 activation。
+- `accumulated_resid`：构造 logit lens 常用 residual stack。
+- `decompose_resid`：将 residual stream 分解为 embedding、attention output、MLP output。
+- `stack_head_results`：按 attention head 堆叠结果向量。
+- `stack_neuron_results`：按 MLP neuron 堆叠激活。
+- `get_full_resid_decomposition`：组合 residual、head、neuron 级分解。
+- `apply_ln_to_stack`：使用缓存的 layer norm scale 处理 residual stack。
+- `logit_attrs`：将 residual component 投影到 token residual direction。
 - `temporary_hooks`：上下文式临时 hook 注册，退出时保证移除 hook。
 - `cache_activations`：运行模型并缓存指定层的 activation。
 - `PatchSpec`：描述一次 patch 操作，包括目标层、目标 index、来源 index、模式和缩放。
@@ -758,7 +765,7 @@ JSONL 每行是一个 JSON object，例如：
 src/SafeLens/utils/model_wrapper.py
 ```
 
-当前支持四类来源。
+当前支持三类来源。
 
 ### 10.1 Dummy
 
@@ -866,38 +873,6 @@ model:
 - ModelScope 下载和 Transformers 加载是两个阶段。
 - `_pretrained_kwargs` 在 ModelScope wrapper 中返回空字典，避免把 HuggingFace 的 `revision` 或 `cache_dir` 再传给本地路径加载。
 - 如果 ModelScope 模型仓库结构不兼容 Transformers，需要额外扩展 wrapper。
-
-### 10.4 TransformerLens
-
-配置：
-
-```yaml
-model:
-  source: transformer_lens
-  name: gpt2-small
-  dtype: auto
-  device: cpu
-```
-
-加载逻辑：
-
-```python
-HookedTransformer.from_pretrained(...)
-```
-
-支持：
-
-- `device`
-- `dtype`
-- `revision`
-- `cache_dir`
-- `load_kwargs`
-
-兼容注意：
-
-- 该 wrapper 面向 TransformerLens 的 HookPoint 名称，例如 `blocks.0.hook_resid_pre`、`blocks.0.attn.hook_q`。
-- 组件级 patching 如果要达到 TransformerLens 语义，应使用 `name_style="transformer_lens"` 或直接传入 HookPoint 字符串。
-- `remove_hooks` 会调用 TransformerLens 的 `reset_hooks()` 清理当前 wrapper 注册的 hooks。
 
 ## 11. 内置 dummy 方法
 
@@ -1075,7 +1050,6 @@ tests/
 - HuggingFace wrapper 选择。
 - ModelScope wrapper 选择。
 - ModelScope `snapshot_download` 参数传递。
-- TransformerLens wrapper 选择和 HookPoint cache 执行。
 
 推荐运行：
 
@@ -1110,7 +1084,6 @@ pre-commit 配置位于：
 | Torch | 可选，仅真实模型需要 |
 | Transformers | 可选，仅 HuggingFace / ModelScope 真实模型需要 |
 | ModelScope | 可选，仅 ModelScope 下载需要 |
-| TransformerLens | 可选，仅 HookPoint 级 patching 后端需要 |
 
 ### 15.2 模型兼容
 
@@ -1119,7 +1092,6 @@ pre-commit 配置位于：
 | Dummy | `dummy` | 无下载 | 内存模拟 |
 | HuggingFace | `huggingface` / `hf` | Transformers 内部处理 | `AutoModelForCausalLM.from_pretrained` |
 | ModelScope | `modelscope` / `ms` | `modelscope.snapshot_download` | 本地路径传给 Transformers |
-| TransformerLens | `transformer_lens` / `tl` | TransformerLens 内部处理 | `HookedTransformer.from_pretrained` |
 
 ### 15.3 方法兼容
 
