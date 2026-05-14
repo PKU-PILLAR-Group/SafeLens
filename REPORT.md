@@ -23,7 +23,8 @@ from SafeLens.pipelines.runner import PipelineRunner
 - 插件注册机制。
 - YAML 驱动的 pipeline runner。
 - dummy 纵向切片，可在不下载模型的情况下验证全流程。
-- HuggingFace、Qwen3 Dense 和 ModelScope 真实模型来源接口。
+- HuggingFace、Qwen3 Dense、TransformerLens-compatible 和 ModelScope 真实模型来源接口。
+- SafeLens model bridge：用 architecture adapter 把 GPT-2、GPT-J、GPT-Neo、GPT-NeoX/Pythia、BLOOM/Falcon、MPT、Phi、OPT、BERT、T5 和 LLaMA-like 模型映射到统一 component hook vocabulary。
 - TransformerLens 风格的 activation cache、临时 hook 和 generic activation patch 基础操作。
 - FlagSafe 适配器骨架。
 - README、MkDocs 文档、测试、CI、pre-commit、Ruff、mypy 配置。
@@ -41,7 +42,7 @@ SafeLens 面向的是模型安全研究和工程集成之间的中间层。它�
 - 方法实现依赖抽象接口，而不是直接依赖具体模型或具体 pipeline。
 - 所有结果返回统一的 Pydantic 数据结构，便于序列化和跨系统传输。
 - 方法通过注册表按名字加载，配置文件可以决定运行哪些 probe、monitor、attributor。
-- 模型来源可配置，支持 dummy、HuggingFace、Qwen3 Dense、ModelScope。
+- 模型来源可配置，支持 dummy、HuggingFace、Qwen3 Dense、TransformerLens-compatible、ModelScope。
 - hook 和 patching 操作先作为基础层实现，具体算法复用这些操作。
 - FlagSafe 相关逻辑在 adapter 层隔离，避免污染核心研究接口。
 
@@ -857,7 +858,7 @@ model:
 - 明确拒绝 MoE 名称，例如 `Qwen3-30B-A3B`。
 - 暴露 SafeLens 组件 hook：`layer_i.resid_pre`、`layer_i.resid_mid`、`layer_i.resid_post`、`layer_i.attn_out`、`layer_i.mlp_out`、`layer_i.q`、`layer_i.k`、`layer_i.v`、`layer_i.z`。
 - 同时支持 TransformerLens 风格名称解析，例如 `blocks.0.attn.hook_q`。
-- `pattern` 和 `attn_scores` 当前明确报 `NotImplementedError`，因为 raw Transformers 的 Qwen3 attention 默认不会把可修改的 attention probability/scores 作为模块边界暴露出来。
+- `pattern` 可通过 `run_with_cache` 缓存，底层会启用 `output_attentions=True`；`pattern` patching 和 pre-softmax `attn_scores` 仍明确报 `NotImplementedError`，因为需要更低层的 attention forward instrumentation。
 
 ### 10.4 ModelScope
 
@@ -1113,8 +1114,9 @@ pre-commit 配置位于：
 | Pydantic | v2 |
 | YAML | PyYAML |
 | Torch | 可选，仅真实模型需要 |
-| Transformers | 可选，仅 HuggingFace / Qwen3 Dense / ModelScope 真实模型需要 |
+| Transformers | 可选，仅 HuggingFace / Qwen3 Dense / TransformerLens-compatible / ModelScope 真实模型需要 |
 | ModelScope | 可选，仅 ModelScope 下载需要 |
+| TransformerLens | 不需要；`transformer_lens` 来源是 SafeLens 独立兼容层 |
 
 ### 15.2 模型兼容
 
@@ -1123,6 +1125,7 @@ pre-commit 配置位于：
 | Dummy | `dummy` | 无下载 | 内存模拟 |
 | HuggingFace | `huggingface` / `hf` | Transformers 内部处理 | `AutoModelForCausalLM.from_pretrained` |
 | Qwen3 Dense | `qwen3_dense` / `qwen3` | Transformers 内部处理 | `AutoModelForCausalLM.from_pretrained` + SafeLens component hooks |
+| TransformerLens-compatible | `transformer_lens` / `tl` | Transformers / HuggingFace 缓存 | SafeLens `TransformerLensCompatibleModelWrapper` + architecture adapters + Transformers auto classes |
 | ModelScope | `modelscope` / `ms` | `modelscope.snapshot_download` | 本地路径传给 Transformers |
 
 ### 15.3 方法兼容

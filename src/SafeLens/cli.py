@@ -18,7 +18,11 @@ from SafeLens.config import (
 )
 from SafeLens.core.base import ModelLoadConfig
 from SafeLens.pipelines.runner import PipelineRunner
-from SafeLens.utils import get_model_adapter_registry
+from SafeLens.utils import (
+    get_model_adapter_registry,
+    list_architecture_adapters,
+    transformer_lens_official_model_names,
+)
 
 
 def _load_jsonl(path: str | None) -> list[dict[str, Any]] | None:
@@ -74,6 +78,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="list registered model adapters and their capabilities",
     )
     list_parser.add_argument("--json", action="store_true", help="Print JSON output")
+    tl_list_parser = models_subparsers.add_parser(
+        "list-transformerlens",
+        help="list vendored TransformerLens-compatible model names",
+    )
+    tl_list_parser.add_argument("--json", action="store_true", help="Print JSON output")
+    architecture_list_parser = models_subparsers.add_parser(
+        "list-architectures",
+        help="list SafeLens architecture bridge adapters",
+    )
+    architecture_list_parser.add_argument("--json", action="store_true", help="Print JSON output")
 
     inspect_parser = subparsers.add_parser(
         "inspect-model",
@@ -133,12 +147,30 @@ def main(argv: Sequence[str] | None = None) -> None:
         else:
             print(json.dumps(schema, indent=2, sort_keys=True))
     elif args.command == "models":
-        registry = get_model_adapter_registry()
-        adapters = registry.list_supported()
-        if args.json:
-            print(json.dumps({"adapters": adapters}, indent=2))
+        if args.models_command == "list-transformerlens":
+            models = transformer_lens_official_model_names()
+            if args.json:
+                print(json.dumps({"models": models, "count": len(models)}, indent=2))
+            else:
+                print(f"TransformerLens-compatible model names ({len(models)}):")
+                for model_name in models:
+                    print(f"- {model_name}")
+        elif args.models_command == "list-architectures":
+            adapters = list_architecture_adapters()
+            if args.json:
+                print(json.dumps({"architecture_adapters": adapters}, indent=2))
+            else:
+                print("SafeLens architecture bridge adapters:")
+                for adapter in adapters:
+                    components = ", ".join(adapter["supported_components"]) or "-"
+                    print(f"- {adapter['name']}: {components}")
         else:
-            _print_model_adapter_list(adapters)
+            registry = get_model_adapter_registry()
+            adapters = registry.list_supported()
+            if args.json:
+                print(json.dumps({"adapters": adapters}, indent=2))
+            else:
+                _print_model_adapter_list(adapters)
     elif args.command == "inspect-model":
         registry = get_model_adapter_registry()
         source = args.source

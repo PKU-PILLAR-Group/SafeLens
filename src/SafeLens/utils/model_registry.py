@@ -218,6 +218,31 @@ def resolve_model_download_plan(config: ModelLoadConfig) -> ModelDownloadPlan:
             uses_network=True,
             provider="huggingface",
         )
+    if source in {"transformer_lens", "transformerlens", "tl", "hooked_transformer"}:
+        from SafeLens.utils.transformer_lens_support import (
+            resolve_transformer_lens_compatible_model_name,
+        )
+
+        if config.local_dir is not None or _looks_like_local_path(config.name):
+            pretrained_path = str(Path(config.local_dir or config.name).expanduser())
+            return ModelDownloadPlan(
+                source="transformer_lens",
+                model_name=config.name,
+                pretrained_path=pretrained_path,
+                local_dir=pretrained_path,
+                revision=config.revision,
+                uses_network=False,
+                provider="local",
+            )
+        return ModelDownloadPlan(
+            source="transformer_lens",
+            model_name=config.name,
+            pretrained_path=resolve_transformer_lens_compatible_model_name(config.name),
+            cache_dir=_cache_dir(config, "transformer_lens_compatible"),
+            revision=config.revision,
+            uses_network=True,
+            provider="huggingface",
+        )
     if source in {"modelscope", "ms"}:
         return ModelDownloadPlan(
             source="modelscope",

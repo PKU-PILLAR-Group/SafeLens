@@ -1,5 +1,14 @@
 """Utility helpers."""
 
+from SafeLens.utils.model_bridge import (
+    ArchitectureAdapter,
+    ComponentHookSpec,
+    ComponentRef,
+    architecture_adapter_for_model,
+    architecture_adapter_for_name,
+    list_architecture_adapters,
+    supported_transformer_component_names,
+)
 from SafeLens.utils.model_registry import (
     ModelAdapterCapabilities,
     ModelAdapterRegistry,
@@ -14,6 +23,7 @@ from SafeLens.utils.model_wrapper import (
     LocalModelWrapper,
     ModelScopeModelWrapper,
     Qwen3DenseModelWrapper,
+    TransformerLensCompatibleModelWrapper,
     build_model_wrapper,
     is_supported_qwen3_dense_model_name,
     parse_qwen3_component_ref,
@@ -24,26 +34,44 @@ from SafeLens.utils.model_wrapper import (
     validate_qwen3_dense_model_name,
     validate_qwen3_hook_ref,
 )
+from SafeLens.utils.transformer_lens_support import (
+    is_transformer_lens_supported_model_name,
+    resolve_transformer_lens_compatible_model_name,
+    transformer_lens_model_kind,
+    transformer_lens_official_model_names,
+)
 
 __all__ = [
     "DummyModelWrapper",
     "HuggingFaceModelWrapper",
     "LocalModelWrapper",
+    "ArchitectureAdapter",
+    "ComponentHookSpec",
+    "ComponentRef",
     "ModelAdapterCapabilities",
     "ModelAdapterRegistry",
     "ModelAdapterSpec",
     "ModelDownloadPlan",
     "ModelScopeModelWrapper",
     "Qwen3DenseModelWrapper",
+    "TransformerLensCompatibleModelWrapper",
+    "architecture_adapter_for_model",
+    "architecture_adapter_for_name",
     "build_model_wrapper",
     "get_model_adapter_registry",
     "is_supported_qwen3_dense_model_name",
+    "is_transformer_lens_supported_model_name",
+    "list_architecture_adapters",
     "parse_qwen3_component_ref",
     "qwen3_hook_name_examples",
     "qwen3_dense_size_billion",
     "qwen3_supported_hook_components",
     "register_builtin_model_adapters",
+    "resolve_transformer_lens_compatible_model_name",
     "resolve_model_download_plan",
+    "supported_transformer_component_names",
+    "transformer_lens_model_kind",
+    "transformer_lens_official_model_names",
     "validate_qwen3_hook_ref",
     "validate_qwen3_dense_model_name",
 ]

@@ -25,6 +25,12 @@ SUPPORTED_MODEL_SOURCES = (
     "qwen3-dense",
     "modelscope",
     "ms",
+    "transformer_lens",
+    "transformer-lens",
+    "transformerlens",
+    "tl",
+    "hooked_transformer",
+    "hooked-transformer",
 )
 
 

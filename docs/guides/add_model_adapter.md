@@ -44,6 +44,29 @@ document:
 - required optional dependencies
 - whether `trust_remote_code` is needed
 
+For Transformers-backed models, prefer adding a SafeLens architecture adapter
+instead of writing a full wrapper. The adapter maps HuggingFace module paths to
+canonical hook components:
+
+```python
+from SafeLens.utils.model_bridge import ArchitectureAdapter, ComponentHookSpec
+
+adapter = ArchitectureAdapter(
+    name="my_decoder",
+    model_types=("my_model_type",),
+    model_name_markers=("my-org/my-model",),
+    component_specs=(
+        ComponentHookSpec("resid_pre", "forward_input", ("model.layers.{layer}",)),
+        ComponentHookSpec("resid_post", "forward_output", ("model.layers.{layer}",)),
+        ComponentHookSpec("q", "forward_output", ("model.layers.{layer}.self_attn.q_proj",)),
+    ),
+)
+```
+
+This is the same shape of abstraction used by TransformerLens: keep a canonical
+component vocabulary, then write small family-specific mappings from the
+provider model to that vocabulary.
+
 SafeLens uses `ModelAdapterRegistry` for built-in adapters. A production adapter
 should register a `ModelAdapterSpec` with capability metadata:
 

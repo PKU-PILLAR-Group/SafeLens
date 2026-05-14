@@ -97,14 +97,55 @@ model:
 ```
 
 The wrapper exposes component hooks for `resid_pre`, `resid_mid`, `resid_post`,
-`attn_out`, `mlp_out`, `q`, `k`, `v`, and `z`. Supported dense sizes by name are
-`0.6B`, `1.7B`, `4B`, `8B`, `14B`, and `32B`; MoE variants such as
-`Qwen3-30B-A3B` are rejected.
+`attn_out`, `mlp_out`, `q`, `k`, `v`, and `z`, plus attention pattern caching
+through `run_with_cache`. Supported dense sizes by name are `0.6B`, `1.7B`,
+`4B`, `8B`, `14B`, and `32B`; MoE variants such as `Qwen3-30B-A3B` are
+rejected.
 
 Install dependencies with:
 
 ```bash
 python -m pip install -e ".[models]"
+```
+
+### TransformerLens
+
+Use `transformer_lens` when you want SafeLens to target model families mirrored
+from TransformerLens' public support table while keeping runtime loading inside
+SafeLens. This adapter uses Transformers auto classes and does not install,
+import, or delegate to `transformer-lens`:
+
+```yaml
+model:
+  source: transformer_lens
+  name: gpt2
+  dtype: float32
+  device: cpu
+```
+
+Install dependencies with:
+
+```bash
+python -m pip install -e ".[models]"
+```
+
+Useful inspection commands:
+
+```bash
+safelens models list-transformerlens
+safelens inspect-model --model gpt2 --json
+```
+
+If `cache_dir` is omitted, SafeLens resolves a default provider cache under
+`.cache/safelens/models/transformer_lens_compatible`. Attention pattern caching
+uses `output_attentions=True`; pattern patching and raw score hooks still need
+lower-level attention instrumentation. Other component hooks are resolved
+through SafeLens architecture adapters for GPT-2, GPT-J, GPT-Neo,
+GPT-NeoX/Pythia, BLOOM/Falcon, MPT, Phi, OPT, BERT, T5, and LLaMA-like decoder
+families.
+
+```bash
+safelens models list-architectures
 ```
 
 ### ModelScope

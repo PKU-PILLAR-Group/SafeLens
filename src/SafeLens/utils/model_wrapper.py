@@ -16,11 +16,22 @@ from SafeLens.core.base import (
     ModelWrapper,
 )
 from SafeLens.core.hooks import activation_name_for_layer
+from SafeLens.utils.model_bridge import (
+    architecture_adapter_for_model,
+    list_architecture_adapters,
+    supported_transformer_component_names,
+)
 from SafeLens.utils.model_registry import (
     ModelAdapterCapabilities,
     ModelAdapterSpec,
     get_model_adapter_registry,
     resolve_model_download_plan,
+)
+from SafeLens.utils.transformer_lens_support import (
+    is_transformer_lens_supported_model_name,
+    resolve_transformer_lens_compatible_model_name,
+    transformer_lens_model_kind,
+    transformer_lens_official_model_names,
 )
 
 _QWEN3_DENSE_MAX_PARAMS_B = 35.0
@@ -46,8 +57,43 @@ _QWEN3_COMPONENT_EXAMPLES = (
     "layer_0.k",
     "layer_0.v",
     "layer_0.z",
+    "layer_0.pattern",
     "blocks.0.hook_resid_pre",
     "blocks.0.attn.hook_q",
+    "blocks.0.attn.hook_pattern",
+)
+_TRANSFORMER_LENS_HOOK_COMPONENTS = (
+    "hook_embed",
+    "hook_pos_embed",
+    "blocks.N.hook_resid_pre",
+    "blocks.N.hook_resid_mid",
+    "blocks.N.hook_resid_post",
+    "blocks.N.attn.hook_q",
+    "blocks.N.attn.hook_k",
+    "blocks.N.attn.hook_v",
+    "blocks.N.attn.hook_z",
+    "blocks.N.attn.hook_pattern",
+    "blocks.N.attn.hook_attn_scores",
+    "blocks.N.attn.hook_result",
+    "blocks.N.hook_attn_out",
+    "blocks.N.mlp.hook_pre",
+    "blocks.N.mlp.hook_post",
+    "blocks.N.hook_mlp_out",
+    "ln_final.hook_scale",
+)
+_TRANSFORMER_LENS_PATCH_COMPONENTS = (
+    "resid_pre",
+    "resid_mid",
+    "resid_post",
+    "attn_out",
+    "mlp_out",
+    "q",
+    "k",
+    "v",
+    "z",
+    "result",
+    "pattern",
+    "attn_scores",
 )
 
 
@@ -198,6 +244,8 @@ class HuggingFaceModelWrapper(ModelWrapper):
         self.model: Any = None
         self.tokenizer: Any = None
         self._hooks: list[Any] = []
+        self._requires_output_attentions = False
+        self._run_requires_output_attentions = False
 
     def load_model(self) -> Any:
         try:
@@ -250,6 +298,10 @@ class HuggingFaceModelWrapper(ModelWrapper):
 
     def add_hook(self, layer: LayerRef, hook_fn: HookFn) -> Any:
         model = self._require_model()
+        component_handle = self._try_register_component_hook(model, layer, hook_fn)
+        if component_handle is not None:
+            self._hooks.append(component_handle)
+            return component_handle
         module = self._resolve_layer(model, layer)
         handle = module.register_forward_hook(
             lambda mod, inputs, output: hook_fn(mod, inputs, output)
@@ -267,6 +319,10 @@ class HuggingFaceModelWrapper(ModelWrapper):
         temp_handles: list[Any] = []
 
         for layer in layers or []:
+            component_handle = self._try_register_component_cache_hook(model, layer, cache)
+            if component_handle is not None:
+                temp_handles.append(component_handle)
+                continue
             module = self._resolve_layer(model, layer)
 
             def cache_hook(
@@ -284,6 +340,7 @@ class HuggingFaceModelWrapper(ModelWrapper):
             with _no_grad_context():
                 output = model(**model_inputs)
         finally:
+            self._run_requires_output_attentions = False
             for handle in temp_handles:
                 handle.remove()
 
@@ -320,8 +377,51 @@ class HuggingFaceModelWrapper(ModelWrapper):
                 tokenized = self.tokenizer(str(text), return_tensors="pt")
                 if self.device is not None:
                     tokenized = tokenized.to(self.device)
-                return dict(tokenized)
-        return dict(batch)
+                return self._with_attention_flags(dict(tokenized))
+        return self._with_attention_flags(dict(batch))
+
+    def _try_register_component_hook(
+        self,
+        model: Any,
+        layer: LayerRef,
+        hook_fn: HookFn,
+    ) -> Any | None:
+        adapter = architecture_adapter_for_model(model, model_name=self.name)
+        if adapter.parse_component_ref(layer) is None:
+            return None
+        requires_output_attentions = adapter.requires_output_attentions(layer)
+        handle = adapter.register_component_hook(model, layer, hook_fn)
+        if requires_output_attentions:
+            self._requires_output_attentions = True
+        return handle
+
+    def _try_register_component_cache_hook(
+        self,
+        model: Any,
+        layer: LayerRef,
+        cache: dict[str, Any],
+    ) -> Any | None:
+        adapter = architecture_adapter_for_model(model, model_name=self.name)
+        if adapter.parse_component_ref(layer) is None:
+            return None
+        if adapter.requires_output_attentions(layer):
+            self._run_requires_output_attentions = True
+        cache_name = str(layer)
+
+        def cache_component(*, activation: Any, **_kwargs: Any) -> None:
+            cache[cache_name] = activation
+
+        return adapter.register_component_hook_for_mode(
+            model,
+            layer,
+            cache_component,
+            for_cache=True,
+        )
+
+    def _with_attention_flags(self, model_inputs: dict[str, Any]) -> dict[str, Any]:
+        if self._requires_output_attentions or self._run_requires_output_attentions:
+            model_inputs.setdefault("output_attentions", True)
+        return model_inputs
 
     @staticmethod
     def _resolve_layer(model: Any, layer: LayerRef) -> Any:
@@ -349,6 +449,150 @@ class HuggingFaceModelWrapper(ModelWrapper):
             f"Could not resolve layer index {layer} for model {type(model).__name__}. "
             "Known decoder-layer paths tried: model.layers, transformer.h, gpt_neox.layers."
         )
+
+
+class TransformerLensCompatibleModelWrapper(HuggingFaceModelWrapper):
+    """Independent Transformers wrapper for TransformerLens-compatible model IDs.
+
+    The compatibility table mirrors TransformerLens' public support matrix, but
+    this class never imports or delegates to TransformerLens. Decoder,
+    encoder-decoder, encoder, and audio-encoder families are loaded through the
+    closest Transformers auto class.
+    """
+
+    def load_model(self) -> Any:
+        try:
+            import torch
+            from transformers import (
+                AutoFeatureExtractor,
+                AutoModel,
+                AutoModelForCausalLM,
+                AutoModelForSeq2SeqLM,
+                AutoProcessor,
+                AutoTokenizer,
+            )
+        except ImportError as exc:
+            raise ImportError(
+                "TransformerLensCompatibleModelWrapper requires SafeLens model "
+                "dependencies. Install them with `pip install -e '.[models]'`."
+            ) from exc
+
+        dtype_map = {
+            "float16": torch.float16,
+            "bfloat16": torch.bfloat16,
+            "float32": torch.float32,
+            "auto": "auto",
+        }
+        torch_dtype = dtype_map.get(self.dtype, self.dtype)
+        pretrained_path = self._resolve_pretrained_path()
+        pretrained_kwargs = self._pretrained_kwargs()
+        kind = transformer_lens_model_kind(self.name)
+
+        if kind == "audio_encoder":
+            self.tokenizer = self._load_audio_processor(
+                (AutoProcessor, AutoFeatureExtractor),
+                pretrained_path,
+                pretrained_kwargs,
+            )
+            self.model = AutoModel.from_pretrained(
+                pretrained_path,
+                torch_dtype=torch_dtype,
+                trust_remote_code=self.trust_remote_code,
+                **pretrained_kwargs,
+                **self.load_kwargs,
+            )
+        else:
+            self.tokenizer = AutoTokenizer.from_pretrained(
+                pretrained_path,
+                trust_remote_code=self.trust_remote_code,
+                **pretrained_kwargs,
+                **self.tokenizer_kwargs,
+            )
+            if kind == "encoder_decoder":
+                model_cls = AutoModelForSeq2SeqLM
+            elif kind == "encoder":
+                model_cls = AutoModel
+            else:
+                model_cls = AutoModelForCausalLM
+            self.model = model_cls.from_pretrained(
+                pretrained_path,
+                torch_dtype=torch_dtype,
+                trust_remote_code=self.trust_remote_code,
+                **pretrained_kwargs,
+                **self.load_kwargs,
+            )
+
+        if self.device is not None:
+            self.model.to(self.device)
+        self.model.eval()
+        return self.model
+
+    def _resolve_pretrained_path(self) -> str:
+        raw_path = self.pretrained_path or self.name
+        return resolve_transformer_lens_compatible_model_name(raw_path)
+
+    def _prepare_model_inputs(self, batch: Batch) -> dict[str, Any]:
+        kind = transformer_lens_model_kind(self.name)
+        model_kwargs = dict(batch.get("model_kwargs", {}))
+        if kind == "encoder_decoder" and "encoder_tokens" in batch and "decoder_tokens" in batch:
+            return self._with_attention_flags(
+                {
+                    "input_ids": batch["encoder_tokens"],
+                    "decoder_input_ids": batch["decoder_tokens"],
+                    **model_kwargs,
+                }
+            )
+        if kind != "audio_encoder":
+            prepared = super()._prepare_model_inputs(batch)
+            prepared.update(model_kwargs)
+            return self._with_attention_flags(prepared)
+
+        if self.tokenizer is None:
+            return dict(batch)
+        audio = _first_present(batch, ("audio", "wave", "raw_audio"))
+        if audio is None:
+            return model_kwargs
+        processor_kwargs = dict(batch.get("processor_kwargs", {}))
+        sampling_rate = batch.get("sampling_rate", 16000)
+        processed = self.tokenizer(
+            audio,
+            sampling_rate=sampling_rate,
+            return_tensors="pt",
+            **processor_kwargs,
+        )
+        if self.device is not None:
+            processed = processed.to(self.device)
+        return self._with_attention_flags({**dict(processed), **model_kwargs})
+
+    def generate(self, prompt: str, **generation_kwargs: Any) -> str:
+        kind = transformer_lens_model_kind(self.name)
+        if kind in {"encoder", "audio_encoder"}:
+            raise NotImplementedError(
+                f"{kind} models do not expose autoregressive text generation through "
+                "the independent SafeLens Transformers wrapper."
+            )
+        return super().generate(prompt, **generation_kwargs)
+
+    def _load_audio_processor(
+        self,
+        processor_classes: tuple[Any, Any],
+        pretrained_path: str,
+        pretrained_kwargs: dict[str, Any],
+    ) -> Any:
+        last_error: Exception | None = None
+        for processor_cls in processor_classes:
+            try:
+                return processor_cls.from_pretrained(
+                    pretrained_path,
+                    trust_remote_code=self.trust_remote_code,
+                    **pretrained_kwargs,
+                    **self.tokenizer_kwargs,
+                )
+            except Exception as exc:
+                last_error = exc
+        raise RuntimeError(
+            f"Could not load an audio processor for {pretrained_path!r}."
+        ) from last_error
 
 
 class Qwen3DenseModelWrapper(HuggingFaceModelWrapper):
@@ -401,6 +645,20 @@ class Qwen3DenseModelWrapper(HuggingFaceModelWrapper):
 
             layer_index, component = component_ref
             cache_name = str(layer)
+            if component in _QWEN3_ATTENTION_COMPONENTS:
+                if component == "pattern":
+                    component_handle = self._try_register_component_cache_hook(
+                        model,
+                        layer,
+                        cache,
+                    )
+                    if component_handle is not None:
+                        temp_handles.append(component_handle)
+                        continue
+                raise NotImplementedError(
+                    "Qwen3 dense attention score hooks require pre-softmax attention "
+                    "instrumentation and are not exposed by raw Transformers modules yet."
+                )
             temp_handles.append(
                 self._register_qwen3_component_hook(
                     layer_index,
@@ -427,8 +685,8 @@ class Qwen3DenseModelWrapper(HuggingFaceModelWrapper):
     ) -> Any:
         if component in _QWEN3_ATTENTION_COMPONENTS:
             raise NotImplementedError(
-                "Qwen3 dense attention pattern/scores hooks require attention-forward "
-                "instrumentation and are not exposed by raw Transformers modules yet."
+                "Qwen3 dense attention pattern patching and score hooks require lower-level "
+                "attention instrumentation. Use run_with_cache for attention pattern capture."
             )
         if component not in _QWEN3_PATCHABLE_COMPONENTS:
             supported = ", ".join(qwen3_supported_hook_components())
@@ -657,14 +915,16 @@ def validate_qwen3_hook_ref(layer: LayerRef) -> None:
         return
 
     _layer_index, component = component_ref
-    if component in _QWEN3_ATTENTION_COMPONENTS:
+    if component == "pattern":
+        return
+    if component == "attn_scores":
         raise ValueError(
             f"Qwen3 hook {layer!r} targets {component!r}, which is documented but not "
-            "available through raw Transformers modules yet. Use q/k/v/z, attn_out, "
-            "mlp_out, resid_pre, resid_mid, or resid_post for now."
+            "available through raw Transformers modules yet. Attention pattern caching "
+            "is supported, but raw attention scores need lower-level instrumentation."
         )
     if component not in _QWEN3_PATCHABLE_COMPONENTS:
-        supported = ", ".join(qwen3_supported_hook_components())
+        supported = ", ".join((*qwen3_supported_hook_components(), "pattern"))
         examples = ", ".join(_QWEN3_COMPONENT_EXAMPLES[:6])
         raise ValueError(
             f"Unsupported Qwen3 hook component {component!r} in {layer!r}. "
@@ -840,6 +1100,13 @@ def _no_grad_context() -> Any:
         return nullcontext()
 
 
+def _first_present(batch: Batch, keys: Sequence[str]) -> Any:
+    for key in keys:
+        if key in batch:
+            return batch[key]
+    return None
+
+
 class LocalModelWrapper(HuggingFaceModelWrapper):
     """Transformers-compatible local directory wrapper with no provider download."""
 
@@ -944,7 +1211,7 @@ def register_builtin_model_adapters() -> None:
             dependencies=("torch>=2", "transformers>=4.40"),
             model_name_patterns=("Qwen/Qwen3-{0.6,1.7,4,8,14,32}B",),
             capabilities=ModelAdapterCapabilities(
-                supported_hooks=tuple(qwen3_supported_hook_components()),
+                supported_hooks=(*qwen3_supported_hook_components(), "pattern"),
                 supported_patches=(
                     "resid_pre",
                     "resid_mid",
@@ -956,20 +1223,76 @@ def register_builtin_model_adapters() -> None:
                     "v",
                     "z",
                 ),
-                supports_attention_pattern=False,
+                supports_attention_pattern=True,
                 supports_attention_scores=False,
                 supports_local_path=False,
                 supports_remote_download=True,
                 cache_policy="SafeLens cache_dir -> .cache/safelens/models/huggingface",
                 notes=(
-                    "Attention pattern and score hooks are planned but not exposed "
-                    "by the raw Transformers module wrapper yet.",
+                    "Attention pattern caching uses output_attentions=True. "
+                    "Pattern patching and score hooks need lower-level attention "
+                    "instrumentation.",
                 ),
             ),
             build=_build_qwen3_dense_wrapper,
             inspect=_inspect_qwen3_dense_model,
             matches_model_name=lambda name: "qwen3" in name.lower(),
             priority=200,
+        )
+    )
+    registry.register(
+        ModelAdapterSpec(
+            name="transformer_lens",
+            display_name="TransformerLens-Compatible Transformers",
+            aliases=("transformerlens", "tl", "hooked_transformer"),
+            description=(
+                "Independent SafeLens adapter for model families mirrored from "
+                "the TransformerLens supported model list."
+            ),
+            dependencies=("torch>=2", "transformers>=4.40"),
+            model_name_patterns=(
+                "gpt2",
+                "EleutherAI/pythia-*",
+                "meta-llama/*",
+                "Qwen/Qwen*",
+                "google/gemma-*",
+                "google-bert/bert-*",
+                "google-t5/t5-*",
+            ),
+            capabilities=ModelAdapterCapabilities(
+                supported_hooks=(
+                    "integer layer refs",
+                    "model.named_modules() names",
+                    *supported_transformer_component_names(include_pattern=True),
+                ),
+                supported_patches=(
+                    "module output replace",
+                    "module output add",
+                    *supported_transformer_component_names(),
+                ),
+                supports_attention_pattern=True,
+                supports_attention_scores=False,
+                supports_local_path=True,
+                supports_remote_download=True,
+                cache_policy=(
+                    "SafeLens cache_dir -> .cache/safelens/models/transformer_lens_compatible"
+                ),
+                notes=(
+                    "No TransformerLens runtime dependency is used.",
+                    "Decoder, encoder-decoder, encoder, and audio-encoder families "
+                    "load through Transformers auto classes.",
+                    "SafeLens architecture adapters map HF module paths to canonical "
+                    "components for GPT-2, GPT-J, GPT-Neo, GPT-NeoX/Pythia, "
+                    "BLOOM/Falcon, MPT, Phi, OPT, BERT, T5, and LLaMA-like "
+                    "decoder families.",
+                    "Attention pattern caching uses output_attentions=True. "
+                    "Attention score hooks require lower-level attention instrumentation.",
+                ),
+            ),
+            build=_build_transformer_lens_compatible_wrapper,
+            inspect=_inspect_transformer_lens_compatible_model,
+            matches_model_name=is_transformer_lens_supported_model_name,
+            priority=90,
         )
     )
     registry.register(
@@ -981,14 +1304,26 @@ def register_builtin_model_adapters() -> None:
             dependencies=("torch>=2", "transformers>=4.40"),
             model_name_patterns=("organization/model-name",),
             capabilities=ModelAdapterCapabilities(
-                supported_hooks=("integer decoder layer refs", "model.named_modules() names"),
-                supported_patches=("module output replace", "module output add"),
-                supports_attention_pattern=False,
+                supported_hooks=(
+                    "integer decoder layer refs",
+                    "model.named_modules() names",
+                    *supported_transformer_component_names(include_pattern=True),
+                ),
+                supported_patches=(
+                    "module output replace",
+                    "module output add",
+                    *supported_transformer_component_names(),
+                ),
+                supports_attention_pattern=True,
                 supports_attention_scores=False,
                 supports_local_path=False,
                 supports_remote_download=True,
                 cache_policy="SafeLens cache_dir -> .cache/safelens/models/huggingface",
-                notes=("Component hooks require a family-specific adapter.",),
+                notes=(
+                    "Component hooks use SafeLens architecture adapters when the "
+                    "loaded Transformers architecture is recognized.",
+                    "Attention pattern caching uses output_attentions=True.",
+                ),
             ),
             build=_build_huggingface_wrapper,
             inspect=_inspect_huggingface_model,
@@ -1005,14 +1340,26 @@ def register_builtin_model_adapters() -> None:
             dependencies=("modelscope>=1.15", "torch>=2", "transformers>=4.40"),
             model_name_patterns=("namespace/model-name",),
             capabilities=ModelAdapterCapabilities(
-                supported_hooks=("integer decoder layer refs", "model.named_modules() names"),
-                supported_patches=("module output replace", "module output add"),
-                supports_attention_pattern=False,
+                supported_hooks=(
+                    "integer decoder layer refs",
+                    "model.named_modules() names",
+                    *supported_transformer_component_names(include_pattern=True),
+                ),
+                supported_patches=(
+                    "module output replace",
+                    "module output add",
+                    *supported_transformer_component_names(),
+                ),
+                supports_attention_pattern=True,
                 supports_attention_scores=False,
                 supports_local_path=False,
                 supports_remote_download=True,
                 cache_policy="SafeLens cache_dir -> .cache/safelens/models/modelscope",
-                notes=("Use modelscope_kwargs for provider-specific snapshot filters.",),
+                notes=(
+                    "Use modelscope_kwargs for provider-specific snapshot filters.",
+                    "Component hooks use SafeLens architecture adapters when the "
+                    "loaded Transformers architecture is recognized.",
+                ),
             ),
             build=_build_modelscope_wrapper,
             inspect=_inspect_modelscope_model,
@@ -1029,14 +1376,26 @@ def register_builtin_model_adapters() -> None:
             dependencies=("torch>=2", "transformers>=4.40"),
             model_name_patterns=("./models/local-causal-lm", "/abs/path/to/model"),
             capabilities=ModelAdapterCapabilities(
-                supported_hooks=("integer decoder layer refs", "model.named_modules() names"),
-                supported_patches=("module output replace", "module output add"),
-                supports_attention_pattern=False,
+                supported_hooks=(
+                    "integer decoder layer refs",
+                    "model.named_modules() names",
+                    *supported_transformer_component_names(include_pattern=True),
+                ),
+                supported_patches=(
+                    "module output replace",
+                    "module output add",
+                    *supported_transformer_component_names(),
+                ),
+                supports_attention_pattern=True,
                 supports_attention_scores=False,
                 supports_local_path=True,
                 supports_remote_download=False,
                 cache_policy="No provider download; local_dir or name is used directly.",
-                notes=("Keep local model paths and weights out of git.",),
+                notes=(
+                    "Keep local model paths and weights out of git.",
+                    "Component hooks use SafeLens architecture adapters when the "
+                    "loaded Transformers architecture is recognized.",
+                ),
             ),
             build=_build_local_wrapper,
             inspect=_inspect_local_model,
@@ -1084,6 +1443,21 @@ def _build_local_wrapper(config: ModelLoadConfig) -> ModelWrapper:
 def _build_qwen3_dense_wrapper(config: ModelLoadConfig) -> ModelWrapper:
     plan = resolve_model_download_plan(config)
     return Qwen3DenseModelWrapper(
+        name=config.name,
+        dtype=config.dtype,
+        device=config.device,
+        revision=config.revision,
+        cache_dir=plan.cache_dir,
+        trust_remote_code=config.trust_remote_code,
+        load_kwargs=config.load_kwargs,
+        tokenizer_kwargs=config.tokenizer_kwargs,
+        pretrained_path=plan.pretrained_path,
+    )
+
+
+def _build_transformer_lens_compatible_wrapper(config: ModelLoadConfig) -> ModelWrapper:
+    plan = resolve_model_download_plan(config)
+    return TransformerLensCompatibleModelWrapper(
         name=config.name,
         dtype=config.dtype,
         device=config.device,
@@ -1163,10 +1537,47 @@ def _inspect_qwen3_dense_model(model_name: str, config: ModelLoadConfig | None) 
         parameter_size_b=size_b,
         supported_dense_limit_b=_QWEN3_DENSE_MAX_PARAMS_B,
         supported_hook_examples=qwen3_hook_name_examples(),
-        warnings=("Attention pattern and attention score hooks are not supported yet.",),
+        warnings=(
+            "Attention pattern caching is supported with output_attentions=True; "
+            "pattern patching and raw attention score hooks are not supported yet.",
+        ),
     )
     if errors:
         payload["errors"] = errors
+    return payload
+
+
+def _inspect_transformer_lens_compatible_model(
+    model_name: str,
+    config: ModelLoadConfig | None,
+) -> dict[str, Any]:
+    supported = is_transformer_lens_supported_model_name(model_name)
+    resolved_model = resolve_transformer_lens_compatible_model_name(model_name)
+    payload = _inspection_payload(
+        model_name,
+        config,
+        supported=supported,
+        model_family=f"transformer_lens_compatible_{transformer_lens_model_kind(model_name)}",
+        resolved_pretrained_model=resolved_model,
+        official_model_count=len(transformer_lens_official_model_names()),
+        supported_model_examples=transformer_lens_official_model_names()[:20],
+        architecture_bridge_adapters=[item["name"] for item in list_architecture_adapters()],
+        bridge_components=list(supported_transformer_component_names(include_pattern=True)),
+        target_hook_examples=_TRANSFORMER_LENS_HOOK_COMPONENTS,
+        warnings=(
+            "SafeLens does not import TransformerLens for this adapter.",
+            "Static inspection uses SafeLens' vendored TransformerLens support table; "
+            "loading uses Transformers auto classes and may require a valid HF ID or local path.",
+            "Component hooks use SafeLens architecture adapters. Attention pattern caching "
+            "requires Transformers output_attentions=True. Raw attention score hooks remain "
+            "unsupported until pre-softmax attention computation is instrumented.",
+        ),
+    )
+    if not supported:
+        payload["errors"] = [
+            "Model name is not in the vendored TransformerLens support table. "
+            "Use source=huggingface or source=local if this is a plain Transformers model."
+        ]
     return payload
 
 

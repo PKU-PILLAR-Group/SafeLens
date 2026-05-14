@@ -30,5 +30,7 @@ nav:
       - Registry: api/registry.md
       - Pipeline Runner: api/runner.md
       - Model Wrapper: api/model_wrapper.md
+      - Model Bridge: api/model_bridge.md
       - Model Adapter Registry: api/model_registry.md
+      - TransformerLens Support: api/transformer_lens_support.md
       - FlagSafe Adapter: api/flagsafe_adapter.md

@@ -21,6 +21,7 @@ def test_pipeline_config_schema_contains_model_source_enum() -> None:
     assert schema["$schema"] == "https://json-schema.org/draft/2020-12/schema"
     assert "qwen3_dense" in source_schema["enum"]
     assert "modelscope" in source_schema["enum"]
+    assert "transformer_lens" in source_schema["enum"]
     assert "local" in source_schema["enum"]
 
 
@@ -30,6 +31,7 @@ def test_example_configs_validate() -> None:
         "huggingface_config.yaml",
         "modelscope_config.yaml",
         "qwen3_dense_config.yaml",
+        "transformer_lens_config.yaml",
         "local_model_config.yaml",
     ):
         config = validate_pipeline_config_file(Path("examples") / config_name)

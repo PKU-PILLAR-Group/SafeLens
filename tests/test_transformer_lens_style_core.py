@@ -127,7 +127,7 @@ def test_residual_projection_and_ablation_hooks() -> None:
     assert mean_ablation_hook([1, 3, 5]) == [3.0, 3.0, 3.0]
 
     replacement_hook = replace_activation_hook({"x": [1]})
-    replaced: dict[str, Any] = replacement_hook({"x": [0]})
+    replaced: dict[str, Any] = replacement_hook({"x": [0]}, None)
     replaced["x"].append(2)
 
-    assert replacement_hook({"x": [0]}) == {"x": [1]}
+    assert replacement_hook({"x": [0]}, None) == {"x": [1]}

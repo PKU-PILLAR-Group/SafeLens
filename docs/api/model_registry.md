@@ -9,12 +9,15 @@ List supported adapters:
 ```bash
 safelens models list-supported
 safelens models list-supported --json
+safelens models list-architectures --json
+safelens models list-transformerlens --json
 ```
 
 Inspect a model name without downloading it:
 
 ```bash
 safelens inspect-model --model Qwen/Qwen3-8B
+safelens inspect-model --model gpt2
 safelens inspect-model --model Qwen/Qwen3-8B --json
 ```
 

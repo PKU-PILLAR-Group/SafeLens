@@ -31,7 +31,7 @@ Dense wrapper.
 | Key head vector | `layer_0.k` | `blocks.0.attn.hook_k` | Supported |
 | Value head vector | `layer_0.v` | `blocks.0.attn.hook_v` | Supported |
 | Attention output head vector | `layer_0.z` | `blocks.0.attn.hook_z` | Supported |
-| Attention pattern | `layer_0.pattern` | `blocks.0.attn.hook_pattern` | Planned |
+| Attention pattern | `layer_0.pattern` | `blocks.0.attn.hook_pattern` | Cache supported; patching planned |
 | Attention scores | `layer_0.attn_scores` | `blocks.0.attn.hook_attn_scores` | Planned |
 
 ## Example Config

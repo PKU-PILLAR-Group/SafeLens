@@ -15,7 +15,7 @@
   <img alt="MkDocs" src="https://img.shields.io/badge/docs-MkDocs-526CFE">
   <img alt="HuggingFace" src="https://img.shields.io/badge/models-HuggingFace-FFCC4D">
   <img alt="ModelScope" src="https://img.shields.io/badge/models-ModelScope-624AFF">
-  <img alt="TransformerLens" src="https://img.shields.io/badge/hooks-TransformerLens-18A999">
+  <img alt="TransformerLens-compatible" src="https://img.shields.io/badge/hooks-TL--compatible-18A999">
 </p>
 
 <p>
@@ -251,8 +251,32 @@ model:
 
 Supported dense sizes by name are `0.6B`, `1.7B`, `4B`, `8B`, `14B`, and `32B`.
 MoE variants such as `Qwen3-30B-A3B` are rejected by this wrapper. Attention
-`pattern` and `attn_scores` hooks are intentionally marked unsupported until the
-attention forward pass is instrumented directly.
+`pattern` caching is supported with `output_attentions=True`; pattern patching
+and raw `attn_scores` hooks remain explicit future instrumentation work.
+
+### TransformerLens-Compatible
+
+Use `transformer_lens` as a compatibility source for model families mirrored
+from the TransformerLens support table. SafeLens still loads through its own
+Transformers wrappers and does not require the `transformer-lens` package.
+Component hooks are resolved through SafeLens architecture adapters for GPT-2,
+GPT-J, GPT-Neo, GPT-NeoX/Pythia, BLOOM/Falcon, MPT, Phi, OPT, BERT, T5, and
+LLaMA-like decoder families.
+Attention pattern caching is supported for models that return attention weights
+with `output_attentions=True`; raw pre-softmax score hooks are still explicit
+future instrumentation work.
+
+```yaml
+model:
+  source: transformer_lens
+  name: gpt2-small
+  dtype: float32
+  device: cpu
+```
+
+```bash
+safelens models list-architectures
+```
 
 ### ModelScope
 

@@ -1,0 +1,27 @@
+model:
+  source: transformer_lens
+  name: gpt2
+  dtype: float32
+  device: cpu
+
+pipeline:
+  risk_threshold: 0.5
+  probes:
+    - name: dummy_probe
+      config:
+        layers:
+          - blocks.0.hook_resid_post
+  monitors:
+    - name: dummy_monitor
+      config:
+        threshold: 0.5
+  attributors:
+    - name: dummy_attributor
+      config: {}
+
+dataset:
+  - id: tl-demo
+    text: "This is a SafeLens TransformerLens-compatible adapter demo."
+
+output:
+  report_path: outputs/transformer_lens_report.json

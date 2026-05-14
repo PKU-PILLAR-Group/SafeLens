@@ -6,8 +6,10 @@ from SafeLens.utils import (
     LocalModelWrapper,
     ModelScopeModelWrapper,
     Qwen3DenseModelWrapper,
+    TransformerLensCompatibleModelWrapper,
     build_model_wrapper,
     get_model_adapter_registry,
+    is_transformer_lens_supported_model_name,
     resolve_model_download_plan,
 )
 
@@ -16,9 +18,17 @@ def test_model_adapter_registry_lists_capabilities() -> None:
     registry = get_model_adapter_registry()
     adapters = {item["name"]: item for item in registry.list_supported()}
 
-    assert {"dummy", "huggingface", "local", "modelscope", "qwen3_dense"}.issubset(adapters)
+    assert {
+        "dummy",
+        "huggingface",
+        "local",
+        "modelscope",
+        "qwen3_dense",
+        "transformer_lens",
+    }.issubset(adapters)
     assert "q" in adapters["qwen3_dense"]["capabilities"]["supported_hooks"]
-    assert adapters["qwen3_dense"]["capabilities"]["supports_attention_pattern"] is False
+    assert adapters["qwen3_dense"]["capabilities"]["supports_attention_pattern"] is True
+    assert adapters["transformer_lens"]["capabilities"]["supports_attention_pattern"] is True
     assert adapters["local"]["capabilities"]["supports_remote_download"] is False
 
 
@@ -43,9 +53,31 @@ def test_model_adapter_registry_reports_unsupported_qwen3_dense_size() -> None:
     assert "Only dense models" in payload["errors"][0]
 
 
+def test_model_adapter_registry_inspects_transformerlens_models_without_loading() -> None:
+    registry = get_model_adapter_registry()
+
+    payload = registry.inspect_model("gpt2")
+
+    assert payload["source"] == "transformer_lens"
+    assert payload["supported"] is True
+    assert payload["download_plan"]["provider"] == "huggingface"
+    assert payload["resolved_pretrained_model"] == "gpt2"
+    assert payload["official_model_count"] >= 150
+
+
+def test_transformerlens_supports_official_names_and_common_aliases() -> None:
+    assert is_transformer_lens_supported_model_name("meta-llama/Llama-3.1-8B")
+    assert is_transformer_lens_supported_model_name("gpt2-small")
+    assert is_transformer_lens_supported_model_name("bert-base-uncased")
+
+
 def test_unified_download_plan_defaults_cache_dirs() -> None:
     hf_plan = resolve_model_download_plan(ModelLoadConfig(source="huggingface", name="org/model"))
     ms_plan = resolve_model_download_plan(ModelLoadConfig(source="modelscope", name="org/model"))
+    tl_plan = resolve_model_download_plan(ModelLoadConfig(source="transformer_lens", name="gpt2"))
+    tl_local_plan = resolve_model_download_plan(
+        ModelLoadConfig(source="transformer_lens", name="gpt2", local_dir="./models/gpt2")
+    )
     local_plan = resolve_model_download_plan(
         ModelLoadConfig(source="local", name="./models/local-causal-lm")
     )
@@ -54,6 +86,12 @@ def test_unified_download_plan_defaults_cache_dirs() -> None:
     assert hf_plan.uses_network is True
     assert ms_plan.cache_dir == ".cache/safelens/models/modelscope"
     assert ms_plan.uses_network is True
+    assert tl_plan.cache_dir == ".cache/safelens/models/transformer_lens_compatible"
+    assert tl_plan.uses_network is True
+    assert tl_plan.provider == "huggingface"
+    assert tl_local_plan.local_dir == "models/gpt2"
+    assert tl_local_plan.uses_network is False
+    assert tl_local_plan.provider == "local"
     assert local_plan.local_dir == "models/local-causal-lm"
     assert local_plan.uses_network is False
 
@@ -72,6 +110,10 @@ def test_build_model_wrapper_uses_registered_adapters() -> None:
         Qwen3DenseModelWrapper,
     )
     assert isinstance(
+        build_model_wrapper(ModelLoadConfig(source="transformer_lens", name="gpt2")),
+        TransformerLensCompatibleModelWrapper,
+    )
+    assert isinstance(
         build_model_wrapper(ModelLoadConfig(source="local", name="./models/local-causal-lm")),
         LocalModelWrapper,
     )
@@ -85,6 +127,7 @@ def test_all_registered_adapters_satisfy_model_wrapper_contract() -> None:
         "local": ModelLoadConfig(source="local", name="./models/local-causal-lm"),
         "modelscope": ModelLoadConfig(source="modelscope", name="org/model"),
         "qwen3_dense": ModelLoadConfig(source="qwen3_dense", name="Qwen/Qwen3-8B"),
+        "transformer_lens": ModelLoadConfig(source="transformer_lens", name="gpt2"),
     }
 
     for source, config in configs.items():

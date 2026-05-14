@@ -54,6 +54,11 @@ class _FakeModule:
         return inputs[0]
 
 
+class _FakeAttentionPattern:
+    shape = (1, 2, 3, 3)
+    ndim = 4
+
+
 class _FakeAttention(_FakeModule):
     def __init__(self) -> None:
         super().__init__()
@@ -88,7 +93,11 @@ class _FakeQwen3CausalLM:
         self.model = _FakeBackbone()
         self.config = _FakeConfig()
 
-    def __call__(self, **_kwargs: Any) -> dict[str, Any]:
+    def __call__(self, **kwargs: Any) -> dict[str, Any]:
+        if kwargs.get("output_attentions"):
+            pattern = _FakeAttentionPattern()
+            output = self.model.layers[0].self_attn.run_forward((["attn"], pattern))
+            return {"attention": output, "output_attentions": True}
         mlp = self.model.layers[0].mlp
         first = mlp.run_forward(["first"])
         second = mlp.run_forward(["second"])
@@ -180,8 +189,17 @@ def test_qwen3_run_with_cache_component_hooks_do_not_patch_outputs() -> None:
     assert cache == {"layer_0.mlp_out": ["second"]}
 
 
+def test_qwen3_run_with_cache_captures_attention_pattern() -> None:
+    wrapper = _wrapper_with_fake_model()
+
+    output, cache = wrapper.run_with_cache({"text": "hello"}, layers=["blocks.0.attn.hook_pattern"])
+
+    assert output["output_attentions"] is True
+    assert isinstance(cache["blocks.0.attn.hook_pattern"], _FakeAttentionPattern)
+
+
 def test_qwen3_attention_pattern_hooks_are_explicitly_unsupported() -> None:
     wrapper = _wrapper_with_fake_model()
 
-    with pytest.raises(NotImplementedError, match="attention-forward"):
+    with pytest.raises(NotImplementedError, match="pattern patching"):
         wrapper.add_hook("layer_0.pattern", lambda **kwargs: kwargs["activation"])

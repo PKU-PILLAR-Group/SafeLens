@@ -43,3 +43,23 @@ def test_cli_inspect_model_honors_source_override(capsys: pytest.CaptureFixture[
 
     assert payload["source"] == "local"
     assert payload["download_plan"]["uses_network"] is False
+
+
+def test_cli_lists_transformerlens_models(capsys: pytest.CaptureFixture[str]) -> None:
+    main(["models", "list-transformerlens", "--json"])
+
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["count"] >= 150
+    assert "gpt2" in payload["models"]
+    assert "meta-llama/Llama-3.1-8B" in payload["models"]
+
+
+def test_cli_lists_architecture_bridge_adapters(capsys: pytest.CaptureFixture[str]) -> None:
+    main(["models", "list-architectures", "--json"])
+
+    payload = json.loads(capsys.readouterr().out)
+    adapter_names = {item["name"] for item in payload["architecture_adapters"]}
+
+    assert "llama_like_decoder" in adapter_names
+    assert "gpt2_decoder" in adapter_names
