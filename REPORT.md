@@ -858,7 +858,7 @@ model:
 - 明确拒绝 MoE 名称，例如 `Qwen3-30B-A3B`。
 - 暴露 SafeLens 组件 hook：`layer_i.resid_pre`、`layer_i.resid_mid`、`layer_i.resid_post`、`layer_i.attn_out`、`layer_i.mlp_out`、`layer_i.q`、`layer_i.k`、`layer_i.v`、`layer_i.z`。
 - 同时支持 TransformerLens 风格名称解析，例如 `blocks.0.attn.hook_q`。
-- `pattern` 可通过 `run_with_cache` 缓存，底层会启用 `output_attentions=True`；`pattern` patching 和 pre-softmax `attn_scores` 仍明确报 `NotImplementedError`，因为需要更低层的 attention forward instrumentation。
+- `pattern` 和 pre-softmax `attn_scores` 已通过 eager softmax instrumentation 支持缓存与 patching；如果模型走 flash attention 或 SDPA 且没有 Python `torch.softmax` 调用，会给出明确错误，需要切换到 eager attention implementation。
 
 ### 10.4 ModelScope
 

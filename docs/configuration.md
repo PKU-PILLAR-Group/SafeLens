@@ -137,10 +137,10 @@ safelens inspect-model --model gpt2 --json
 ```
 
 If `cache_dir` is omitted, SafeLens resolves a default provider cache under
-`.cache/safelens/models/transformer_lens_compatible`. Attention pattern caching
-uses `output_attentions=True`; pattern patching and raw score hooks still need
-lower-level attention instrumentation. Other component hooks are resolved
-through SafeLens architecture adapters for GPT-2, GPT-J, GPT-Neo,
+`.cache/safelens/models/transformer_lens_compatible`. Attention pattern and
+raw score hooks use eager softmax instrumentation; flash or SDPA attention
+paths may need an eager attention implementation. Other component hooks are
+resolved through SafeLens architecture adapters for GPT-2, GPT-J, GPT-Neo,
 GPT-NeoX/Pythia, BLOOM/Falcon, MPT, Phi, OPT, BERT, T5, and LLaMA-like decoder
 families.
 

@@ -64,6 +64,16 @@ class _FakeAttention(_FakeModule):
         self.v_proj = _FakeModule()
         self.o_proj = _FakeModule()
 
+    def forward(self, scores: Any | None = None) -> Any:
+        try:
+            import torch
+        except ImportError:
+            pattern = _FakeAttentionPattern()
+        else:
+            actual_scores = scores if scores is not None else torch.zeros(1, 2, 3, 3)
+            pattern = torch.softmax(actual_scores, dim=-1)
+        return self.run_forward((["attn"], pattern))
+
 
 class _FakeLayer(_FakeModule):
     def __init__(self) -> None:
@@ -89,8 +99,7 @@ class _FakeQwenModel:
 
     def __call__(self, **kwargs: Any) -> dict[str, Any]:
         if kwargs.get("output_attentions"):
-            pattern = _FakeAttentionPattern()
-            output = self.model.layers[0].self_attn.run_forward((["attn"], pattern))
+            output = self.model.layers[0].self_attn.forward(kwargs.get("scores"))
             return {"attention": output, "output_attentions": True}
         q_out = self.model.layers[0].self_attn.q_proj.run_forward(["q"])
         return {"q": q_out}
@@ -120,12 +129,20 @@ def test_architecture_adapter_maps_qwen3_components() -> None:
     assert layer.self_attn.o_proj.run_pre(["x"]) == ["x", "z"]
 
 
-def test_architecture_adapter_rejects_uninstrumented_attention_patterns() -> None:
+def test_architecture_adapter_patches_attention_patterns() -> None:
+    torch = pytest.importorskip("torch")
     model = _FakeQwenModel()
     adapter = architecture_adapter_for_model(model, model_name="Qwen/Qwen3-8B")
 
-    with pytest.raises(NotImplementedError, match="can cache 'pattern', but cannot patch"):
-        adapter.register_component_hook(model, "layer_0.pattern", lambda **kwargs: kwargs)
+    def force_last_source(**kwargs: Any) -> Any:
+        patched = torch.zeros_like(kwargs["activation"])
+        patched[..., -1] = 1
+        return patched
+
+    adapter.register_component_hook(model, "layer_0.pattern", force_last_source)
+
+    _tokens, pattern = model.model.layers[0].self_attn.forward(torch.zeros(1, 2, 3, 3))
+    assert torch.all(pattern[..., -1] == 1)
 
 
 def test_architecture_adapter_registry_covers_major_transformer_families() -> None:
@@ -147,6 +164,7 @@ def test_architecture_adapter_registry_covers_major_transformer_families() -> No
     assert len(adapter_names) >= 10
     assert "attn_scores" not in supported_transformer_component_names()
     assert "pattern" in supported_transformer_component_names(include_pattern=True)
+    assert "attn_scores" in supported_transformer_component_names(include_attention=True)
 
 
 def test_architecture_adapter_can_infer_from_model_name_without_loading_config() -> None:
@@ -188,12 +206,35 @@ def test_transformer_lens_compatible_wrapper_caches_attention_pattern() -> None:
     output, cache = wrapper.run_with_cache({"text": "hello"}, layers=["blocks.0.attn.hook_pattern"])
 
     assert output["output_attentions"] is True
-    assert isinstance(cache["blocks.0.attn.hook_pattern"], _FakeAttentionPattern)
+    assert getattr(cache["blocks.0.attn.hook_pattern"], "ndim", None) == 4
 
 
-def test_transformer_lens_compatible_wrapper_rejects_attention_pattern_patching() -> None:
+def test_transformer_lens_compatible_wrapper_caches_attention_scores() -> None:
+    torch = pytest.importorskip("torch")
+    wrapper = TransformerLensCompatibleModelWrapper(name="Qwen/Qwen3-8B")
+    wrapper.model = _FakeQwenModel()
+    scores = torch.randn(1, 2, 3, 3)
+
+    output, cache = wrapper.run_with_cache(
+        {"scores": scores},
+        layers=["blocks.0.attn.hook_attn_scores"],
+    )
+
+    assert output["output_attentions"] is True
+    assert torch.equal(cache["blocks.0.attn.hook_attn_scores"], scores)
+
+
+def test_transformer_lens_compatible_wrapper_patches_attention_scores() -> None:
+    torch = pytest.importorskip("torch")
     wrapper = TransformerLensCompatibleModelWrapper(name="Qwen/Qwen3-8B")
     wrapper.model = _FakeQwenModel()
 
-    with pytest.raises(NotImplementedError, match="can cache 'pattern', but cannot patch"):
-        wrapper.add_hook("blocks.0.attn.hook_pattern", lambda **kwargs: kwargs["activation"])
+    def force_first_source(**kwargs: Any) -> Any:
+        patched = torch.full_like(kwargs["activation"], -1000.0)
+        patched[..., 0] = 1000.0
+        return patched
+
+    wrapper.add_hook("blocks.0.attn.hook_attn_scores", force_first_source)
+
+    _tokens, pattern = wrapper.model.model.layers[0].self_attn.forward(torch.zeros(1, 2, 1, 2))
+    assert torch.all(pattern[..., 0] > 0.99)

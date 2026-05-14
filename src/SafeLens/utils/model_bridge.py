@@ -16,7 +16,7 @@ from typing import Any, Literal
 from SafeLens.core.base import HookFn, LayerRef
 
 HookMode = Literal["forward_output", "forward_input"]
-ComponentValue = Literal["output", "attention_pattern"]
+ComponentValue = Literal["output", "attention_pattern", "attention_scores"]
 
 CANONICAL_TRANSFORMER_COMPONENTS: tuple[str, ...] = (
     "resid_pre",
@@ -34,8 +34,7 @@ CANONICAL_TRANSFORMER_COMPONENTS: tuple[str, ...] = (
 )
 
 _UNSUPPORTED_ATTENTION_REASON = (
-    "attention score hooks require pre-softmax attention instrumentation; "
-    "raw Transformers modules usually do not expose scores as standalone tensors"
+    "this fallback adapter has no known attention module path for softmax instrumentation"
 )
 
 
@@ -161,6 +160,16 @@ class ArchitectureAdapter:
             raise KeyError(f"Layer reference {layer!r} is not a component hook name.")
         spec = self._spec_for_ref(component_ref, for_cache=for_cache)
         module = self.get_component(model, component_ref)
+        if spec.value == "attention_scores" or (
+            spec.value == "attention_pattern" and not for_cache
+        ):
+            return _register_attention_softmax_hook(
+                module,
+                hook_fn,
+                component_ref,
+                self.name,
+                spec,
+            )
         if spec.mode == "forward_input":
             return module.register_forward_pre_hook(
                 _make_component_input_hook(hook_fn, component_ref, self.name)
@@ -174,7 +183,7 @@ class ArchitectureAdapter:
         if component_ref is None:
             return False
         spec = self._specs.get(component_ref.component)
-        return spec is not None and spec.value == "attention_pattern"
+        return spec is not None and spec.value in {"attention_pattern", "attention_scores"}
 
     def get_component(self, model: Any, component_ref: ComponentRef) -> Any:
         spec = self._spec_for_ref(component_ref, for_cache=True)
@@ -383,7 +392,128 @@ def extract_component_activation(output: Any, spec: ComponentHookSpec) -> Any:
                 "selected Transformers attention implementation returns attention weights."
             )
         return pattern
+    if spec.value == "attention_scores":
+        scores = _find_attention_scores(output)
+        if scores is None:
+            raise RuntimeError(
+                f"Could not find attention scores in output for component {spec.component!r}. "
+                "Use eager attention softmax instrumentation for pre-softmax scores."
+            )
+        return scores
     return output
+
+
+def _register_attention_softmax_hook(
+    module: Any,
+    hook_fn: HookFn,
+    component_ref: ComponentRef,
+    architecture: str,
+    spec: ComponentHookSpec,
+) -> Any:
+    try:
+        import torch
+        import torch.nn.functional as functional
+    except ImportError as exc:
+        raise ImportError(
+            "Attention score instrumentation requires torch. "
+            "Install model dependencies with `pip install -e '.[models]'`."
+        ) from exc
+
+    original_forward = module.forward
+
+    def wrapped_forward(*args: Any, **kwargs: Any) -> Any:
+        original_torch_softmax = torch.softmax
+        original_functional_softmax = functional.softmax
+        captured = False
+
+        def make_instrumented_softmax(original_softmax: Callable[..., Any]) -> Callable[..., Any]:
+            def instrumented_softmax(
+                input_tensor: Any,
+                *softmax_args: Any,
+                **softmax_kwargs: Any,
+            ) -> Any:
+                nonlocal captured
+                if not _looks_like_attention_scores(input_tensor, softmax_args, softmax_kwargs):
+                    return original_softmax(input_tensor, *softmax_args, **softmax_kwargs)
+                captured = True
+                scores = input_tensor
+                if spec.value == "attention_scores":
+                    patched_scores = call_component_hook(
+                        hook_fn,
+                        activation=scores,
+                        component_ref=component_ref,
+                        architecture=architecture,
+                    )
+                    if patched_scores is not None:
+                        scores = patched_scores
+                pattern = original_softmax(scores, *softmax_args, **softmax_kwargs)
+                if spec.value == "attention_pattern":
+                    patched_pattern = call_component_hook(
+                        hook_fn,
+                        activation=pattern,
+                        component_ref=component_ref,
+                        architecture=architecture,
+                    )
+                    if patched_pattern is not None:
+                        return patched_pattern
+                return pattern
+
+            return instrumented_softmax
+
+        torch.softmax = make_instrumented_softmax(original_torch_softmax)
+        functional.softmax = make_instrumented_softmax(original_functional_softmax)
+        try:
+            output = original_forward(*args, **kwargs)
+        finally:
+            torch.softmax = original_torch_softmax
+            functional.softmax = original_functional_softmax
+
+        if not captured:
+            raise RuntimeError(
+                f"Attention instrumentation for {component_ref.safelens_name!r} did not "
+                "observe an attention-shaped Python torch.softmax call. Use an eager "
+                "attention implementation or a model adapter with explicit attention "
+                "forward instrumentation."
+            )
+        return output
+
+    module.forward = wrapped_forward
+    return _ForwardPatchHandle(module, original_forward, wrapped_forward)
+
+
+def _looks_like_attention_scores(
+    input_tensor: Any,
+    softmax_args: tuple[Any, ...],
+    softmax_kwargs: dict[str, Any],
+) -> bool:
+    ndim = getattr(input_tensor, "ndim", None)
+    if ndim is None or int(ndim) < 3:
+        return False
+    dim = softmax_kwargs.get("dim")
+    if dim is None and softmax_args:
+        dim = softmax_args[0]
+    if dim is None:
+        return False
+    try:
+        dim_index = int(dim)
+    except (TypeError, ValueError):
+        return False
+    return dim_index in {-1, int(ndim) - 1}
+
+
+class _ForwardPatchHandle:
+    def __init__(self, module: Any, original_forward: Any, wrapped_forward: Any) -> None:
+        self._module = module
+        self._original_forward = original_forward
+        self._wrapped_forward = wrapped_forward
+        self._removed = False
+
+    def remove(self) -> None:
+        if self._removed:
+            return
+        if getattr(self._module, "forward", None) is self._wrapped_forward:
+            self._module.forward = self._original_forward
+        self._removed = True
 
 
 def _find_attention_pattern(value: Any) -> Any | None:
@@ -401,9 +531,26 @@ def _find_attention_pattern(value: Any) -> Any | None:
             found = _find_attention_pattern(item)
             if found is not None:
                 return found
-    if isinstance(value, (tuple, list)):
+    if isinstance(value, tuple | list):
         for item in value:
             found = _find_attention_pattern(item)
+            if found is not None:
+                return found
+    return None
+
+
+def _find_attention_scores(value: Any) -> Any | None:
+    if isinstance(value, dict):
+        for key in ("attn_scores", "attention_scores", "scores"):
+            if key in value:
+                return value[key]
+        for item in value.values():
+            found = _find_attention_scores(item)
+            if found is not None:
+                return found
+    if isinstance(value, tuple | list):
+        for item in value:
+            found = _find_attention_scores(item)
             if found is not None:
                 return found
     return None
@@ -460,7 +607,18 @@ def _pattern_spec(*module_paths: str) -> ComponentHookSpec:
         "forward_output",
         *module_paths,
         value="attention_pattern",
-        patchable=False,
+        patchable=True,
+        cacheable=True,
+    )
+
+
+def _scores_spec(*module_paths: str) -> ComponentHookSpec:
+    return _spec(
+        "attn_scores",
+        "forward_output",
+        *module_paths,
+        value="attention_scores",
+        patchable=True,
         cacheable=True,
     )
 
@@ -517,7 +675,7 @@ LLAMA_LIKE_ADAPTER = ArchitectureAdapter(
         _spec("z", "forward_input", "model.layers.{layer}.self_attn.o_proj"),
         _spec("result", "forward_output", "model.layers.{layer}.self_attn.o_proj"),
         _pattern_spec("model.layers.{layer}.self_attn"),
-        _unsupported_attention_scores_spec(),
+        _scores_spec("model.layers.{layer}.self_attn"),
     ),
     notes=("Covers RoPE decoder families with model.layers and q/k/v/o projections.",),
 )
@@ -538,7 +696,7 @@ GPT2_ADAPTER = ArchitectureAdapter(
         _spec("z", "forward_input", "transformer.h.{layer}.attn.c_proj"),
         _spec("result", "forward_output", "transformer.h.{layer}.attn.c_proj"),
         _pattern_spec("transformer.h.{layer}.attn"),
-        _unsupported_attention_scores_spec(),
+        _scores_spec("transformer.h.{layer}.attn"),
     ),
     notes=("GPT-2 stores q/k/v in a joint c_attn projection; hooks see the joint tensor.",),
 )
@@ -563,7 +721,7 @@ GPT_NEOX_ADAPTER = ArchitectureAdapter(
         _spec("z", "forward_input", "gpt_neox.layers.{layer}.attention.dense"),
         _spec("result", "forward_output", "gpt_neox.layers.{layer}.attention.dense"),
         _pattern_spec("gpt_neox.layers.{layer}.attention"),
-        _unsupported_attention_scores_spec(),
+        _scores_spec("gpt_neox.layers.{layer}.attention"),
     ),
     notes=("GPT-NeoX/Pythia q/k/v are exposed through a joint query_key_value module.",),
 )
@@ -583,7 +741,7 @@ GPTJ_ADAPTER = ArchitectureAdapter(
         _spec("z", "forward_input", "transformer.h.{layer}.attn.out_proj"),
         _spec("result", "forward_output", "transformer.h.{layer}.attn.out_proj"),
         _pattern_spec("transformer.h.{layer}.attn"),
-        _unsupported_attention_scores_spec(),
+        _scores_spec("transformer.h.{layer}.attn"),
     ),
     notes=("GPT-J uses parallel attention/MLP blocks, so resid_mid is not declared.",),
 )
@@ -604,7 +762,7 @@ GPT_NEO_ADAPTER = ArchitectureAdapter(
         _spec("z", "forward_input", "transformer.h.{layer}.attn.attention.out_proj"),
         _spec("result", "forward_output", "transformer.h.{layer}.attn.attention.out_proj"),
         _pattern_spec("transformer.h.{layer}.attn.attention"),
-        _unsupported_attention_scores_spec(),
+        _scores_spec("transformer.h.{layer}.attn.attention"),
     ),
 )
 
@@ -636,7 +794,7 @@ JOINT_QKV_DECODER_ADAPTER = ArchitectureAdapter(
             "transformer.h.{layer}.self_attention.dense",
         ),
         _pattern_spec("transformer.h.{layer}.self_attention"),
-        _unsupported_attention_scores_spec(),
+        _scores_spec("transformer.h.{layer}.self_attention"),
     ),
     notes=("BLOOM/Falcon expose q/k/v through a joint query_key_value module.",),
 )
@@ -657,7 +815,7 @@ MPT_ADAPTER = ArchitectureAdapter(
         _spec("z", "forward_input", "transformer.blocks.{layer}.attn.out_proj"),
         _spec("result", "forward_output", "transformer.blocks.{layer}.attn.out_proj"),
         _pattern_spec("transformer.blocks.{layer}.attn"),
-        _unsupported_attention_scores_spec(),
+        _scores_spec("transformer.blocks.{layer}.attn"),
     ),
     notes=("MPT exposes q/k/v through Wqkv; hooks see the joint projection tensor.",),
 )
@@ -692,7 +850,7 @@ PHI_ADAPTER = ArchitectureAdapter(
             "model.layers.{layer}.self_attn.o_proj",
         ),
         _pattern_spec("model.layers.{layer}.self_attn"),
-        _unsupported_attention_scores_spec(),
+        _scores_spec("model.layers.{layer}.self_attn"),
     ),
     notes=("Phi variants differ in output projection name; both dense and o_proj are tried.",),
 )
@@ -713,7 +871,7 @@ OPT_ADAPTER = ArchitectureAdapter(
         _spec("z", "forward_input", "model.decoder.layers.{layer}.self_attn.out_proj"),
         _spec("result", "forward_output", "model.decoder.layers.{layer}.self_attn.out_proj"),
         _pattern_spec("model.decoder.layers.{layer}.self_attn"),
-        _unsupported_attention_scores_spec(),
+        _scores_spec("model.decoder.layers.{layer}.self_attn"),
     ),
 )
 
@@ -733,7 +891,7 @@ BERT_ADAPTER = ArchitectureAdapter(
         _spec("z", "forward_input", "bert.encoder.layer.{layer}.attention.output.dense"),
         _spec("result", "forward_output", "bert.encoder.layer.{layer}.attention.output.dense"),
         _pattern_spec("bert.encoder.layer.{layer}.attention.self"),
-        _unsupported_attention_scores_spec(),
+        _scores_spec("bert.encoder.layer.{layer}.attention.self"),
     ),
 )
 
@@ -753,7 +911,7 @@ T5_ENCODER_ADAPTER = ArchitectureAdapter(
         _spec("z", "forward_input", "encoder.block.{layer}.layer.0.SelfAttention.o"),
         _spec("result", "forward_output", "encoder.block.{layer}.layer.0.SelfAttention.o"),
         _pattern_spec("encoder.block.{layer}.layer.0.SelfAttention"),
-        _unsupported_attention_scores_spec(),
+        _scores_spec("encoder.block.{layer}.layer.0.SelfAttention"),
     ),
     notes=(
         "Initial bridge targets the encoder stack; decoder/cross-attention "

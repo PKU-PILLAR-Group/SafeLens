@@ -23,10 +23,11 @@ Current architecture adapters:
 - `bert_encoder`: BERT-style encoder layers.
 - `t5_encoder_decoder`: initial T5 encoder-stack component mapping.
 
-Attention pattern caching is supported when the underlying Transformers model
-returns attention weights with `output_attentions=True`. Attention pattern
-patching and raw attention score hooks remain unsupported until SafeLens
-instruments pre-softmax attention computation directly.
+Attention pattern caching uses returned attention weights when available.
+Attention pattern patching and raw pre-softmax score hooks use eager softmax
+instrumentation. If a model runs flash attention or SDPA without a Python
+`torch.softmax` call, SafeLens raises a clear error and the model should be run
+with an eager attention implementation for those hooks.
 
 List the registered architecture adapters:
 

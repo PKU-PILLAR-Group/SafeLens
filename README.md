@@ -251,8 +251,9 @@ model:
 
 Supported dense sizes by name are `0.6B`, `1.7B`, `4B`, `8B`, `14B`, and `32B`.
 MoE variants such as `Qwen3-30B-A3B` are rejected by this wrapper. Attention
-`pattern` caching is supported with `output_attentions=True`; pattern patching
-and raw `attn_scores` hooks remain explicit future instrumentation work.
+`pattern` and raw `attn_scores` hooks are supported through eager softmax
+instrumentation; flash or SDPA attention paths may need an eager attention
+implementation.
 
 ### TransformerLens-Compatible
 
@@ -262,9 +263,9 @@ Transformers wrappers and does not require the `transformer-lens` package.
 Component hooks are resolved through SafeLens architecture adapters for GPT-2,
 GPT-J, GPT-Neo, GPT-NeoX/Pythia, BLOOM/Falcon, MPT, Phi, OPT, BERT, T5, and
 LLaMA-like decoder families.
-Attention pattern caching is supported for models that return attention weights
-with `output_attentions=True`; raw pre-softmax score hooks are still explicit
-future instrumentation work.
+Attention `pattern` and pre-softmax `attn_scores` hooks are supported through
+eager softmax instrumentation; flash or SDPA attention paths may need an eager
+attention implementation.
 
 ```yaml
 model:

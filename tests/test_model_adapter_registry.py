@@ -28,7 +28,9 @@ def test_model_adapter_registry_lists_capabilities() -> None:
     }.issubset(adapters)
     assert "q" in adapters["qwen3_dense"]["capabilities"]["supported_hooks"]
     assert adapters["qwen3_dense"]["capabilities"]["supports_attention_pattern"] is True
+    assert adapters["qwen3_dense"]["capabilities"]["supports_attention_scores"] is True
     assert adapters["transformer_lens"]["capabilities"]["supports_attention_pattern"] is True
+    assert adapters["transformer_lens"]["capabilities"]["supports_attention_scores"] is True
     assert adapters["local"]["capabilities"]["supports_remote_download"] is False
 
 

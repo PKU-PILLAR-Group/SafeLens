@@ -58,9 +58,11 @@ _QWEN3_COMPONENT_EXAMPLES = (
     "layer_0.v",
     "layer_0.z",
     "layer_0.pattern",
+    "layer_0.attn_scores",
     "blocks.0.hook_resid_pre",
     "blocks.0.attn.hook_q",
     "blocks.0.attn.hook_pattern",
+    "blocks.0.attn.hook_attn_scores",
 )
 _TRANSFORMER_LENS_HOOK_COMPONENTS = (
     "hook_embed",
@@ -341,7 +343,7 @@ class HuggingFaceModelWrapper(ModelWrapper):
                 output = model(**model_inputs)
         finally:
             self._run_requires_output_attentions = False
-            for handle in temp_handles:
+            for handle in reversed(temp_handles):
                 handle.remove()
 
         return output, cache
@@ -361,7 +363,7 @@ class HuggingFaceModelWrapper(ModelWrapper):
         return str(self.tokenizer.decode(output_ids[0], skip_special_tokens=True))
 
     def remove_hooks(self) -> None:
-        for handle in self._hooks:
+        for handle in reversed(self._hooks):
             handle.remove()
         self._hooks.clear()
 
@@ -646,19 +648,15 @@ class Qwen3DenseModelWrapper(HuggingFaceModelWrapper):
             layer_index, component = component_ref
             cache_name = str(layer)
             if component in _QWEN3_ATTENTION_COMPONENTS:
-                if component == "pattern":
-                    component_handle = self._try_register_component_cache_hook(
-                        model,
-                        layer,
-                        cache,
-                    )
-                    if component_handle is not None:
-                        temp_handles.append(component_handle)
-                        continue
-                raise NotImplementedError(
-                    "Qwen3 dense attention score hooks require pre-softmax attention "
-                    "instrumentation and are not exposed by raw Transformers modules yet."
+                component_handle = self._try_register_component_cache_hook(
+                    model,
+                    layer,
+                    cache,
                 )
+                if component_handle is not None:
+                    temp_handles.append(component_handle)
+                    continue
+                raise KeyError(f"Could not resolve Qwen3 attention component {layer!r}.")
             temp_handles.append(
                 self._register_qwen3_component_hook(
                     layer_index,
@@ -672,7 +670,8 @@ class Qwen3DenseModelWrapper(HuggingFaceModelWrapper):
             with _no_grad_context():
                 output = model(**model_inputs)
         finally:
-            for handle in temp_handles:
+            self._run_requires_output_attentions = False
+            for handle in reversed(temp_handles):
                 handle.remove()
 
         return output, cache
@@ -684,12 +683,16 @@ class Qwen3DenseModelWrapper(HuggingFaceModelWrapper):
         hook_fn: HookFn,
     ) -> Any:
         if component in _QWEN3_ATTENTION_COMPONENTS:
-            raise NotImplementedError(
-                "Qwen3 dense attention pattern patching and score hooks require lower-level "
-                "attention instrumentation. Use run_with_cache for attention pattern capture."
+            handle = self._try_register_component_hook(
+                self._require_model(),
+                f"layer_{layer_index}.{component}",
+                hook_fn,
             )
+            if handle is None:
+                raise KeyError(f"Could not resolve Qwen3 attention component {component!r}.")
+            return handle
         if component not in _QWEN3_PATCHABLE_COMPONENTS:
-            supported = ", ".join(qwen3_supported_hook_components())
+            supported = ", ".join(qwen3_supported_hook_components(include_attention=True))
             examples = ", ".join(_QWEN3_COMPONENT_EXAMPLES[:4])
             raise KeyError(
                 f"Unsupported Qwen3 dense component {component!r}. "
@@ -915,16 +918,10 @@ def validate_qwen3_hook_ref(layer: LayerRef) -> None:
         return
 
     _layer_index, component = component_ref
-    if component == "pattern":
+    if component in _QWEN3_ATTENTION_COMPONENTS:
         return
-    if component == "attn_scores":
-        raise ValueError(
-            f"Qwen3 hook {layer!r} targets {component!r}, which is documented but not "
-            "available through raw Transformers modules yet. Attention pattern caching "
-            "is supported, but raw attention scores need lower-level instrumentation."
-        )
     if component not in _QWEN3_PATCHABLE_COMPONENTS:
-        supported = ", ".join((*qwen3_supported_hook_components(), "pattern"))
+        supported = ", ".join(qwen3_supported_hook_components(include_attention=True))
         examples = ", ".join(_QWEN3_COMPONENT_EXAMPLES[:6])
         raise ValueError(
             f"Unsupported Qwen3 hook component {component!r} in {layer!r}. "
@@ -1211,7 +1208,7 @@ def register_builtin_model_adapters() -> None:
             dependencies=("torch>=2", "transformers>=4.40"),
             model_name_patterns=("Qwen/Qwen3-{0.6,1.7,4,8,14,32}B",),
             capabilities=ModelAdapterCapabilities(
-                supported_hooks=(*qwen3_supported_hook_components(), "pattern"),
+                supported_hooks=tuple(qwen3_supported_hook_components(include_attention=True)),
                 supported_patches=(
                     "resid_pre",
                     "resid_mid",
@@ -1222,16 +1219,17 @@ def register_builtin_model_adapters() -> None:
                     "k",
                     "v",
                     "z",
+                    "pattern",
+                    "attn_scores",
                 ),
                 supports_attention_pattern=True,
-                supports_attention_scores=False,
+                supports_attention_scores=True,
                 supports_local_path=False,
                 supports_remote_download=True,
                 cache_policy="SafeLens cache_dir -> .cache/safelens/models/huggingface",
                 notes=(
-                    "Attention pattern caching uses output_attentions=True. "
-                    "Pattern patching and score hooks need lower-level attention "
-                    "instrumentation.",
+                    "Attention pattern and score hooks use eager softmax instrumentation; "
+                    "flash or SDPA paths may need an eager attention implementation.",
                 ),
             ),
             build=_build_qwen3_dense_wrapper,
@@ -1263,15 +1261,15 @@ def register_builtin_model_adapters() -> None:
                 supported_hooks=(
                     "integer layer refs",
                     "model.named_modules() names",
-                    *supported_transformer_component_names(include_pattern=True),
+                    *supported_transformer_component_names(include_attention=True),
                 ),
                 supported_patches=(
                     "module output replace",
                     "module output add",
-                    *supported_transformer_component_names(),
+                    *supported_transformer_component_names(include_attention=True),
                 ),
                 supports_attention_pattern=True,
-                supports_attention_scores=False,
+                supports_attention_scores=True,
                 supports_local_path=True,
                 supports_remote_download=True,
                 cache_policy=(
@@ -1285,8 +1283,8 @@ def register_builtin_model_adapters() -> None:
                     "components for GPT-2, GPT-J, GPT-Neo, GPT-NeoX/Pythia, "
                     "BLOOM/Falcon, MPT, Phi, OPT, BERT, T5, and LLaMA-like "
                     "decoder families.",
-                    "Attention pattern caching uses output_attentions=True. "
-                    "Attention score hooks require lower-level attention instrumentation.",
+                    "Attention pattern and score hooks use eager softmax instrumentation; "
+                    "flash or SDPA paths may need an eager attention implementation.",
                 ),
             ),
             build=_build_transformer_lens_compatible_wrapper,
@@ -1307,22 +1305,23 @@ def register_builtin_model_adapters() -> None:
                 supported_hooks=(
                     "integer decoder layer refs",
                     "model.named_modules() names",
-                    *supported_transformer_component_names(include_pattern=True),
+                    *supported_transformer_component_names(include_attention=True),
                 ),
                 supported_patches=(
                     "module output replace",
                     "module output add",
-                    *supported_transformer_component_names(),
+                    *supported_transformer_component_names(include_attention=True),
                 ),
                 supports_attention_pattern=True,
-                supports_attention_scores=False,
+                supports_attention_scores=True,
                 supports_local_path=False,
                 supports_remote_download=True,
                 cache_policy="SafeLens cache_dir -> .cache/safelens/models/huggingface",
                 notes=(
                     "Component hooks use SafeLens architecture adapters when the "
                     "loaded Transformers architecture is recognized.",
-                    "Attention pattern caching uses output_attentions=True.",
+                    "Attention pattern and score hooks use eager softmax instrumentation; "
+                    "flash or SDPA paths may need an eager attention implementation.",
                 ),
             ),
             build=_build_huggingface_wrapper,
@@ -1343,15 +1342,15 @@ def register_builtin_model_adapters() -> None:
                 supported_hooks=(
                     "integer decoder layer refs",
                     "model.named_modules() names",
-                    *supported_transformer_component_names(include_pattern=True),
+                    *supported_transformer_component_names(include_attention=True),
                 ),
                 supported_patches=(
                     "module output replace",
                     "module output add",
-                    *supported_transformer_component_names(),
+                    *supported_transformer_component_names(include_attention=True),
                 ),
                 supports_attention_pattern=True,
-                supports_attention_scores=False,
+                supports_attention_scores=True,
                 supports_local_path=False,
                 supports_remote_download=True,
                 cache_policy="SafeLens cache_dir -> .cache/safelens/models/modelscope",
@@ -1359,6 +1358,8 @@ def register_builtin_model_adapters() -> None:
                     "Use modelscope_kwargs for provider-specific snapshot filters.",
                     "Component hooks use SafeLens architecture adapters when the "
                     "loaded Transformers architecture is recognized.",
+                    "Attention pattern and score hooks use eager softmax instrumentation; "
+                    "flash or SDPA paths may need an eager attention implementation.",
                 ),
             ),
             build=_build_modelscope_wrapper,
@@ -1379,15 +1380,15 @@ def register_builtin_model_adapters() -> None:
                 supported_hooks=(
                     "integer decoder layer refs",
                     "model.named_modules() names",
-                    *supported_transformer_component_names(include_pattern=True),
+                    *supported_transformer_component_names(include_attention=True),
                 ),
                 supported_patches=(
                     "module output replace",
                     "module output add",
-                    *supported_transformer_component_names(),
+                    *supported_transformer_component_names(include_attention=True),
                 ),
                 supports_attention_pattern=True,
-                supports_attention_scores=False,
+                supports_attention_scores=True,
                 supports_local_path=True,
                 supports_remote_download=False,
                 cache_policy="No provider download; local_dir or name is used directly.",
@@ -1395,6 +1396,8 @@ def register_builtin_model_adapters() -> None:
                     "Keep local model paths and weights out of git.",
                     "Component hooks use SafeLens architecture adapters when the "
                     "loaded Transformers architecture is recognized.",
+                    "Attention pattern and score hooks use eager softmax instrumentation; "
+                    "flash or SDPA paths may need an eager attention implementation.",
                 ),
             ),
             build=_build_local_wrapper,
@@ -1538,8 +1541,8 @@ def _inspect_qwen3_dense_model(model_name: str, config: ModelLoadConfig | None) 
         supported_dense_limit_b=_QWEN3_DENSE_MAX_PARAMS_B,
         supported_hook_examples=qwen3_hook_name_examples(),
         warnings=(
-            "Attention pattern caching is supported with output_attentions=True; "
-            "pattern patching and raw attention score hooks are not supported yet.",
+            "Attention pattern and score hooks use eager softmax instrumentation; "
+            "flash or SDPA attention paths may need an eager attention implementation.",
         ),
     )
     if errors:
@@ -1562,15 +1565,15 @@ def _inspect_transformer_lens_compatible_model(
         official_model_count=len(transformer_lens_official_model_names()),
         supported_model_examples=transformer_lens_official_model_names()[:20],
         architecture_bridge_adapters=[item["name"] for item in list_architecture_adapters()],
-        bridge_components=list(supported_transformer_component_names(include_pattern=True)),
+        bridge_components=list(supported_transformer_component_names(include_attention=True)),
         target_hook_examples=_TRANSFORMER_LENS_HOOK_COMPONENTS,
         warnings=(
             "SafeLens does not import TransformerLens for this adapter.",
             "Static inspection uses SafeLens' vendored TransformerLens support table; "
             "loading uses Transformers auto classes and may require a valid HF ID or local path.",
-            "Component hooks use SafeLens architecture adapters. Attention pattern caching "
-            "requires Transformers output_attentions=True. Raw attention score hooks remain "
-            "unsupported until pre-softmax attention computation is instrumented.",
+            "Component hooks use SafeLens architecture adapters. Attention pattern and score "
+            "hooks use eager softmax instrumentation; flash or SDPA attention paths may need "
+            "an eager attention implementation.",
         ),
     )
     if not supported:

@@ -31,8 +31,8 @@ Dense wrapper.
 | Key head vector | `layer_0.k` | `blocks.0.attn.hook_k` | Supported |
 | Value head vector | `layer_0.v` | `blocks.0.attn.hook_v` | Supported |
 | Attention output head vector | `layer_0.z` | `blocks.0.attn.hook_z` | Supported |
-| Attention pattern | `layer_0.pattern` | `blocks.0.attn.hook_pattern` | Cache supported; patching planned |
-| Attention scores | `layer_0.attn_scores` | `blocks.0.attn.hook_attn_scores` | Planned |
+| Attention pattern | `layer_0.pattern` | `blocks.0.attn.hook_pattern` | Supported with eager softmax instrumentation |
+| Attention scores | `layer_0.attn_scores` | `blocks.0.attn.hook_attn_scores` | Supported with eager softmax instrumentation |
 
 ## Example Config
 

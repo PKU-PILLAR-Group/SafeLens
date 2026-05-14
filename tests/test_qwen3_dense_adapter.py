@@ -67,6 +67,16 @@ class _FakeAttention(_FakeModule):
         self.v_proj = _FakeModule()
         self.o_proj = _FakeModule()
 
+    def forward(self, scores: Any | None = None) -> Any:
+        try:
+            import torch
+        except ImportError:
+            pattern = _FakeAttentionPattern()
+        else:
+            actual_scores = scores if scores is not None else torch.zeros(1, 2, 3, 3)
+            pattern = torch.softmax(actual_scores, dim=-1)
+        return self.run_forward((["attn"], pattern))
+
 
 class _FakeLayer(_FakeModule):
     def __init__(self) -> None:
@@ -95,8 +105,7 @@ class _FakeQwen3CausalLM:
 
     def __call__(self, **kwargs: Any) -> dict[str, Any]:
         if kwargs.get("output_attentions"):
-            pattern = _FakeAttentionPattern()
-            output = self.model.layers[0].self_attn.run_forward((["attn"], pattern))
+            output = self.model.layers[0].self_attn.forward(kwargs.get("scores"))
             return {"attention": output, "output_attentions": True}
         mlp = self.model.layers[0].mlp
         first = mlp.run_forward(["first"])
@@ -195,11 +204,48 @@ def test_qwen3_run_with_cache_captures_attention_pattern() -> None:
     output, cache = wrapper.run_with_cache({"text": "hello"}, layers=["blocks.0.attn.hook_pattern"])
 
     assert output["output_attentions"] is True
-    assert isinstance(cache["blocks.0.attn.hook_pattern"], _FakeAttentionPattern)
+    assert getattr(cache["blocks.0.attn.hook_pattern"], "ndim", None) == 4
 
 
-def test_qwen3_attention_pattern_hooks_are_explicitly_unsupported() -> None:
+def test_qwen3_run_with_cache_captures_attention_scores() -> None:
+    torch = pytest.importorskip("torch")
+    wrapper = _wrapper_with_fake_model()
+    scores = torch.randn(1, 2, 3, 3)
+
+    output, cache = wrapper.run_with_cache(
+        {"scores": scores},
+        layers=["blocks.0.attn.hook_attn_scores"],
+    )
+
+    assert output["output_attentions"] is True
+    assert torch.equal(cache["blocks.0.attn.hook_attn_scores"], scores)
+
+
+def test_qwen3_attention_scores_hooks_patch_softmax_inputs() -> None:
+    torch = pytest.importorskip("torch")
     wrapper = _wrapper_with_fake_model()
 
-    with pytest.raises(NotImplementedError, match="pattern patching"):
-        wrapper.add_hook("layer_0.pattern", lambda **kwargs: kwargs["activation"])
+    def force_first_source(**kwargs: Any) -> Any:
+        patched = torch.full_like(kwargs["activation"], -1000.0)
+        patched[..., 0] = 1000.0
+        return patched
+
+    wrapper.add_hook("layer_0.attn_scores", force_first_source)
+
+    _tokens, pattern = wrapper.model.model.layers[0].self_attn.forward(torch.zeros(1, 2, 1, 2))
+    assert torch.all(pattern[..., 0] > 0.99)
+
+
+def test_qwen3_attention_pattern_hooks_patch_softmax_outputs() -> None:
+    torch = pytest.importorskip("torch")
+    wrapper = _wrapper_with_fake_model()
+
+    def force_last_source(**kwargs: Any) -> Any:
+        patched = torch.zeros_like(kwargs["activation"])
+        patched[..., -1] = 1
+        return patched
+
+    wrapper.add_hook("layer_0.pattern", force_last_source)
+
+    _tokens, pattern = wrapper.model.model.layers[0].self_attn.forward(torch.zeros(1, 2, 3, 3))
+    assert torch.all(pattern[..., -1] == 1)
