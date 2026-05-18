@@ -57,6 +57,28 @@ def test_dummy_pipeline_runs_and_writes_report(tmp_path: Path) -> None:
     assert written["summary"]["flagged_count"] == 1
 
 
+def test_dummy_probe_reports_string_component_layers(tmp_path: Path) -> None:
+    config = PipelineConfig.model_validate(
+        {
+            "model": {"name": "dummy"},
+            "pipeline": {
+                "probes": [
+                    {
+                        "name": "dummy_probe",
+                        "config": {"layers": ["layer_0.resid_pre"]},
+                    }
+                ],
+            },
+            "dataset": [{"id": "sample", "text": "hello"}],
+            "output": {"report_path": str(tmp_path / "report.json")},
+        }
+    )
+
+    report = PipelineRunner(config).run()
+
+    assert report.reports[0].probe_results[0].critical_layers == ["layer_0.resid_pre"]
+
+
 def test_flagsafe_adapter_maps_action(tmp_path: Path) -> None:
     report = PipelineRunner(
         PipelineConfig.model_validate(

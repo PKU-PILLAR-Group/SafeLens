@@ -105,6 +105,80 @@ class _FakeQwenModel:
         return {"q": q_out}
 
 
+class _FakeTupleOutputModel(_FakeQwenModel):
+    def __call__(self, **kwargs: Any) -> dict[str, Any]:
+        _ = kwargs
+        output = self.model.layers[0].run_forward((["hidden"], ["present"]))
+        return {"layer": output}
+
+
+class _FakeBertConfig:
+    model_type = "bert"
+
+
+class _FakeBertAttentionSelf(_FakeModule):
+    def __init__(self) -> None:
+        super().__init__()
+        self.query = _FakeModule()
+        self.key = _FakeModule()
+        self.value = _FakeModule()
+
+
+class _FakeBertAttentionOutput:
+    def __init__(self) -> None:
+        self.dense = _FakeModule()
+
+
+class _FakeBertAttention:
+    def __init__(self) -> None:
+        self.self = _FakeBertAttentionSelf()
+        self.output = _FakeBertAttentionOutput()
+
+
+class _FakeBertLayer(_FakeModule):
+    def __init__(self) -> None:
+        super().__init__()
+        self.attention = _FakeBertAttention()
+        self.intermediate = _FakeModule()
+        self.output = _FakeBertAttentionOutput()
+
+
+class _FakeBertEncoder:
+    def __init__(self) -> None:
+        self.layer = [_FakeBertLayer()]
+
+
+class _FakeBertModel:
+    def __init__(self) -> None:
+        self.config = _FakeBertConfig()
+        self.encoder = _FakeBertEncoder()
+
+
+class _FakeT5Config:
+    model_type = "t5"
+    decoder_start_token_id = 0
+    pad_token_id = 0
+
+
+class _FakeT5Model:
+    config = _FakeT5Config()
+
+
+class _FakeTokenizerOutput(dict):
+    def to(self, device: str) -> _FakeTokenizerOutput:
+        _ = device
+        return self
+
+
+class _FakeT5Tokenizer:
+    pad_token_id = 0
+
+    def __call__(self, text: str, return_tensors: str) -> _FakeTokenizerOutput:
+        _ = text, return_tensors
+        torch = pytest.importorskip("torch")
+        return _FakeTokenizerOutput({"input_ids": torch.tensor([[5, 6, 7]])})
+
+
 def test_architecture_adapter_maps_qwen3_components() -> None:
     model = _FakeQwenModel()
     adapter = architecture_adapter_for_model(model, model_name="Qwen/Qwen3-8B")
@@ -162,9 +236,40 @@ def test_architecture_adapter_registry_covers_major_transformer_families() -> No
         "t5_encoder_decoder",
     }.issubset(adapter_names)
     assert len(adapter_names) >= 10
+    assert "result" not in supported_transformer_component_names()
+    assert "result" not in supported_transformer_component_names(include_attention=True)
     assert "attn_scores" not in supported_transformer_component_names()
     assert "pattern" in supported_transformer_component_names(include_pattern=True)
     assert "attn_scores" in supported_transformer_component_names(include_attention=True)
+
+
+def test_architecture_adapter_rejects_merged_attention_result_hooks() -> None:
+    model = _FakeQwenModel()
+    adapter = architecture_adapter_for_model(model, model_name="Qwen/Qwen3-8B")
+
+    assert "result" not in adapter.supported_components()
+    with pytest.raises(NotImplementedError, match="per-head TransformerLens result"):
+        adapter.register_component_hook(model, "layer_0.result", lambda **kwargs: None)
+
+
+def test_bert_architecture_adapter_supports_automodel_paths() -> None:
+    model = _FakeBertModel()
+    adapter = architecture_adapter_for_model(model, model_name="google-bert/bert-base-uncased")
+
+    adapter.register_component_hook(
+        model,
+        "layer_0.q",
+        lambda **kwargs: kwargs["activation"] + ["q"],
+    )
+    adapter.register_component_hook(
+        model,
+        "layer_0.z",
+        lambda **kwargs: kwargs["activation"] + ["z"],
+    )
+
+    layer = model.encoder.layer[0]
+    assert layer.attention.self.query.run_forward(["x"]) == ["x", "q"]
+    assert layer.attention.output.dense.run_pre(["x"]) == ["x", "z"]
 
 
 def test_architecture_adapter_can_infer_from_model_name_without_loading_config() -> None:
@@ -197,6 +302,54 @@ def test_transformer_lens_compatible_wrapper_caches_component_hooks() -> None:
 
     assert output == {"q": ["q"]}
     assert cache == {"blocks.0.attn.hook_q": ["q"]}
+
+
+def test_transformer_component_cache_keeps_integer_layer_cache_names() -> None:
+    class _FakeResidModel(_FakeQwenModel):
+        def __call__(self, **kwargs: Any) -> dict[str, Any]:
+            _ = kwargs
+            resid = self.model.layers[0].run_forward(["resid"])
+            return {"resid": resid}
+
+    wrapper = TransformerLensCompatibleModelWrapper(name="Qwen/Qwen3-8B")
+    wrapper.model = _FakeResidModel()
+
+    output, cache = wrapper.run_with_cache({"text": "hello"}, layers=[0])
+
+    assert output == {"resid": ["resid"]}
+    assert cache == {"layer_0": ["resid"]}
+
+
+def test_transformer_component_cache_extracts_first_tuple_output() -> None:
+    wrapper = TransformerLensCompatibleModelWrapper(name="Qwen/Qwen3-8B")
+    wrapper.model = _FakeTupleOutputModel()
+
+    output, cache = wrapper.run_with_cache({"text": "hello"}, layers=["layer_0.resid_post"])
+
+    assert output == {"layer": (["hidden"], ["present"])}
+    assert cache == {"layer_0.resid_post": ["hidden"]}
+
+
+def test_transformer_component_patch_preserves_tuple_outputs() -> None:
+    wrapper = TransformerLensCompatibleModelWrapper(name="Qwen/Qwen3-8B")
+    wrapper.model = _FakeTupleOutputModel()
+
+    wrapper.add_hook("layer_0.resid_post", lambda **kwargs: kwargs["activation"] + ["patched"])
+    output, _cache = wrapper.run_with_cache({"text": "hello"})
+
+    assert output == {"layer": (["hidden", "patched"], ["present"])}
+
+
+def test_transformer_lens_encoder_decoder_inputs_get_decoder_start_token() -> None:
+    torch = pytest.importorskip("torch")
+    wrapper = TransformerLensCompatibleModelWrapper(name="google-t5/t5-small")
+    wrapper.model = _FakeT5Model()
+    wrapper.tokenizer = _FakeT5Tokenizer()
+
+    inputs = wrapper._prepare_model_inputs({"text": "translate this"})
+
+    assert torch.equal(inputs["input_ids"], torch.tensor([[5, 6, 7]]))
+    assert torch.equal(inputs["decoder_input_ids"], torch.tensor([[0]]))
 
 
 def test_transformer_lens_compatible_wrapper_caches_attention_pattern() -> None:

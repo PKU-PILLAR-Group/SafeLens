@@ -86,7 +86,14 @@
       "properties": {
         "critical_layers": {
           "items": {
-            "type": "integer"
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "string"
+              }
+            ]
           },
           "title": "Critical Layers",
           "type": "array"

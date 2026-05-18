@@ -93,7 +93,6 @@ _TRANSFORMER_LENS_PATCH_COMPONENTS = (
     "k",
     "v",
     "z",
-    "result",
     "pattern",
     "attn_scores",
 )
@@ -408,7 +407,7 @@ class HuggingFaceModelWrapper(ModelWrapper):
             return None
         if adapter.requires_output_attentions(layer):
             self._run_requires_output_attentions = True
-        cache_name = str(layer)
+        cache_name = activation_name_for_layer(layer) if isinstance(layer, int) else str(layer)
 
         def cache_component(*, activation: Any, **_kwargs: Any) -> None:
             cache[cache_name] = activation
@@ -544,6 +543,37 @@ class TransformerLensCompatibleModelWrapper(HuggingFaceModelWrapper):
                     **model_kwargs,
                 }
             )
+        if kind == "encoder_decoder":
+            prepared = super()._prepare_model_inputs(batch)
+            prepared.update(model_kwargs)
+            if not any(
+                key in prepared
+                for key in ("decoder_input_ids", "decoder_inputs_embeds", "labels")
+            ):
+                input_ids = prepared.get("input_ids")
+                if input_ids is None:
+                    raise ValueError(
+                        "Encoder-decoder models require input_ids or explicit decoder inputs."
+                    )
+                config = getattr(self._require_model(), "config", None)
+                decoder_start_token_id = batch.get(
+                    "decoder_start_token_id",
+                    getattr(config, "decoder_start_token_id", None),
+                )
+                if decoder_start_token_id is None:
+                    decoder_start_token_id = getattr(config, "pad_token_id", None)
+                if decoder_start_token_id is None:
+                    decoder_start_token_id = getattr(self.tokenizer, "pad_token_id", None)
+                if decoder_start_token_id is None:
+                    raise ValueError(
+                        "Encoder-decoder models require decoder_input_ids when no "
+                        "decoder_start_token_id or pad_token_id is available."
+                    )
+                prepared["decoder_input_ids"] = input_ids.new_full(
+                    (input_ids.shape[0], 1),
+                    int(decoder_start_token_id),
+                )
+            return self._with_attention_flags(prepared)
         if kind != "audio_encoder":
             prepared = super()._prepare_model_inputs(batch)
             prepared.update(model_kwargs)
@@ -985,7 +1015,6 @@ def _normalize_qwen3_component(component: str, *, layer_type: str | None = None)
         "k": "k",
         "v": "v",
         "z": "z",
-        "result": "z",
         "pattern": "pattern",
         "attn_scores": "attn_scores",
     }
@@ -1205,7 +1234,7 @@ def register_builtin_model_adapters() -> None:
             display_name="Qwen3 Dense",
             aliases=("qwen3", "qwen3-dense"),
             description="Qwen3 dense <=35B adapter with component-level hooks.",
-            dependencies=("torch>=2", "transformers>=4.40"),
+            dependencies=("torch>=2", "transformers>=5.8"),
             model_name_patterns=("Qwen/Qwen3-{0.6,1.7,4,8,14,32}B",),
             capabilities=ModelAdapterCapabilities(
                 supported_hooks=tuple(qwen3_supported_hook_components(include_attention=True)),
@@ -1247,7 +1276,7 @@ def register_builtin_model_adapters() -> None:
                 "Independent SafeLens adapter for model families mirrored from "
                 "the TransformerLens supported model list."
             ),
-            dependencies=("torch>=2", "transformers>=4.40"),
+            dependencies=("torch>=2", "transformers>=5.8"),
             model_name_patterns=(
                 "gpt2",
                 "EleutherAI/pythia-*",
@@ -1299,7 +1328,7 @@ def register_builtin_model_adapters() -> None:
             display_name="HuggingFace Transformers",
             aliases=("hf",),
             description="Generic Transformers causal language model adapter.",
-            dependencies=("torch>=2", "transformers>=4.40"),
+            dependencies=("torch>=2", "transformers>=5.8"),
             model_name_patterns=("organization/model-name",),
             capabilities=ModelAdapterCapabilities(
                 supported_hooks=(
@@ -1336,7 +1365,7 @@ def register_builtin_model_adapters() -> None:
             display_name="ModelScope",
             aliases=("ms",),
             description="ModelScope snapshot download followed by Transformers loading.",
-            dependencies=("modelscope>=1.15", "torch>=2", "transformers>=4.40"),
+            dependencies=("modelscope>=1.15", "torch>=2", "transformers>=5.8"),
             model_name_patterns=("namespace/model-name",),
             capabilities=ModelAdapterCapabilities(
                 supported_hooks=(
@@ -1374,7 +1403,7 @@ def register_builtin_model_adapters() -> None:
             display_name="Local Transformers Directory",
             aliases=(),
             description="Local Transformers-compatible model directory.",
-            dependencies=("torch>=2", "transformers>=4.40"),
+            dependencies=("torch>=2", "transformers>=5.8"),
             model_name_patterns=("./models/local-causal-lm", "/abs/path/to/model"),
             capabilities=ModelAdapterCapabilities(
                 supported_hooks=(

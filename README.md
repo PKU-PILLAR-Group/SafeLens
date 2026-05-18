@@ -137,7 +137,9 @@ caches, and generic activation patching while keeping SafeLens dependency-light.
 
 Supported component families include residual stream (`resid_pre`, `resid_mid`,
 `resid_post`), block outputs (`attn_out`, `mlp_out`), attention head vectors
-(`q`, `k`, `v`, `z`, `result`), attention patterns, and attention scores.
+(`q`, `k`, `v`, `z`), attention patterns, and attention scores. The core
+patching API also includes TransformerLens-style `result` helpers, but a model
+wrapper must expose true per-head result tensors before those helpers are valid.
 The API can use SafeLens names such as `layer_0.resid_pre` or
 TransformerLens-style names such as `blocks.0.hook_resid_pre`.
 Cache utilities also cover TransformerLens-style workflows such as accumulated

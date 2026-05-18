@@ -5,6 +5,10 @@ TransformerLens scale across many model families: an architecture adapter maps
 provider-specific module paths onto canonical components such as `resid_pre`,
 `attn_out`, `mlp_out`, `q`, `k`, `v`, and `z`.
 
+The current Transformers bridge does not expose TransformerLens `result`
+components because the available HuggingFace module hooks see merged attention
+projection outputs rather than true per-head result tensors.
+
 The bridge is independent of TransformerLens. It is used by Transformers-backed
 wrappers after the model is loaded.
 

@@ -22,6 +22,8 @@ from SafeLens.core.patching import (
     generic_activation_patch,
     get_act_patch_attn_head_out_by_pos,
     get_act_patch_attn_head_pattern_dest_src_pos,
+    get_act_patch_attn_head_result_all_pos,
+    get_act_patch_attn_head_result_by_pos,
     get_act_patch_block_every,
     get_act_patch_resid_pre,
     layer_head_vector_patch_setter,
@@ -420,6 +422,34 @@ def test_attention_head_vector_patch_runs_by_position() -> None:
 
     assert results[0].output["activation"] == [[[[0], [0]], [[30], [0]]]]
     assert results[0].metric == 30.0
+
+
+def test_attention_head_result_patch_helpers_require_per_head_result_shape() -> None:
+    model = ComponentWrapper([[[[0], [0]], [[0], [0]]]])
+    clean_cache = ActivationCache({"layer_0.result": [[[[10], [20]], [[30], [40]]]]})
+
+    by_pos = get_act_patch_attn_head_result_by_pos(
+        model,
+        {"activation": [[[[0], [0]], [[0], [0]]]]},
+        clean_cache,
+        metric=lambda output: _nested_sum(output["activation"]),
+        layers=[0],
+        positions=[1],
+        heads=[0],
+    )
+    all_pos = get_act_patch_attn_head_result_all_pos(
+        model,
+        {"activation": [[[[0], [0]], [[0], [0]]]]},
+        clean_cache,
+        metric=lambda output: _nested_sum(output["activation"]),
+        layers=[0],
+        heads=[1],
+    )
+
+    assert by_pos[0].output["activation"] == [[[[0], [0]], [[30], [0]]]]
+    assert by_pos[0].metric == 30.0
+    assert all_pos[0].output["activation"] == [[[[0], [20]], [[0], [40]]]]
+    assert all_pos[0].metric == 60.0
 
 
 def test_attention_head_vector_patch_runs_all_positions() -> None:

@@ -34,9 +34,10 @@ and TransformerLens-style names such as `blocks.0.hook_resid_pre` by setting
 `name_style="transformer_lens"`.
 
 Model compatibility note: the patching layer can express the operations above,
-but a concrete `ModelWrapper` must expose matching hook points. A raw
-HuggingFace module wrapper only exposes module-level hooks unless extended with
-component hooks.
+but a concrete `ModelWrapper` must expose matching hook points and tensor
+shapes. In particular, `result` helpers require true per-head result tensors,
+not merged attention projection outputs. A raw HuggingFace module wrapper only
+exposes module-level hooks unless extended with component hooks.
 
 Example:
 

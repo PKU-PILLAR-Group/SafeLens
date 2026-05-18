@@ -25,6 +25,12 @@ coverage.xml
 site/
 safety_scan.json
 outputs/
+tests/.hf-real-flow/
+tests/hf-real-flow-artifacts/
+tests/.qwen3-real-flow/
+tests/qwen3-real-flow-artifacts/
+tests/.multi-real-flow/
+tests/multi-real-flow-artifacts/
 checkpoints/
 models/
 wandb/

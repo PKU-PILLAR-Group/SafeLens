@@ -46,12 +46,12 @@ dependencies = [
 [project.optional-dependencies]
 models = [
   "torch>=2",
-  "transformers>=4.40"
+  "transformers>=5.8"
 ]
 modelscope = [
   "modelscope>=1.15",
   "torch>=2",
-  "transformers>=4.40"
+  "transformers>=5.8"
 ]
 dev = [
   "build>=1.2",

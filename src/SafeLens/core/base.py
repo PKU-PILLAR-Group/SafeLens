@@ -48,7 +48,7 @@ class ProbeResult(SerializableModel):
     """Result returned by an endogenous safety probe."""
 
     risk_score: float = Field(ge=0.0, le=1.0)
-    critical_layers: list[int] = Field(default_factory=list)
+    critical_layers: list[LayerRef] = Field(default_factory=list)
     intervention_applied: bool = False
     details: dict[str, Any] = Field(default_factory=dict)
 

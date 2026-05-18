@@ -36,6 +36,10 @@ CANONICAL_TRANSFORMER_COMPONENTS: tuple[str, ...] = (
 _UNSUPPORTED_ATTENTION_REASON = (
     "this fallback adapter has no known attention module path for softmax instrumentation"
 )
+_UNSUPPORTED_RESULT_REASON = (
+    "Transformers modules expose merged attention outputs here, not per-head "
+    "TransformerLens result vectors"
+)
 
 
 @dataclass(frozen=True)
@@ -249,17 +253,20 @@ def supported_transformer_component_names(
     include_attention: bool = False,
 ) -> tuple[str, ...]:
     """Return the canonical component vocabulary exposed by model bridges."""
+    supported_components = tuple(
+        component for component in CANONICAL_TRANSFORMER_COMPONENTS if component != "result"
+    )
     if include_attention:
-        return CANONICAL_TRANSFORMER_COMPONENTS
+        return supported_components
     if include_pattern:
         return tuple(
             component
-            for component in CANONICAL_TRANSFORMER_COMPONENTS
+            for component in supported_components
             if component != "attn_scores"
         )
     return tuple(
         component
-        for component in CANONICAL_TRANSFORMER_COMPONENTS
+        for component in supported_components
         if component not in {"pattern", "attn_scores"}
     )
 
@@ -304,7 +311,9 @@ def _make_component_output_hook(
         )
         if spec.value != "output":
             return None
-        return output if patched is None else patched
+        if patched is None:
+            return None
+        return replace_component_activation(output, patched, spec)
 
     return hook
 
@@ -382,7 +391,7 @@ def call_component_hook(
 def extract_component_activation(output: Any, spec: ComponentHookSpec) -> Any:
     """Extract the activation value for a component from a module hook output."""
     if spec.value == "output":
-        return output
+        return first_output(output)
     if spec.value == "attention_pattern":
         pattern = _find_attention_pattern(output)
         if pattern is None:
@@ -401,6 +410,22 @@ def extract_component_activation(output: Any, spec: ComponentHookSpec) -> Any:
             )
         return scores
     return output
+
+
+def first_output(output: Any) -> Any:
+    """Return the tensor payload from common Transformers module outputs."""
+    if isinstance(output, tuple):
+        return output[0]
+    return output
+
+
+def replace_component_activation(output: Any, patched: Any, spec: ComponentHookSpec) -> Any:
+    """Replace the tensor payload while preserving tuple/list module output shape."""
+    if spec.value != "output":
+        return output
+    if isinstance(output, tuple):
+        return (patched, *output[1:])
+    return patched
 
 
 def _register_attention_softmax_hook(
@@ -633,6 +658,16 @@ def _unsupported_attention_scores_spec() -> ComponentHookSpec:
     )
 
 
+def _unsupported_result_spec() -> ComponentHookSpec:
+    return _spec(
+        "result",
+        "forward_output",
+        "",
+        supported=False,
+        unsupported_reason=_UNSUPPORTED_RESULT_REASON,
+    )
+
+
 LLAMA_LIKE_ADAPTER = ArchitectureAdapter(
     name="llama_like_decoder",
     model_types=(
@@ -673,7 +708,7 @@ LLAMA_LIKE_ADAPTER = ArchitectureAdapter(
         _spec("k", "forward_output", "model.layers.{layer}.self_attn.k_proj"),
         _spec("v", "forward_output", "model.layers.{layer}.self_attn.v_proj"),
         _spec("z", "forward_input", "model.layers.{layer}.self_attn.o_proj"),
-        _spec("result", "forward_output", "model.layers.{layer}.self_attn.o_proj"),
+        _unsupported_result_spec(),
         _pattern_spec("model.layers.{layer}.self_attn"),
         _scores_spec("model.layers.{layer}.self_attn"),
     ),
@@ -694,7 +729,7 @@ GPT2_ADAPTER = ArchitectureAdapter(
         _spec("k", "forward_output", "transformer.h.{layer}.attn.c_attn"),
         _spec("v", "forward_output", "transformer.h.{layer}.attn.c_attn"),
         _spec("z", "forward_input", "transformer.h.{layer}.attn.c_proj"),
-        _spec("result", "forward_output", "transformer.h.{layer}.attn.c_proj"),
+        _unsupported_result_spec(),
         _pattern_spec("transformer.h.{layer}.attn"),
         _scores_spec("transformer.h.{layer}.attn"),
     ),
@@ -719,7 +754,7 @@ GPT_NEOX_ADAPTER = ArchitectureAdapter(
         _spec("k", "forward_output", "gpt_neox.layers.{layer}.attention.query_key_value"),
         _spec("v", "forward_output", "gpt_neox.layers.{layer}.attention.query_key_value"),
         _spec("z", "forward_input", "gpt_neox.layers.{layer}.attention.dense"),
-        _spec("result", "forward_output", "gpt_neox.layers.{layer}.attention.dense"),
+        _unsupported_result_spec(),
         _pattern_spec("gpt_neox.layers.{layer}.attention"),
         _scores_spec("gpt_neox.layers.{layer}.attention"),
     ),
@@ -739,7 +774,7 @@ GPTJ_ADAPTER = ArchitectureAdapter(
         _spec("k", "forward_output", "transformer.h.{layer}.attn.k_proj"),
         _spec("v", "forward_output", "transformer.h.{layer}.attn.v_proj"),
         _spec("z", "forward_input", "transformer.h.{layer}.attn.out_proj"),
-        _spec("result", "forward_output", "transformer.h.{layer}.attn.out_proj"),
+        _unsupported_result_spec(),
         _pattern_spec("transformer.h.{layer}.attn"),
         _scores_spec("transformer.h.{layer}.attn"),
     ),
@@ -760,7 +795,7 @@ GPT_NEO_ADAPTER = ArchitectureAdapter(
         _spec("k", "forward_output", "transformer.h.{layer}.attn.attention.k_proj"),
         _spec("v", "forward_output", "transformer.h.{layer}.attn.attention.v_proj"),
         _spec("z", "forward_input", "transformer.h.{layer}.attn.attention.out_proj"),
-        _spec("result", "forward_output", "transformer.h.{layer}.attn.attention.out_proj"),
+        _unsupported_result_spec(),
         _pattern_spec("transformer.h.{layer}.attn.attention"),
         _scores_spec("transformer.h.{layer}.attn.attention"),
     ),
@@ -788,11 +823,7 @@ JOINT_QKV_DECODER_ADAPTER = ArchitectureAdapter(
             "forward_input",
             "transformer.h.{layer}.self_attention.dense",
         ),
-        _spec(
-            "result",
-            "forward_output",
-            "transformer.h.{layer}.self_attention.dense",
-        ),
+        _unsupported_result_spec(),
         _pattern_spec("transformer.h.{layer}.self_attention"),
         _scores_spec("transformer.h.{layer}.self_attention"),
     ),
@@ -813,7 +844,7 @@ MPT_ADAPTER = ArchitectureAdapter(
         _spec("k", "forward_output", "transformer.blocks.{layer}.attn.Wqkv"),
         _spec("v", "forward_output", "transformer.blocks.{layer}.attn.Wqkv"),
         _spec("z", "forward_input", "transformer.blocks.{layer}.attn.out_proj"),
-        _spec("result", "forward_output", "transformer.blocks.{layer}.attn.out_proj"),
+        _unsupported_result_spec(),
         _pattern_spec("transformer.blocks.{layer}.attn"),
         _scores_spec("transformer.blocks.{layer}.attn"),
     ),
@@ -843,12 +874,7 @@ PHI_ADAPTER = ArchitectureAdapter(
             "model.layers.{layer}.self_attn.dense",
             "model.layers.{layer}.self_attn.o_proj",
         ),
-        _spec(
-            "result",
-            "forward_output",
-            "model.layers.{layer}.self_attn.dense",
-            "model.layers.{layer}.self_attn.o_proj",
-        ),
+        _unsupported_result_spec(),
         _pattern_spec("model.layers.{layer}.self_attn"),
         _scores_spec("model.layers.{layer}.self_attn"),
     ),
@@ -869,7 +895,7 @@ OPT_ADAPTER = ArchitectureAdapter(
         _spec("k", "forward_output", "model.decoder.layers.{layer}.self_attn.k_proj"),
         _spec("v", "forward_output", "model.decoder.layers.{layer}.self_attn.v_proj"),
         _spec("z", "forward_input", "model.decoder.layers.{layer}.self_attn.out_proj"),
-        _spec("result", "forward_output", "model.decoder.layers.{layer}.self_attn.out_proj"),
+        _unsupported_result_spec(),
         _pattern_spec("model.decoder.layers.{layer}.self_attn"),
         _scores_spec("model.decoder.layers.{layer}.self_attn"),
     ),
@@ -880,18 +906,59 @@ BERT_ADAPTER = ArchitectureAdapter(
     model_types=("bert",),
     model_name_markers=("bert-", "google-bert/"),
     component_specs=(
-        _spec("resid_pre", "forward_input", "bert.encoder.layer.{layer}"),
-        _spec("resid_mid", "forward_input", "bert.encoder.layer.{layer}.intermediate"),
-        _spec("resid_post", "forward_output", "bert.encoder.layer.{layer}"),
-        _spec("attn_out", "forward_output", "bert.encoder.layer.{layer}.attention.output.dense"),
-        _spec("mlp_out", "forward_output", "bert.encoder.layer.{layer}.output.dense"),
-        _spec("q", "forward_output", "bert.encoder.layer.{layer}.attention.self.query"),
-        _spec("k", "forward_output", "bert.encoder.layer.{layer}.attention.self.key"),
-        _spec("v", "forward_output", "bert.encoder.layer.{layer}.attention.self.value"),
-        _spec("z", "forward_input", "bert.encoder.layer.{layer}.attention.output.dense"),
-        _spec("result", "forward_output", "bert.encoder.layer.{layer}.attention.output.dense"),
-        _pattern_spec("bert.encoder.layer.{layer}.attention.self"),
-        _scores_spec("bert.encoder.layer.{layer}.attention.self"),
+        _spec("resid_pre", "forward_input", "encoder.layer.{layer}", "bert.encoder.layer.{layer}"),
+        _spec(
+            "resid_mid",
+            "forward_input",
+            "encoder.layer.{layer}.intermediate",
+            "bert.encoder.layer.{layer}.intermediate",
+        ),
+        _spec("resid_post", "forward_output", "encoder.layer.{layer}", "bert.encoder.layer.{layer}"),
+        _spec(
+            "attn_out",
+            "forward_output",
+            "encoder.layer.{layer}.attention.output.dense",
+            "bert.encoder.layer.{layer}.attention.output.dense",
+        ),
+        _spec(
+            "mlp_out",
+            "forward_output",
+            "encoder.layer.{layer}.output.dense",
+            "bert.encoder.layer.{layer}.output.dense",
+        ),
+        _spec(
+            "q",
+            "forward_output",
+            "encoder.layer.{layer}.attention.self.query",
+            "bert.encoder.layer.{layer}.attention.self.query",
+        ),
+        _spec(
+            "k",
+            "forward_output",
+            "encoder.layer.{layer}.attention.self.key",
+            "bert.encoder.layer.{layer}.attention.self.key",
+        ),
+        _spec(
+            "v",
+            "forward_output",
+            "encoder.layer.{layer}.attention.self.value",
+            "bert.encoder.layer.{layer}.attention.self.value",
+        ),
+        _spec(
+            "z",
+            "forward_input",
+            "encoder.layer.{layer}.attention.output.dense",
+            "bert.encoder.layer.{layer}.attention.output.dense",
+        ),
+        _unsupported_result_spec(),
+        _pattern_spec(
+            "encoder.layer.{layer}.attention.self",
+            "bert.encoder.layer.{layer}.attention.self",
+        ),
+        _scores_spec(
+            "encoder.layer.{layer}.attention.self",
+            "bert.encoder.layer.{layer}.attention.self",
+        ),
     ),
 )
 
@@ -909,7 +976,7 @@ T5_ENCODER_ADAPTER = ArchitectureAdapter(
         _spec("k", "forward_output", "encoder.block.{layer}.layer.0.SelfAttention.k"),
         _spec("v", "forward_output", "encoder.block.{layer}.layer.0.SelfAttention.v"),
         _spec("z", "forward_input", "encoder.block.{layer}.layer.0.SelfAttention.o"),
-        _spec("result", "forward_output", "encoder.block.{layer}.layer.0.SelfAttention.o"),
+        _unsupported_result_spec(),
         _pattern_spec("encoder.block.{layer}.layer.0.SelfAttention"),
         _scores_spec("encoder.block.{layer}.layer.0.SelfAttention"),
     ),
