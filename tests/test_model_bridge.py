@@ -164,7 +164,7 @@ class _FakeT5Model:
     config = _FakeT5Config()
 
 
-class _FakeTokenizerOutput(dict):
+class _FakeTokenizerOutput(dict[str, Any]):
     def to(self, device: str) -> _FakeTokenizerOutput:
         _ = device
         return self

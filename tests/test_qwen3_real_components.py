@@ -41,7 +41,6 @@ from SafeLens.core.patching import (
 from SafeLens.pipelines.runner import PipelineRunner
 from SafeLens.utils import Qwen3DenseModelWrapper, build_model_wrapper
 
-
 pytestmark = [pytest.mark.integration, pytest.mark.slow]
 
 _RUN_QWEN3_REAL_FLOW = os.environ.get("SAFELENS_RUN_QWEN3_REAL_FLOW") == "1"
@@ -69,7 +68,7 @@ _SUPPORTED_COMPONENTS = (
 _CACHE_LAYERS = tuple(f"layer_0.{component}" for component in _SUPPORTED_COMPONENTS)
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture(scope="module")  # type: ignore[misc]
 def qwen3_wrapper() -> Iterable[Qwen3DenseModelWrapper]:
     if not _RUN_QWEN3_REAL_FLOW:
         pytest.skip("Set SAFELENS_RUN_QWEN3_REAL_FLOW=1 to run real Qwen3 tests.")
@@ -120,7 +119,7 @@ def _assert_finite_results(results: Iterable[PatchResult], *, expected_count: in
 
 def _build_clean_cache(wrapper: Qwen3DenseModelWrapper) -> ActivationCache:
     output, cache = wrapper.run_with_cache({"text": _CLEAN_TEXT}, layers=_CACHE_LAYERS)
-    assert getattr(output, "logits").ndim == 3
+    assert output.logits.ndim == 3
     assert set(_CACHE_LAYERS) <= set(cache)
     return ActivationCache(cache)
 
@@ -151,15 +150,18 @@ def test_qwen3_real_model_hooks_every_supported_component(
     for component in _SUPPORTED_COMPONENTS:
         seen: list[str] = []
 
-        def record_component(*, activation: Any, component: str, **_kwargs: Any) -> Any:
-            assert getattr(activation, "shape", None) is not None
-            seen.append(component)
-            return None
+        def make_recorder(component_name: str, observed: list[str]) -> Callable[..., Any]:
+            def record_component(*, activation: Any, **_kwargs: Any) -> Any:
+                assert getattr(activation, "shape", None) is not None
+                observed.append(component_name)
+                return None
+
+            return record_component
 
         try:
-            qwen3_wrapper.add_hook(f"layer_0.{component}", record_component)
+            qwen3_wrapper.add_hook(f"layer_0.{component}", make_recorder(component, seen))
             output, _cache = qwen3_wrapper.run_with_cache({"text": _CLEAN_TEXT})
-            assert getattr(output, "logits").ndim == 3
+            assert output.logits.ndim == 3
             assert seen == [component]
         finally:
             qwen3_wrapper.remove_hooks()

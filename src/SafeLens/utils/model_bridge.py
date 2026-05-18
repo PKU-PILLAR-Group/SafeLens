@@ -259,11 +259,7 @@ def supported_transformer_component_names(
     if include_attention:
         return supported_components
     if include_pattern:
-        return tuple(
-            component
-            for component in supported_components
-            if component != "attn_scores"
-        )
+        return tuple(component for component in supported_components if component != "attn_scores")
     return tuple(
         component
         for component in supported_components
@@ -913,7 +909,12 @@ BERT_ADAPTER = ArchitectureAdapter(
             "encoder.layer.{layer}.intermediate",
             "bert.encoder.layer.{layer}.intermediate",
         ),
-        _spec("resid_post", "forward_output", "encoder.layer.{layer}", "bert.encoder.layer.{layer}"),
+        _spec(
+            "resid_post",
+            "forward_output",
+            "encoder.layer.{layer}",
+            "bert.encoder.layer.{layer}",
+        ),
         _spec(
             "attn_out",
             "forward_output",

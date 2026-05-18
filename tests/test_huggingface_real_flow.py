@@ -11,7 +11,6 @@ from SafeLens.core.base import PipelineConfig
 from SafeLens.pipelines.runner import PipelineRunner
 from SafeLens.utils import HuggingFaceModelWrapper, build_model_wrapper
 
-
 pytestmark = [pytest.mark.integration, pytest.mark.slow]
 
 _RUN_HF_REAL_FLOW = os.environ.get("SAFELENS_RUN_HF_REAL_FLOW") == "1"
@@ -20,9 +19,7 @@ _MODEL_ID = os.environ.get("SAFELENS_HF_REAL_FLOW_MODEL", "sshleifer/tiny-gpt2")
 
 def _skip_unless_enabled() -> None:
     if not _RUN_HF_REAL_FLOW:
-        pytest.skip(
-            "Set SAFELENS_RUN_HF_REAL_FLOW=1 to run real HuggingFace download tests."
-        )
+        pytest.skip("Set SAFELENS_RUN_HF_REAL_FLOW=1 to run real HuggingFace download tests.")
     pytest.importorskip("torch")
     pytest.importorskip("transformers")
 
@@ -59,8 +56,8 @@ def test_huggingface_wrapper_real_model_forward_cache_and_generate() -> None:
             layers=[0, "layer_0.resid_post", "blocks.0.hook_resid_post"],
         )
 
-        assert getattr(output, "logits").ndim == 3
-        assert getattr(output, "logits").shape[0] == 1
+        assert output.logits.ndim == 3
+        assert output.logits.shape[0] == 1
         assert {"layer_0", "layer_0.resid_post", "blocks.0.hook_resid_post"} <= set(cache)
         for activation in cache.values():
             assert getattr(activation, "shape", None) is not None

@@ -547,8 +547,7 @@ class TransformerLensCompatibleModelWrapper(HuggingFaceModelWrapper):
             prepared = super()._prepare_model_inputs(batch)
             prepared.update(model_kwargs)
             if not any(
-                key in prepared
-                for key in ("decoder_input_ids", "decoder_inputs_embeds", "labels")
+                key in prepared for key in ("decoder_input_ids", "decoder_inputs_embeds", "labels")
             ):
                 input_ids = prepared.get("input_ids")
                 if input_ids is None:

@@ -16,7 +16,6 @@ from SafeLens.core.patching import (
 )
 from SafeLens.utils import TransformerLensCompatibleModelWrapper, build_model_wrapper
 
-
 pytestmark = [pytest.mark.integration, pytest.mark.slow]
 
 _RUN_MULTI_REAL_FLOW = os.environ.get("SAFELENS_RUN_MULTI_REAL_FLOW") == "1"
@@ -84,7 +83,9 @@ def _assert_finite_results(results: Iterable[PatchResult]) -> None:
     assert math.isfinite(result_list[0].metric)
 
 
-@pytest.mark.parametrize(("family", "model_id"), _CAUSAL_MODEL_CASES + _ENCODER_MODEL_CASES)
+@pytest.mark.parametrize(  # type: ignore[misc]
+    ("family", "model_id"), _CAUSAL_MODEL_CASES + _ENCODER_MODEL_CASES
+)
 def test_transformer_lens_real_model_caches_common_components(
     family: str,
     model_id: str,
@@ -95,9 +96,10 @@ def test_transformer_lens_real_model_caches_common_components(
         cache_layers = tuple(f"layer_0.{component}" for component in _COMMON_COMPONENTS)
         output, cache = wrapper.run_with_cache({"text": _TEXT}, layers=cache_layers)
 
-        assert getattr(output, "logits", None) is not None or getattr(
-            output, "last_hidden_state", None
-        ) is not None
+        assert (
+            getattr(output, "logits", None) is not None
+            or getattr(output, "last_hidden_state", None) is not None
+        )
         assert set(cache_layers) <= set(cache)
         for layer_name in cache_layers:
             activation = cache[layer_name]
@@ -108,7 +110,7 @@ def test_transformer_lens_real_model_caches_common_components(
         wrapper.remove_hooks()
 
 
-@pytest.mark.parametrize(("family", "model_id"), _CAUSAL_MODEL_CASES)
+@pytest.mark.parametrize(("family", "model_id"), _CAUSAL_MODEL_CASES)  # type: ignore[misc]
 def test_transformer_lens_real_causal_models_generate(
     family: str,
     model_id: str,
@@ -129,7 +131,9 @@ def test_transformer_lens_real_causal_models_generate(
         wrapper.remove_hooks()
 
 
-@pytest.mark.parametrize(("family", "model_id"), _CAUSAL_MODEL_CASES + _ENCODER_MODEL_CASES)
+@pytest.mark.parametrize(  # type: ignore[misc]
+    ("family", "model_id"), _CAUSAL_MODEL_CASES + _ENCODER_MODEL_CASES
+)
 def test_transformer_lens_real_model_runs_core_patches(
     family: str,
     model_id: str,
