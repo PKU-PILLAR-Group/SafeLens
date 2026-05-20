@@ -24,7 +24,9 @@ Current architecture adapters:
 - `mpt_decoder`: MPT-style decoder blocks.
 - `phi_decoder`: Phi-style decoder blocks.
 - `opt_decoder`: OPT-style decoder layers.
-- `bert_encoder`: BERT-style encoder layers.
+- `bert_encoder`: BERT/RoBERTa-style encoder layers.
+- `distilbert_encoder`: DistilBERT encoder layers.
+- `audio_encoder`: Wav2Vec2/Hubert encoder layers.
 - `t5_encoder_decoder`: initial T5 encoder-stack component mapping.
 
 Attention pattern caching uses returned attention weights when available.

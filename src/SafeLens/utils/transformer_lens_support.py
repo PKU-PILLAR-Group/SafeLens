@@ -284,6 +284,8 @@ TRANSFORMER_LENS_COMMON_ALIASES: tuple[str, ...] = (
     "solu-1l",
     "attn-only-2l",
     "bert-base-uncased",
+    "roberta-base",
+    "distilbert-base-uncased",
     "t5-small",
     "hubert-base-ls960",
     "wav2vec2-base",
@@ -315,6 +317,8 @@ TRANSFORMER_LENS_COMPATIBLE_MODEL_ALIASES: dict[str, str] = {
     "solu-1l": "NeelNanda/SoLU_1L512W_C4_Code",
     "attn-only-2l": "NeelNanda/Attn_Only_2L512W_C4_Code",
     "bert-base-uncased": "google-bert/bert-base-uncased",
+    "roberta-base": "FacebookAI/roberta-base",
+    "distilbert-base-uncased": "distilbert/distilbert-base-uncased",
     "t5-small": "google-t5/t5-small",
     "hubert-base-ls960": "facebook/hubert-base-ls960",
     "wav2vec2-base": "facebook/wav2vec2-base",
@@ -351,6 +355,8 @@ _TRANSFORMER_LENS_MARKERS = (
     "othello-gpt",
     "bert-",
     "google-bert/",
+    "roberta",
+    "distilbert",
     "t5-",
     "google-t5/",
     "wav2vec2",
@@ -393,6 +399,6 @@ def transformer_lens_model_kind(model_name: str) -> str:
         return "audio_encoder"
     if "t5-" in lowered or "google-t5/" in lowered:
         return "encoder_decoder"
-    if "bert-" in lowered or "google-bert/" in lowered:
+    if any(marker in lowered for marker in ("bert-", "google-bert/", "roberta", "distilbert")):
         return "encoder"
     return "decoder"

@@ -141,7 +141,8 @@ If `cache_dir` is omitted, SafeLens resolves a default provider cache under
 raw score hooks use eager softmax instrumentation; flash or SDPA attention
 paths may need an eager attention implementation. Other component hooks are
 resolved through SafeLens architecture adapters for GPT-2, GPT-J, GPT-Neo,
-GPT-NeoX/Pythia, BLOOM/Falcon, MPT, Phi, OPT, BERT, T5, and LLaMA-like decoder
+GPT-NeoX/Pythia, BLOOM/Falcon, MPT, Phi, OPT, BERT/RoBERTa, DistilBERT, T5,
+Wav2Vec2/Hubert, and LLaMA-like decoder
 families.
 
 ```bash

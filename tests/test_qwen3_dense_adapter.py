@@ -192,7 +192,7 @@ def test_qwen3_component_hooks_accept_standard_activation_hook_signature() -> No
 def test_qwen3_run_with_cache_component_hooks_do_not_patch_outputs() -> None:
     wrapper = _wrapper_with_fake_model()
 
-    output, cache = wrapper.run_with_cache({"text": "hello"}, layers=["layer_0.mlp_out"])
+    output, cache = wrapper.run_with_cache({"input_ids": [[1, 2]]}, layers=["layer_0.mlp_out"])
 
     assert output == {"first": ["first"], "second": ["second"]}
     assert cache == {"layer_0.mlp_out": ["second"]}
@@ -201,7 +201,10 @@ def test_qwen3_run_with_cache_component_hooks_do_not_patch_outputs() -> None:
 def test_qwen3_run_with_cache_captures_attention_pattern() -> None:
     wrapper = _wrapper_with_fake_model()
 
-    output, cache = wrapper.run_with_cache({"text": "hello"}, layers=["blocks.0.attn.hook_pattern"])
+    output, cache = wrapper.run_with_cache(
+        {"input_ids": [[1, 2]]},
+        layers=["blocks.0.attn.hook_pattern"],
+    )
 
     assert output["output_attentions"] is True
     assert getattr(cache["blocks.0.attn.hook_pattern"], "ndim", None) == 4

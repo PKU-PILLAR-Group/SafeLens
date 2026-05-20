@@ -11,6 +11,11 @@ from SafeLens.utils import (
     list_architecture_adapters,
     supported_transformer_component_names,
 )
+from SafeLens.utils.model_bridge import (
+    ComponentHookSpec,
+    extract_component_activation,
+    merge_component_activation,
+)
 
 
 class _Handle:
@@ -65,6 +70,7 @@ class _FakeAttention(_FakeModule):
         self.o_proj = _FakeModule()
 
     def forward(self, scores: Any | None = None) -> Any:
+        pattern: Any
         try:
             import torch
         except ImportError:
@@ -85,6 +91,8 @@ class _FakeLayer(_FakeModule):
 
 class _FakeConfig:
     model_type = "qwen3"
+    num_attention_heads = 2
+    hidden_size = 4
 
 
 class _FakeBackbone:
@@ -105,6 +113,23 @@ class _FakeQwenModel:
         return {"q": q_out}
 
 
+class _FakeHeadConfig:
+    num_attention_heads = 2
+
+
+class _FakeHeadModel:
+    config = _FakeHeadConfig()
+
+
+class _FakeGroupedHeadConfig:
+    num_attention_heads = 4
+    num_key_value_heads = 2
+
+
+class _FakeGroupedHeadModel:
+    config = _FakeGroupedHeadConfig()
+
+
 class _FakeTupleOutputModel(_FakeQwenModel):
     def __call__(self, **kwargs: Any) -> dict[str, Any]:
         _ = kwargs
@@ -114,6 +139,7 @@ class _FakeTupleOutputModel(_FakeQwenModel):
 
 class _FakeBertConfig:
     model_type = "bert"
+    num_attention_heads = 1
 
 
 class _FakeBertAttentionSelf(_FakeModule):
@@ -154,6 +180,73 @@ class _FakeBertModel:
         self.encoder = _FakeBertEncoder()
 
 
+class _FakeDistilBertConfig:
+    model_type = "distilbert"
+    num_attention_heads = 1
+
+
+class _FakeDistilBertAttention:
+    def __init__(self) -> None:
+        self.q_lin = _FakeModule()
+        self.k_lin = _FakeModule()
+        self.v_lin = _FakeModule()
+        self.out_lin = _FakeModule()
+
+
+class _FakeDistilBertLayer(_FakeModule):
+    def __init__(self) -> None:
+        super().__init__()
+        self.attention = _FakeDistilBertAttention()
+        self.ffn = _FakeModule()
+
+
+class _FakeDistilBertTransformer:
+    def __init__(self) -> None:
+        self.layer = [_FakeDistilBertLayer()]
+
+
+class _FakeDistilBertModel:
+    def __init__(self) -> None:
+        self.config = _FakeDistilBertConfig()
+        self.transformer = _FakeDistilBertTransformer()
+
+
+class _FakeAudioConfig:
+    model_type = "wav2vec2"
+    num_attention_heads = 1
+
+
+class _FakeAudioAttention:
+    def __init__(self) -> None:
+        self.q_proj = _FakeModule()
+        self.k_proj = _FakeModule()
+        self.v_proj = _FakeModule()
+        self.out_proj = _FakeModule()
+
+
+class _FakeAudioFeedForward:
+    def __init__(self) -> None:
+        self.output_dense = _FakeModule()
+
+
+class _FakeAudioLayer(_FakeModule):
+    def __init__(self) -> None:
+        super().__init__()
+        self.attention = _FakeAudioAttention()
+        self.feed_forward = _FakeAudioFeedForward()
+
+
+class _FakeAudioEncoder:
+    def __init__(self) -> None:
+        self.layers = [_FakeAudioLayer()]
+
+
+class _FakeAudioModel:
+    def __init__(self) -> None:
+        self.config = _FakeAudioConfig()
+        self.encoder = _FakeAudioEncoder()
+
+
 class _FakeT5Config:
     model_type = "t5"
     decoder_start_token_id = 0
@@ -177,6 +270,12 @@ class _FakeT5Tokenizer:
         _ = text, return_tensors
         torch = pytest.importorskip("torch")
         return _FakeTokenizerOutput({"input_ids": torch.tensor([[5, 6, 7]])})
+
+
+class _FailingTokenizer:
+    @classmethod
+    def from_pretrained(cls, *_args: Any, **_kwargs: Any) -> Any:
+        raise OSError("missing tokenizer files")
 
 
 def test_architecture_adapter_maps_qwen3_components() -> None:
@@ -272,6 +371,48 @@ def test_bert_architecture_adapter_supports_automodel_paths() -> None:
     assert layer.attention.output.dense.run_pre(["x"]) == ["x", "z"]
 
 
+def test_distilbert_architecture_adapter_supports_encoder_paths() -> None:
+    model = _FakeDistilBertModel()
+    adapter = architecture_adapter_for_model(model, model_name="distilbert-base-uncased")
+
+    assert adapter.name == "distilbert_encoder"
+    adapter.register_component_hook(
+        model,
+        "layer_0.q",
+        lambda **kwargs: kwargs["activation"] + ["q"],
+    )
+    adapter.register_component_hook(
+        model,
+        "layer_0.z",
+        lambda **kwargs: kwargs["activation"] + ["z"],
+    )
+
+    layer = model.transformer.layer[0]
+    assert layer.attention.q_lin.run_forward(["x"]) == ["x", "q"]
+    assert layer.attention.out_lin.run_pre(["x"]) == ["x", "z"]
+
+
+def test_audio_architecture_adapter_supports_encoder_paths() -> None:
+    model = _FakeAudioModel()
+    adapter = architecture_adapter_for_model(model, model_name="facebook/wav2vec2-base")
+
+    assert adapter.name == "audio_encoder"
+    adapter.register_component_hook(
+        model,
+        "layer_0.q",
+        lambda **kwargs: kwargs["activation"] + ["q"],
+    )
+    adapter.register_component_hook(
+        model,
+        "layer_0.z",
+        lambda **kwargs: kwargs["activation"] + ["z"],
+    )
+
+    layer = model.encoder.layers[0]
+    assert layer.attention.q_proj.run_forward(["x"]) == ["x", "q"]
+    assert layer.attention.out_proj.run_pre(["x"]) == ["x", "z"]
+
+
 def test_architecture_adapter_can_infer_from_model_name_without_loading_config() -> None:
     assert architecture_adapter_for_name(model_name="gpt2-small").name == "gpt2_decoder"
     assert (
@@ -280,6 +421,20 @@ def test_architecture_adapter_can_infer_from_model_name_without_loading_config()
     assert (
         architecture_adapter_for_name(model_name="google-bert/bert-base-uncased").name
         == "bert_encoder"
+    )
+    assert (
+        architecture_adapter_for_name(model_name="FacebookAI/roberta-base").name == "bert_encoder"
+    )
+    assert (
+        architecture_adapter_for_name(model_name="distilbert/distilbert-base-uncased").name
+        == "distilbert_encoder"
+    )
+    assert (
+        architecture_adapter_for_name(model_name="facebook/wav2vec2-base").name == "audio_encoder"
+    )
+    assert (
+        architecture_adapter_for_name(model_name="facebook/hubert-base-ls960").name
+        == "audio_encoder"
     )
     assert architecture_adapter_for_name(model_name="EleutherAI/gpt-j-6B").name == "gptj_decoder"
     assert architecture_adapter_for_name(model_name="facebook/opt-125m").name == "opt_decoder"
@@ -298,7 +453,7 @@ def test_transformer_lens_compatible_wrapper_caches_component_hooks() -> None:
     wrapper = TransformerLensCompatibleModelWrapper(name="Qwen/Qwen3-8B")
     wrapper.model = _FakeQwenModel()
 
-    output, cache = wrapper.run_with_cache({"text": "hello"}, layers=["blocks.0.attn.hook_q"])
+    output, cache = wrapper.run_with_cache({"input_ids": [[1, 2]]}, layers=["blocks.0.attn.hook_q"])
 
     assert output == {"q": ["q"]}
     assert cache == {"blocks.0.attn.hook_q": ["q"]}
@@ -314,7 +469,7 @@ def test_transformer_component_cache_keeps_integer_layer_cache_names() -> None:
     wrapper = TransformerLensCompatibleModelWrapper(name="Qwen/Qwen3-8B")
     wrapper.model = _FakeResidModel()
 
-    output, cache = wrapper.run_with_cache({"text": "hello"}, layers=[0])
+    output, cache = wrapper.run_with_cache({"input_ids": [[1, 2]]}, layers=[0])
 
     assert output == {"resid": ["resid"]}
     assert cache == {"layer_0": ["resid"]}
@@ -324,7 +479,7 @@ def test_transformer_component_cache_extracts_first_tuple_output() -> None:
     wrapper = TransformerLensCompatibleModelWrapper(name="Qwen/Qwen3-8B")
     wrapper.model = _FakeTupleOutputModel()
 
-    output, cache = wrapper.run_with_cache({"text": "hello"}, layers=["layer_0.resid_post"])
+    output, cache = wrapper.run_with_cache({"input_ids": [[1, 2]]}, layers=["layer_0.resid_post"])
 
     assert output == {"layer": (["hidden"], ["present"])}
     assert cache == {"layer_0.resid_post": ["hidden"]}
@@ -335,7 +490,7 @@ def test_transformer_component_patch_preserves_tuple_outputs() -> None:
     wrapper.model = _FakeTupleOutputModel()
 
     wrapper.add_hook("layer_0.resid_post", lambda **kwargs: kwargs["activation"] + ["patched"])
-    output, _cache = wrapper.run_with_cache({"text": "hello"})
+    output, _cache = wrapper.run_with_cache({"input_ids": [[1, 2]]})
 
     assert output == {"layer": (["hidden", "patched"], ["present"])}
 
@@ -352,11 +507,29 @@ def test_transformer_lens_encoder_decoder_inputs_get_decoder_start_token() -> No
     assert torch.equal(inputs["decoder_input_ids"], torch.tensor([[0]]))
 
 
+def test_huggingface_wrapper_allows_tensor_inputs_when_tokenizer_is_missing() -> None:
+    torch = pytest.importorskip("torch")
+    wrapper = TransformerLensCompatibleModelWrapper(name="hf-internal-testing/tiny-random-mixtral")
+    tokenizer = wrapper._load_text_tokenizer(_FailingTokenizer, "missing-tokenizer", {})
+
+    assert tokenizer is None
+    inputs = wrapper._prepare_model_inputs({"input_ids": torch.tensor([[1, 2, 3]])})
+    assert torch.equal(inputs["input_ids"], torch.tensor([[1, 2, 3]]))
+    with pytest.raises(ValueError, match="did not load a tokenizer"):
+        wrapper._prepare_model_inputs({"text": "needs tokenizer"})
+    wrapper.model = _FakeQwenModel()
+    with pytest.raises(RuntimeError, match="Tokenizer is not loaded"):
+        wrapper.generate("needs tokenizer")
+
+
 def test_transformer_lens_compatible_wrapper_caches_attention_pattern() -> None:
     wrapper = TransformerLensCompatibleModelWrapper(name="Qwen/Qwen3-8B")
     wrapper.model = _FakeQwenModel()
 
-    output, cache = wrapper.run_with_cache({"text": "hello"}, layers=["blocks.0.attn.hook_pattern"])
+    output, cache = wrapper.run_with_cache(
+        {"input_ids": [[1, 2]]},
+        layers=["blocks.0.attn.hook_pattern"],
+    )
 
     assert output["output_attentions"] is True
     assert getattr(cache["blocks.0.attn.hook_pattern"], "ndim", None) == 4
@@ -391,3 +564,90 @@ def test_transformer_lens_compatible_wrapper_patches_attention_scores() -> None:
 
     _tokens, pattern = wrapper.model.model.layers[0].self_attn.forward(torch.zeros(1, 2, 1, 2))
     assert torch.all(pattern[..., 0] > 0.99)
+
+
+def test_component_bridge_splits_and_merges_head_projections() -> None:
+    torch = pytest.importorskip("torch")
+    spec = ComponentHookSpec(
+        component="q",
+        mode="forward_output",
+        module_paths=("unused",),
+        activation="split_heads",
+    )
+    raw = torch.arange(16).reshape(1, 2, 8)
+
+    activation = extract_component_activation(raw, spec, _FakeHeadModel())
+
+    assert activation.shape == (1, 2, 2, 4)
+    patched = activation.clone()
+    patched[:, :, 1, :] = -1
+    merged = merge_component_activation(patched, raw, spec, _FakeHeadModel())
+    assert merged.shape == raw.shape
+    assert torch.equal(merged[:, :, :4], raw[:, :, :4])
+    assert torch.all(merged[:, :, 4:] == -1)
+
+
+def test_component_bridge_splits_and_merges_split_qkv_projection() -> None:
+    torch = pytest.importorskip("torch")
+    spec = ComponentHookSpec(
+        component="k",
+        mode="forward_output",
+        module_paths=("unused",),
+        activation="split_qkv_heads",
+    )
+    raw = torch.arange(48).reshape(1, 2, 24)
+
+    activation = extract_component_activation(raw, spec, _FakeHeadModel())
+
+    assert activation.shape == (1, 2, 2, 4)
+    assert torch.equal(activation.reshape(1, 2, 8), raw[..., 8:16])
+    patched = torch.full_like(activation, -7)
+    merged = merge_component_activation(patched, raw, spec, _FakeHeadModel())
+    assert torch.equal(merged[..., :8], raw[..., :8])
+    assert torch.all(merged[..., 8:16] == -7)
+    assert torch.equal(merged[..., 16:], raw[..., 16:])
+
+
+def test_component_bridge_splits_and_merges_interleaved_qkv_projection() -> None:
+    torch = pytest.importorskip("torch")
+    spec = ComponentHookSpec(
+        component="v",
+        mode="forward_output",
+        module_paths=("unused",),
+        activation="split_qkv_heads",
+        qkv_layout="interleaved",
+    )
+    raw = torch.arange(48).reshape(1, 2, 24)
+
+    activation = extract_component_activation(raw, spec, _FakeHeadModel())
+
+    assert activation.shape == (1, 2, 2, 4)
+    assert torch.equal(activation, raw.reshape(1, 2, 2, 3, 4)[..., 2, :])
+    patched = torch.full_like(activation, -3)
+    merged = merge_component_activation(patched, raw, spec, _FakeHeadModel())
+    expected = raw.reshape(1, 2, 2, 3, 4).clone()
+    expected[..., 2, :] = -3
+    assert torch.equal(merged, expected.reshape_as(raw))
+
+
+def test_component_bridge_splits_and_merges_grouped_interleaved_qkv_projection() -> None:
+    torch = pytest.importorskip("torch")
+    spec = ComponentHookSpec(
+        component="k",
+        mode="forward_output",
+        module_paths=("unused",),
+        activation="split_qkv_heads",
+        qkv_layout="interleaved",
+    )
+    raw = torch.arange(64).reshape(1, 2, 32)
+
+    activation = extract_component_activation(raw, spec, _FakeGroupedHeadModel())
+
+    assert activation.shape == (1, 2, 2, 4)
+    grouped = raw.reshape(1, 2, 2, 4, 4)
+    assert torch.equal(activation, grouped[..., -2, :])
+    patched = torch.full_like(activation, -5)
+    merged = merge_component_activation(patched, raw, spec, _FakeGroupedHeadModel())
+    expected = grouped.clone()
+    expected[..., -2, :] = -5
+    assert torch.equal(merged, expected.reshape_as(raw))

@@ -17,6 +17,8 @@ from SafeLens.core.base import HookFn, LayerRef
 
 HookMode = Literal["forward_output", "forward_input"]
 ComponentValue = Literal["output", "attention_pattern", "attention_scores"]
+ComponentActivation = Literal["raw", "split_heads", "split_qkv_heads"]
+QKVLayout = Literal["split", "interleaved"]
 
 CANONICAL_TRANSFORMER_COMPONENTS: tuple[str, ...] = (
     "resid_pre",
@@ -67,6 +69,8 @@ class ComponentHookSpec:
     mode: HookMode
     module_paths: tuple[str, ...]
     value: ComponentValue = "output"
+    activation: ComponentActivation = "raw"
+    qkv_layout: QKVLayout = "split"
     aliases: tuple[str, ...] = ()
     patchable: bool = True
     cacheable: bool = True
@@ -176,10 +180,10 @@ class ArchitectureAdapter:
             )
         if spec.mode == "forward_input":
             return module.register_forward_pre_hook(
-                _make_component_input_hook(hook_fn, component_ref, self.name)
+                _make_component_input_hook(hook_fn, component_ref, self.name, spec, model)
             )
         return module.register_forward_hook(
-            _make_component_output_hook(hook_fn, component_ref, self.name, spec)
+            _make_component_output_hook(hook_fn, component_ref, self.name, spec, model)
         )
 
     def requires_output_attentions(self, layer: LayerRef) -> bool:
@@ -296,9 +300,10 @@ def _make_component_output_hook(
     component_ref: ComponentRef,
     architecture: str,
     spec: ComponentHookSpec,
+    model: Any,
 ) -> Callable[[Any, Any, Any], Any]:
     def hook(_module: Any, _inputs: Any, output: Any) -> Any:
-        activation = extract_component_activation(output, spec)
+        activation = extract_component_activation(output, spec, model)
         patched = call_component_hook(
             hook_fn,
             activation=activation,
@@ -309,7 +314,7 @@ def _make_component_output_hook(
             return None
         if patched is None:
             return None
-        return replace_component_activation(output, patched, spec)
+        return replace_component_activation(output, patched, spec, model)
 
     return hook
 
@@ -318,11 +323,14 @@ def _make_component_input_hook(
     hook_fn: HookFn,
     component_ref: ComponentRef,
     architecture: str,
+    spec: ComponentHookSpec,
+    model: Any,
 ) -> Callable[[Any, Any], Any]:
     def hook(_module: Any, inputs: Any) -> Any:
         if not inputs:
             return None
-        activation = inputs[0]
+        raw_activation = inputs[0]
+        activation = transform_component_activation(raw_activation, spec, model)
         patched = call_component_hook(
             hook_fn,
             activation=activation,
@@ -331,7 +339,8 @@ def _make_component_input_hook(
         )
         if patched is None:
             return None
-        return (patched, *tuple(inputs[1:]))
+        merged = merge_component_activation(patched, raw_activation, spec, model)
+        return (merged, *tuple(inputs[1:]))
 
     return hook
 
@@ -384,10 +393,10 @@ def call_component_hook(
         return hook_fn(activation)
 
 
-def extract_component_activation(output: Any, spec: ComponentHookSpec) -> Any:
+def extract_component_activation(output: Any, spec: ComponentHookSpec, model: Any) -> Any:
     """Extract the activation value for a component from a module hook output."""
     if spec.value == "output":
-        return first_output(output)
+        return transform_component_activation(first_output(output), spec, model)
     if spec.value == "attention_pattern":
         pattern = _find_attention_pattern(output)
         if pattern is None:
@@ -415,13 +424,238 @@ def first_output(output: Any) -> Any:
     return output
 
 
-def replace_component_activation(output: Any, patched: Any, spec: ComponentHookSpec) -> Any:
+def replace_component_activation(
+    output: Any,
+    patched: Any,
+    spec: ComponentHookSpec,
+    model: Any,
+) -> Any:
     """Replace the tensor payload while preserving tuple/list module output shape."""
     if spec.value != "output":
         return output
+    raw_output = first_output(output)
+    merged = merge_component_activation(patched, raw_output, spec, model)
     if isinstance(output, tuple):
-        return (patched, *output[1:])
+        return (merged, *output[1:])
+    return merged
+
+
+def transform_component_activation(activation: Any, spec: ComponentHookSpec, model: Any) -> Any:
+    """Convert raw HF projection tensors into SafeLens component activation shape."""
+    if spec.activation == "split_heads":
+        return split_heads(activation, head_count_for_component(model, spec.component))
+    if spec.activation == "split_qkv_heads":
+        return split_qkv_heads(activation, model, spec)
+    return activation
+
+
+def merge_component_activation(
+    activation: Any,
+    reference: Any,
+    spec: ComponentHookSpec,
+    model: Any,
+) -> Any:
+    """Merge a patched SafeLens component activation back into the raw HF tensor shape."""
+    if spec.activation == "split_heads":
+        return merge_heads(activation, reference)
+    if spec.activation == "split_qkv_heads":
+        return merge_qkv_heads(activation, reference, model, spec)
+    return activation
+
+
+def split_heads(activation: Any, n_heads: int) -> Any:
+    """Reshape `[batch, pos, hidden]` activations into `[batch, pos, head, head_dim]`."""
+    shape = getattr(activation, "shape", None)
+    reshape = getattr(activation, "reshape", None)
+    if shape is None or not callable(reshape):
+        return activation
+    if len(shape) < 3:
+        return activation
+    hidden_size = int(shape[-1])
+    if n_heads <= 0 or hidden_size % n_heads != 0:
+        raise ValueError(
+            f"Cannot split activation with final dimension {hidden_size} into {n_heads} heads."
+        )
+    return activation.reshape(*shape[:-1], n_heads, hidden_size // n_heads)
+
+
+def merge_heads(activation: Any, reference: Any) -> Any:
+    """Flatten `[batch, pos, head, head_dim]` back to the reference final dimension."""
+    shape = getattr(activation, "shape", None)
+    reshape = getattr(activation, "reshape", None)
+    reference_shape = getattr(reference, "shape", None)
+    if shape is None or not callable(reshape) or len(shape) < 4:
+        return activation
+    hidden_size = int(shape[-2]) * int(shape[-1])
+    if reference_shape is not None:
+        hidden_size = int(reference_shape[-1])
+    return activation.reshape(*shape[:-2], hidden_size)
+
+
+def split_qkv_heads(activation: Any, model: Any, spec: ComponentHookSpec) -> Any:
+    """Extract one component from a joint QKV projection and split it into heads."""
+    component = spec.component
+    q_heads = head_count_for_component(model, "q")
+    kv_heads = head_count_for_component(model, "k")
+    if spec.qkv_layout == "interleaved":
+        return split_interleaved_qkv_heads(
+            activation,
+            component,
+            q_heads=q_heads,
+            kv_heads=kv_heads,
+        )
+    q_slice, k_slice, v_slice = split_qkv_slices(activation, q_heads=q_heads, kv_heads=kv_heads)
+    component_slice = {"q": q_slice, "k": k_slice, "v": v_slice}[component]
+    return split_heads(component_slice, q_heads if component == "q" else kv_heads)
+
+
+def merge_qkv_heads(
+    activation: Any,
+    reference: Any,
+    model: Any,
+    spec: ComponentHookSpec,
+) -> Any:
+    """Replace one split-head component in a raw joint QKV projection tensor."""
+    component = spec.component
+    q_heads = head_count_for_component(model, "q")
+    kv_heads = head_count_for_component(model, "k")
+    if spec.qkv_layout == "interleaved":
+        return merge_interleaved_qkv_heads(
+            activation,
+            reference,
+            component,
+            q_heads=q_heads,
+            kv_heads=kv_heads,
+        )
+    q_slice, k_slice, v_slice = split_qkv_slices(reference, q_heads=q_heads, kv_heads=kv_heads)
+    component_slice = {"q": q_slice, "k": k_slice, "v": v_slice}[component]
+    merged_component = merge_heads(activation, component_slice)
+    patched = clone_tensor_like(reference)
+    target = {"q": 0, "k": 1, "v": 2}[component]
+    start, stop = split_qkv_slice_bounds(reference, q_heads=q_heads, kv_heads=kv_heads)[target]
+    patched[..., start:stop] = merged_component
     return patched
+
+
+def split_qkv_slices(activation: Any, *, q_heads: int, kv_heads: int) -> tuple[Any, Any, Any]:
+    bounds = split_qkv_slice_bounds(activation, q_heads=q_heads, kv_heads=kv_heads)
+    return tuple(activation[..., start:stop] for start, stop in bounds)
+
+
+def split_qkv_slice_bounds(
+    activation: Any,
+    *,
+    q_heads: int,
+    kv_heads: int,
+) -> tuple[tuple[int, int], tuple[int, int], tuple[int, int]]:
+    shape = getattr(activation, "shape", None)
+    if shape is None:
+        raise ValueError("Cannot split a joint QKV activation without a shape.")
+    total_heads = q_heads + 2 * kv_heads
+    hidden_size = int(shape[-1])
+    if total_heads <= 0 or hidden_size % total_heads != 0:
+        raise ValueError(
+            "Cannot split joint QKV activation with final dimension "
+            f"{hidden_size} into q_heads={q_heads}, kv_heads={kv_heads}."
+        )
+    head_dim = hidden_size // total_heads
+    q_stop = q_heads * head_dim
+    k_stop = q_stop + kv_heads * head_dim
+    v_stop = k_stop + kv_heads * head_dim
+    return ((0, q_stop), (q_stop, k_stop), (k_stop, v_stop))
+
+
+def split_interleaved_qkv_heads(
+    activation: Any,
+    component: str,
+    *,
+    q_heads: int,
+    kv_heads: int,
+) -> Any:
+    qkv = interleaved_qkv_view(activation, q_heads=q_heads, kv_heads=kv_heads)
+    component_index = {"q": 0, "k": 1, "v": 2}[component]
+    if q_heads != kv_heads and component_index in {1, 2}:
+        offset = -2 if component == "k" else -1
+        return qkv[..., offset, :]
+    if q_heads != kv_heads:
+        q_per_group = q_heads // kv_heads
+        return qkv[..., :-2, :].reshape(*activation.shape[:-1], kv_heads * q_per_group, -1)
+    return qkv[..., component_index, :]
+
+
+def merge_interleaved_qkv_heads(
+    activation: Any,
+    reference: Any,
+    component: str,
+    *,
+    q_heads: int,
+    kv_heads: int,
+) -> Any:
+    qkv = clone_tensor_like(interleaved_qkv_view(reference, q_heads=q_heads, kv_heads=kv_heads))
+    component_index = {"q": 0, "k": 1, "v": 2}[component]
+    if q_heads != kv_heads and component_index in {1, 2}:
+        offset = -2 if component == "k" else -1
+        qkv[..., offset, :] = activation
+    elif q_heads != kv_heads:
+        q_per_group = q_heads // kv_heads
+        qkv[..., :-2, :] = activation.reshape(*qkv.shape[:-3], kv_heads, q_per_group, -1)
+    else:
+        qkv[..., component_index, :] = activation
+    return qkv.reshape(*reference.shape)
+
+
+def interleaved_qkv_view(activation: Any, *, q_heads: int, kv_heads: int) -> Any:
+    shape = getattr(activation, "shape", None)
+    reshape = getattr(activation, "reshape", None)
+    if shape is None or not callable(reshape):
+        return activation
+    hidden_size = int(shape[-1])
+    if q_heads == kv_heads:
+        total_heads = q_heads
+        if total_heads <= 0 or hidden_size % (3 * total_heads) != 0:
+            raise ValueError(
+                "Cannot split interleaved QKV activation with final dimension "
+                f"{hidden_size} into {total_heads} heads."
+            )
+        head_dim = hidden_size // (3 * total_heads)
+        return activation.reshape(*shape[:-1], total_heads, 3, head_dim)
+
+    total_groups = q_heads + 2 * kv_heads
+    if total_groups <= 0 or hidden_size % total_groups != 0:
+        raise ValueError(
+            "Cannot split grouped interleaved QKV activation with final dimension "
+            f"{hidden_size}, q_heads={q_heads}, kv_heads={kv_heads}."
+        )
+    head_dim = hidden_size // total_groups
+    return activation.reshape(*shape[:-1], kv_heads, (q_heads // kv_heads) + 2, head_dim)
+
+
+def clone_tensor_like(value: Any) -> Any:
+    clone = getattr(value, "clone", None)
+    if callable(clone):
+        return clone()
+    copy = getattr(value, "copy", None)
+    if callable(copy):
+        return copy()
+    return value
+
+
+def head_count_for_component(model: Any, component: str) -> int:
+    """Read the configured attention head count for one component."""
+    config = getattr(model, "config", None)
+    if component in {"k", "v"}:
+        for name in ("num_key_value_heads", "num_kv_heads", "n_head_kv"):
+            value = getattr(config, name, None)
+            if value is not None:
+                return int(value)
+    for name in ("num_attention_heads", "n_head", "n_heads", "num_heads"):
+        value = getattr(config, name, None)
+        if value is not None:
+            return int(value)
+    raise ValueError(
+        f"Could not infer attention head count for component {component!r} "
+        f"from {type(config).__name__}."
+    )
 
 
 def _register_attention_softmax_hook(
@@ -603,6 +837,8 @@ def _spec(
     mode: HookMode,
     *module_paths: str,
     value: ComponentValue = "output",
+    activation: ComponentActivation = "raw",
+    qkv_layout: QKVLayout = "split",
     aliases: Sequence[str] = (),
     patchable: bool = True,
     cacheable: bool = True,
@@ -614,6 +850,8 @@ def _spec(
         mode=mode,
         module_paths=tuple(module_paths),
         value=value,
+        activation=activation,
+        qkv_layout=qkv_layout,
         aliases=tuple(aliases),
         patchable=patchable,
         cacheable=cacheable,
@@ -700,10 +938,18 @@ LLAMA_LIKE_ADAPTER = ArchitectureAdapter(
         _spec("resid_post", "forward_output", "model.layers.{layer}"),
         _spec("attn_out", "forward_output", "model.layers.{layer}.self_attn.o_proj"),
         _spec("mlp_out", "forward_output", "model.layers.{layer}.mlp"),
-        _spec("q", "forward_output", "model.layers.{layer}.self_attn.q_proj"),
-        _spec("k", "forward_output", "model.layers.{layer}.self_attn.k_proj"),
-        _spec("v", "forward_output", "model.layers.{layer}.self_attn.v_proj"),
-        _spec("z", "forward_input", "model.layers.{layer}.self_attn.o_proj"),
+        _spec(
+            "q", "forward_output", "model.layers.{layer}.self_attn.q_proj", activation="split_heads"
+        ),
+        _spec(
+            "k", "forward_output", "model.layers.{layer}.self_attn.k_proj", activation="split_heads"
+        ),
+        _spec(
+            "v", "forward_output", "model.layers.{layer}.self_attn.v_proj", activation="split_heads"
+        ),
+        _spec(
+            "z", "forward_input", "model.layers.{layer}.self_attn.o_proj", activation="split_heads"
+        ),
         _unsupported_result_spec(),
         _pattern_spec("model.layers.{layer}.self_attn"),
         _scores_spec("model.layers.{layer}.self_attn"),
@@ -721,10 +967,25 @@ GPT2_ADAPTER = ArchitectureAdapter(
         _spec("resid_post", "forward_output", "transformer.h.{layer}"),
         _spec("attn_out", "forward_output", "transformer.h.{layer}.attn.c_proj"),
         _spec("mlp_out", "forward_output", "transformer.h.{layer}.mlp"),
-        _spec("q", "forward_output", "transformer.h.{layer}.attn.c_attn"),
-        _spec("k", "forward_output", "transformer.h.{layer}.attn.c_attn"),
-        _spec("v", "forward_output", "transformer.h.{layer}.attn.c_attn"),
-        _spec("z", "forward_input", "transformer.h.{layer}.attn.c_proj"),
+        _spec(
+            "q",
+            "forward_output",
+            "transformer.h.{layer}.attn.c_attn",
+            activation="split_qkv_heads",
+        ),
+        _spec(
+            "k",
+            "forward_output",
+            "transformer.h.{layer}.attn.c_attn",
+            activation="split_qkv_heads",
+        ),
+        _spec(
+            "v",
+            "forward_output",
+            "transformer.h.{layer}.attn.c_attn",
+            activation="split_qkv_heads",
+        ),
+        _spec("z", "forward_input", "transformer.h.{layer}.attn.c_proj", activation="split_heads"),
         _unsupported_result_spec(),
         _pattern_spec("transformer.h.{layer}.attn"),
         _scores_spec("transformer.h.{layer}.attn"),
@@ -746,10 +1007,29 @@ GPT_NEOX_ADAPTER = ArchitectureAdapter(
             "q",
             "forward_output",
             "gpt_neox.layers.{layer}.attention.query_key_value",
+            activation="split_qkv_heads",
+            qkv_layout="interleaved",
         ),
-        _spec("k", "forward_output", "gpt_neox.layers.{layer}.attention.query_key_value"),
-        _spec("v", "forward_output", "gpt_neox.layers.{layer}.attention.query_key_value"),
-        _spec("z", "forward_input", "gpt_neox.layers.{layer}.attention.dense"),
+        _spec(
+            "k",
+            "forward_output",
+            "gpt_neox.layers.{layer}.attention.query_key_value",
+            activation="split_qkv_heads",
+            qkv_layout="interleaved",
+        ),
+        _spec(
+            "v",
+            "forward_output",
+            "gpt_neox.layers.{layer}.attention.query_key_value",
+            activation="split_qkv_heads",
+            qkv_layout="interleaved",
+        ),
+        _spec(
+            "z",
+            "forward_input",
+            "gpt_neox.layers.{layer}.attention.dense",
+            activation="split_heads",
+        ),
         _unsupported_result_spec(),
         _pattern_spec("gpt_neox.layers.{layer}.attention"),
         _scores_spec("gpt_neox.layers.{layer}.attention"),
@@ -766,10 +1046,12 @@ GPTJ_ADAPTER = ArchitectureAdapter(
         _spec("resid_post", "forward_output", "transformer.h.{layer}"),
         _spec("attn_out", "forward_output", "transformer.h.{layer}.attn.out_proj"),
         _spec("mlp_out", "forward_output", "transformer.h.{layer}.mlp"),
-        _spec("q", "forward_output", "transformer.h.{layer}.attn.q_proj"),
-        _spec("k", "forward_output", "transformer.h.{layer}.attn.k_proj"),
-        _spec("v", "forward_output", "transformer.h.{layer}.attn.v_proj"),
-        _spec("z", "forward_input", "transformer.h.{layer}.attn.out_proj"),
+        _spec("q", "forward_output", "transformer.h.{layer}.attn.q_proj", activation="split_heads"),
+        _spec("k", "forward_output", "transformer.h.{layer}.attn.k_proj", activation="split_heads"),
+        _spec("v", "forward_output", "transformer.h.{layer}.attn.v_proj", activation="split_heads"),
+        _spec(
+            "z", "forward_input", "transformer.h.{layer}.attn.out_proj", activation="split_heads"
+        ),
         _unsupported_result_spec(),
         _pattern_spec("transformer.h.{layer}.attn"),
         _scores_spec("transformer.h.{layer}.attn"),
@@ -787,10 +1069,30 @@ GPT_NEO_ADAPTER = ArchitectureAdapter(
         _spec("resid_post", "forward_output", "transformer.h.{layer}"),
         _spec("attn_out", "forward_output", "transformer.h.{layer}.attn.attention.out_proj"),
         _spec("mlp_out", "forward_output", "transformer.h.{layer}.mlp"),
-        _spec("q", "forward_output", "transformer.h.{layer}.attn.attention.q_proj"),
-        _spec("k", "forward_output", "transformer.h.{layer}.attn.attention.k_proj"),
-        _spec("v", "forward_output", "transformer.h.{layer}.attn.attention.v_proj"),
-        _spec("z", "forward_input", "transformer.h.{layer}.attn.attention.out_proj"),
+        _spec(
+            "q",
+            "forward_output",
+            "transformer.h.{layer}.attn.attention.q_proj",
+            activation="split_heads",
+        ),
+        _spec(
+            "k",
+            "forward_output",
+            "transformer.h.{layer}.attn.attention.k_proj",
+            activation="split_heads",
+        ),
+        _spec(
+            "v",
+            "forward_output",
+            "transformer.h.{layer}.attn.attention.v_proj",
+            activation="split_heads",
+        ),
+        _spec(
+            "z",
+            "forward_input",
+            "transformer.h.{layer}.attn.attention.out_proj",
+            activation="split_heads",
+        ),
         _unsupported_result_spec(),
         _pattern_spec("transformer.h.{layer}.attn.attention"),
         _scores_spec("transformer.h.{layer}.attn.attention"),
@@ -803,7 +1105,12 @@ JOINT_QKV_DECODER_ADAPTER = ArchitectureAdapter(
     model_name_markers=("bloom", "falcon"),
     component_specs=(
         _spec("resid_pre", "forward_input", "transformer.h.{layer}"),
-        _spec("resid_mid", "forward_input", "transformer.h.{layer}.post_attention_layernorm"),
+        _spec(
+            "resid_mid",
+            "forward_input",
+            "transformer.h.{layer}.post_attention_layernorm",
+            "transformer.h.{layer}.ln_mlp",
+        ),
         _spec("resid_post", "forward_output", "transformer.h.{layer}"),
         _spec(
             "attn_out",
@@ -811,13 +1118,32 @@ JOINT_QKV_DECODER_ADAPTER = ArchitectureAdapter(
             "transformer.h.{layer}.self_attention.dense",
         ),
         _spec("mlp_out", "forward_output", "transformer.h.{layer}.mlp"),
-        _spec("q", "forward_output", "transformer.h.{layer}.self_attention.query_key_value"),
-        _spec("k", "forward_output", "transformer.h.{layer}.self_attention.query_key_value"),
-        _spec("v", "forward_output", "transformer.h.{layer}.self_attention.query_key_value"),
+        _spec(
+            "q",
+            "forward_output",
+            "transformer.h.{layer}.self_attention.query_key_value",
+            activation="split_qkv_heads",
+            qkv_layout="interleaved",
+        ),
+        _spec(
+            "k",
+            "forward_output",
+            "transformer.h.{layer}.self_attention.query_key_value",
+            activation="split_qkv_heads",
+            qkv_layout="interleaved",
+        ),
+        _spec(
+            "v",
+            "forward_output",
+            "transformer.h.{layer}.self_attention.query_key_value",
+            activation="split_qkv_heads",
+            qkv_layout="interleaved",
+        ),
         _spec(
             "z",
             "forward_input",
             "transformer.h.{layer}.self_attention.dense",
+            activation="split_heads",
         ),
         _unsupported_result_spec(),
         _pattern_spec("transformer.h.{layer}.self_attention"),
@@ -836,10 +1162,30 @@ MPT_ADAPTER = ArchitectureAdapter(
         _spec("resid_post", "forward_output", "transformer.blocks.{layer}"),
         _spec("attn_out", "forward_output", "transformer.blocks.{layer}.attn.out_proj"),
         _spec("mlp_out", "forward_output", "transformer.blocks.{layer}.ffn"),
-        _spec("q", "forward_output", "transformer.blocks.{layer}.attn.Wqkv"),
-        _spec("k", "forward_output", "transformer.blocks.{layer}.attn.Wqkv"),
-        _spec("v", "forward_output", "transformer.blocks.{layer}.attn.Wqkv"),
-        _spec("z", "forward_input", "transformer.blocks.{layer}.attn.out_proj"),
+        _spec(
+            "q",
+            "forward_output",
+            "transformer.blocks.{layer}.attn.Wqkv",
+            activation="split_qkv_heads",
+        ),
+        _spec(
+            "k",
+            "forward_output",
+            "transformer.blocks.{layer}.attn.Wqkv",
+            activation="split_qkv_heads",
+        ),
+        _spec(
+            "v",
+            "forward_output",
+            "transformer.blocks.{layer}.attn.Wqkv",
+            activation="split_qkv_heads",
+        ),
+        _spec(
+            "z",
+            "forward_input",
+            "transformer.blocks.{layer}.attn.out_proj",
+            activation="split_heads",
+        ),
         _unsupported_result_spec(),
         _pattern_spec("transformer.blocks.{layer}.attn"),
         _scores_spec("transformer.blocks.{layer}.attn"),
@@ -861,14 +1207,21 @@ PHI_ADAPTER = ArchitectureAdapter(
             "model.layers.{layer}.self_attn.o_proj",
         ),
         _spec("mlp_out", "forward_output", "model.layers.{layer}.mlp"),
-        _spec("q", "forward_output", "model.layers.{layer}.self_attn.q_proj"),
-        _spec("k", "forward_output", "model.layers.{layer}.self_attn.k_proj"),
-        _spec("v", "forward_output", "model.layers.{layer}.self_attn.v_proj"),
+        _spec(
+            "q", "forward_output", "model.layers.{layer}.self_attn.q_proj", activation="split_heads"
+        ),
+        _spec(
+            "k", "forward_output", "model.layers.{layer}.self_attn.k_proj", activation="split_heads"
+        ),
+        _spec(
+            "v", "forward_output", "model.layers.{layer}.self_attn.v_proj", activation="split_heads"
+        ),
         _spec(
             "z",
             "forward_input",
             "model.layers.{layer}.self_attn.dense",
             "model.layers.{layer}.self_attn.o_proj",
+            activation="split_heads",
         ),
         _unsupported_result_spec(),
         _pattern_spec("model.layers.{layer}.self_attn"),
@@ -887,10 +1240,30 @@ OPT_ADAPTER = ArchitectureAdapter(
         _spec("resid_post", "forward_output", "model.decoder.layers.{layer}"),
         _spec("attn_out", "forward_output", "model.decoder.layers.{layer}.self_attn.out_proj"),
         _spec("mlp_out", "forward_output", "model.decoder.layers.{layer}.fc2"),
-        _spec("q", "forward_output", "model.decoder.layers.{layer}.self_attn.q_proj"),
-        _spec("k", "forward_output", "model.decoder.layers.{layer}.self_attn.k_proj"),
-        _spec("v", "forward_output", "model.decoder.layers.{layer}.self_attn.v_proj"),
-        _spec("z", "forward_input", "model.decoder.layers.{layer}.self_attn.out_proj"),
+        _spec(
+            "q",
+            "forward_output",
+            "model.decoder.layers.{layer}.self_attn.q_proj",
+            activation="split_heads",
+        ),
+        _spec(
+            "k",
+            "forward_output",
+            "model.decoder.layers.{layer}.self_attn.k_proj",
+            activation="split_heads",
+        ),
+        _spec(
+            "v",
+            "forward_output",
+            "model.decoder.layers.{layer}.self_attn.v_proj",
+            activation="split_heads",
+        ),
+        _spec(
+            "z",
+            "forward_input",
+            "model.decoder.layers.{layer}.self_attn.out_proj",
+            activation="split_heads",
+        ),
         _unsupported_result_spec(),
         _pattern_spec("model.decoder.layers.{layer}.self_attn"),
         _scores_spec("model.decoder.layers.{layer}.self_attn"),
@@ -899,8 +1272,8 @@ OPT_ADAPTER = ArchitectureAdapter(
 
 BERT_ADAPTER = ArchitectureAdapter(
     name="bert_encoder",
-    model_types=("bert",),
-    model_name_markers=("bert-", "google-bert/"),
+    model_types=("bert", "roberta"),
+    model_name_markers=("bert-", "google-bert/", "roberta"),
     component_specs=(
         _spec("resid_pre", "forward_input", "encoder.layer.{layer}", "bert.encoder.layer.{layer}"),
         _spec(
@@ -932,24 +1305,28 @@ BERT_ADAPTER = ArchitectureAdapter(
             "forward_output",
             "encoder.layer.{layer}.attention.self.query",
             "bert.encoder.layer.{layer}.attention.self.query",
+            activation="split_heads",
         ),
         _spec(
             "k",
             "forward_output",
             "encoder.layer.{layer}.attention.self.key",
             "bert.encoder.layer.{layer}.attention.self.key",
+            activation="split_heads",
         ),
         _spec(
             "v",
             "forward_output",
             "encoder.layer.{layer}.attention.self.value",
             "bert.encoder.layer.{layer}.attention.self.value",
+            activation="split_heads",
         ),
         _spec(
             "z",
             "forward_input",
             "encoder.layer.{layer}.attention.output.dense",
             "bert.encoder.layer.{layer}.attention.output.dense",
+            activation="split_heads",
         ),
         _unsupported_result_spec(),
         _pattern_spec(
@@ -963,6 +1340,86 @@ BERT_ADAPTER = ArchitectureAdapter(
     ),
 )
 
+DISTILBERT_ADAPTER = ArchitectureAdapter(
+    name="distilbert_encoder",
+    model_types=("distilbert",),
+    model_name_markers=("distilbert",),
+    component_specs=(
+        _spec("resid_pre", "forward_input", "transformer.layer.{layer}"),
+        _spec("resid_mid", "forward_input", "transformer.layer.{layer}.ffn"),
+        _spec("resid_post", "forward_output", "transformer.layer.{layer}"),
+        _spec("attn_out", "forward_output", "transformer.layer.{layer}.attention.out_lin"),
+        _spec("mlp_out", "forward_output", "transformer.layer.{layer}.ffn.lin2"),
+        _spec(
+            "q",
+            "forward_output",
+            "transformer.layer.{layer}.attention.q_lin",
+            activation="split_heads",
+        ),
+        _spec(
+            "k",
+            "forward_output",
+            "transformer.layer.{layer}.attention.k_lin",
+            activation="split_heads",
+        ),
+        _spec(
+            "v",
+            "forward_output",
+            "transformer.layer.{layer}.attention.v_lin",
+            activation="split_heads",
+        ),
+        _spec(
+            "z",
+            "forward_input",
+            "transformer.layer.{layer}.attention.out_lin",
+            activation="split_heads",
+        ),
+        _unsupported_result_spec(),
+        _pattern_spec("transformer.layer.{layer}.attention"),
+        _scores_spec("transformer.layer.{layer}.attention"),
+    ),
+)
+
+AUDIO_ENCODER_ADAPTER = ArchitectureAdapter(
+    name="audio_encoder",
+    model_types=("wav2vec2", "hubert"),
+    model_name_markers=("wav2vec2", "hubert"),
+    component_specs=(
+        _spec("resid_pre", "forward_input", "encoder.layers.{layer}"),
+        _spec("resid_mid", "forward_input", "encoder.layers.{layer}.feed_forward"),
+        _spec("resid_post", "forward_output", "encoder.layers.{layer}"),
+        _spec("attn_out", "forward_output", "encoder.layers.{layer}.attention.out_proj"),
+        _spec("mlp_out", "forward_output", "encoder.layers.{layer}.feed_forward.output_dense"),
+        _spec(
+            "q",
+            "forward_output",
+            "encoder.layers.{layer}.attention.q_proj",
+            activation="split_heads",
+        ),
+        _spec(
+            "k",
+            "forward_output",
+            "encoder.layers.{layer}.attention.k_proj",
+            activation="split_heads",
+        ),
+        _spec(
+            "v",
+            "forward_output",
+            "encoder.layers.{layer}.attention.v_proj",
+            activation="split_heads",
+        ),
+        _spec(
+            "z",
+            "forward_input",
+            "encoder.layers.{layer}.attention.out_proj",
+            activation="split_heads",
+        ),
+        _unsupported_result_spec(),
+        _pattern_spec("encoder.layers.{layer}.attention"),
+        _scores_spec("encoder.layers.{layer}.attention"),
+    ),
+)
+
 T5_ENCODER_ADAPTER = ArchitectureAdapter(
     name="t5_encoder_decoder",
     model_types=("t5",),
@@ -973,10 +1430,30 @@ T5_ENCODER_ADAPTER = ArchitectureAdapter(
         _spec("resid_post", "forward_output", "encoder.block.{layer}"),
         _spec("attn_out", "forward_output", "encoder.block.{layer}.layer.0.SelfAttention.o"),
         _spec("mlp_out", "forward_output", "encoder.block.{layer}.layer.1.DenseReluDense"),
-        _spec("q", "forward_output", "encoder.block.{layer}.layer.0.SelfAttention.q"),
-        _spec("k", "forward_output", "encoder.block.{layer}.layer.0.SelfAttention.k"),
-        _spec("v", "forward_output", "encoder.block.{layer}.layer.0.SelfAttention.v"),
-        _spec("z", "forward_input", "encoder.block.{layer}.layer.0.SelfAttention.o"),
+        _spec(
+            "q",
+            "forward_output",
+            "encoder.block.{layer}.layer.0.SelfAttention.q",
+            activation="split_heads",
+        ),
+        _spec(
+            "k",
+            "forward_output",
+            "encoder.block.{layer}.layer.0.SelfAttention.k",
+            activation="split_heads",
+        ),
+        _spec(
+            "v",
+            "forward_output",
+            "encoder.block.{layer}.layer.0.SelfAttention.v",
+            activation="split_heads",
+        ),
+        _spec(
+            "z",
+            "forward_input",
+            "encoder.block.{layer}.layer.0.SelfAttention.o",
+            activation="split_heads",
+        ),
         _unsupported_result_spec(),
         _pattern_spec("encoder.block.{layer}.layer.0.SelfAttention"),
         _scores_spec("encoder.block.{layer}.layer.0.SelfAttention"),
@@ -1020,6 +1497,8 @@ SUPPORTED_ARCHITECTURE_ADAPTERS: tuple[ArchitectureAdapter, ...] = (
     MPT_ADAPTER,
     PHI_ADAPTER,
     OPT_ADAPTER,
+    DISTILBERT_ADAPTER,
+    AUDIO_ENCODER_ADAPTER,
     BERT_ADAPTER,
     T5_ENCODER_ADAPTER,
 )

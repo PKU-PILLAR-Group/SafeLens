@@ -22,7 +22,8 @@ model:
 
 Component hooks are resolved by `SafeLens.utils.model_bridge`. The current
 bridge covers GPT-2, GPT-J, GPT-Neo, GPT-NeoX/Pythia, BLOOM/Falcon, MPT, Phi,
-OPT, BERT, T5 encoder-stack, and LLaMA-like decoder families including
+OPT, BERT/RoBERTa, DistilBERT, T5 encoder-stack, Wav2Vec2/Hubert audio encoders,
+and LLaMA-like decoder families including
 Qwen/Qwen2/Qwen3, LLaMA, Mistral, Mixtral, Gemma, OLMo, StableLM, and Yi.
 
 ::: SafeLens.utils.transformer_lens_support

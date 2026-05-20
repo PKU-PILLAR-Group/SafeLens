@@ -263,7 +263,8 @@ Use `transformer_lens` as a compatibility source for model families mirrored
 from the TransformerLens support table. SafeLens still loads through its own
 Transformers wrappers and does not require the `transformer-lens` package.
 Component hooks are resolved through SafeLens architecture adapters for GPT-2,
-GPT-J, GPT-Neo, GPT-NeoX/Pythia, BLOOM/Falcon, MPT, Phi, OPT, BERT, T5, and
+GPT-J, GPT-Neo, GPT-NeoX/Pythia, BLOOM/Falcon, MPT, Phi, OPT, BERT/RoBERTa,
+DistilBERT, T5, Wav2Vec2/Hubert, and
 LLaMA-like decoder families.
 Attention `pattern` and pre-softmax `attn_scores` hooks are supported through
 eager softmax instrumentation; flash or SDPA attention paths may need an eager

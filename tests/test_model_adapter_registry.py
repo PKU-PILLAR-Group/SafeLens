@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from SafeLens.core.base import ModelLoadConfig, ModelWrapper
 from SafeLens.utils import (
     HuggingFaceModelWrapper,
@@ -119,6 +121,18 @@ def test_build_model_wrapper_uses_registered_adapters() -> None:
         build_model_wrapper(ModelLoadConfig(source="local", name="./models/local-causal-lm")),
         LocalModelWrapper,
     )
+
+
+def test_transformerlens_wrapper_rejects_unsupported_model_before_auto_loading() -> None:
+    wrapper = build_model_wrapper(
+        ModelLoadConfig(
+            source="transformer_lens",
+            name="hf-internal-testing/tiny-random-CLIPModel",
+        )
+    )
+
+    with pytest.raises(ValueError, match="not in SafeLens' vendored TransformerLens-compatible"):
+        wrapper.load_model()
 
 
 def test_all_registered_adapters_satisfy_model_wrapper_contract() -> None:

@@ -244,6 +244,7 @@ class HuggingFaceModelWrapper(ModelWrapper):
         self.pretrained_path = pretrained_path
         self.model: Any = None
         self.tokenizer: Any = None
+        self._tokenizer_load_error: Exception | None = None
         self._hooks: list[Any] = []
         self._requires_output_attentions = False
         self._run_requires_output_attentions = False
@@ -268,11 +269,10 @@ class HuggingFaceModelWrapper(ModelWrapper):
         pretrained_path = self._resolve_pretrained_path()
         pretrained_kwargs = self._pretrained_kwargs()
 
-        self.tokenizer = AutoTokenizer.from_pretrained(
+        self.tokenizer = self._load_text_tokenizer(
+            AutoTokenizer,
             pretrained_path,
-            trust_remote_code=self.trust_remote_code,
-            **pretrained_kwargs,
-            **self.tokenizer_kwargs,
+            pretrained_kwargs,
         )
         self.model = AutoModelForCausalLM.from_pretrained(
             pretrained_path,
@@ -296,6 +296,25 @@ class HuggingFaceModelWrapper(ModelWrapper):
         if self.cache_dir is not None:
             kwargs["cache_dir"] = self.cache_dir
         return kwargs
+
+    def _load_text_tokenizer(
+        self,
+        tokenizer_cls: Any,
+        pretrained_path: str,
+        pretrained_kwargs: dict[str, Any],
+    ) -> Any | None:
+        try:
+            tokenizer = tokenizer_cls.from_pretrained(
+                pretrained_path,
+                trust_remote_code=self.trust_remote_code,
+                **pretrained_kwargs,
+                **self.tokenizer_kwargs,
+            )
+        except Exception as exc:
+            self._tokenizer_load_error = exc
+            return None
+        self._tokenizer_load_error = None
+        return tokenizer
 
     def add_hook(self, layer: LayerRef, hook_fn: HookFn) -> Any:
         model = self._require_model()
@@ -350,7 +369,10 @@ class HuggingFaceModelWrapper(ModelWrapper):
     def generate(self, prompt: str, **generation_kwargs: Any) -> str:
         model = self._require_model()
         if self.tokenizer is None:
-            raise RuntimeError("Tokenizer is not loaded. Call load_model() first.")
+            detail = _tokenizer_error_detail(self._tokenizer_load_error)
+            raise RuntimeError(
+                "Tokenizer is not loaded, so text generation is unavailable. " f"{detail}"
+            )
 
         import torch
 
@@ -379,6 +401,14 @@ class HuggingFaceModelWrapper(ModelWrapper):
                 if self.device is not None:
                     tokenized = tokenized.to(self.device)
                 return self._with_attention_flags(dict(tokenized))
+        if self.tokenizer is None and "input_ids" not in batch:
+            text = batch.get("text") or batch.get("prompt")
+            if text is not None:
+                detail = _tokenizer_error_detail(self._tokenizer_load_error)
+                raise ValueError(
+                    "This model did not load a tokenizer, so text batches cannot be "
+                    f"tokenized. Provide `input_ids` or `inputs_embeds` directly. {detail}"
+                )
         return self._with_attention_flags(dict(batch))
 
     def _try_register_component_hook(
@@ -462,6 +492,12 @@ class TransformerLensCompatibleModelWrapper(HuggingFaceModelWrapper):
     """
 
     def load_model(self) -> Any:
+        if not self._is_supported_transformer_lens_target():
+            raise ValueError(
+                f"Model {self.name!r} is not in SafeLens' vendored TransformerLens-compatible "
+                "support table. Use source='huggingface' for generic Transformers loading, "
+                "or source='local' for a local model directory."
+            )
         try:
             import torch
             from transformers import (
@@ -503,12 +539,12 @@ class TransformerLensCompatibleModelWrapper(HuggingFaceModelWrapper):
                 **self.load_kwargs,
             )
         else:
-            self.tokenizer = AutoTokenizer.from_pretrained(
+            self.tokenizer = self._load_text_tokenizer(
+                AutoTokenizer,
                 pretrained_path,
-                trust_remote_code=self.trust_remote_code,
-                **pretrained_kwargs,
-                **self.tokenizer_kwargs,
+                pretrained_kwargs,
             )
+            model_cls: Any
             if kind == "encoder_decoder":
                 model_cls = AutoModelForSeq2SeqLM
             elif kind == "encoder":
@@ -531,6 +567,15 @@ class TransformerLensCompatibleModelWrapper(HuggingFaceModelWrapper):
     def _resolve_pretrained_path(self) -> str:
         raw_path = self.pretrained_path or self.name
         return resolve_transformer_lens_compatible_model_name(raw_path)
+
+    def _is_supported_transformer_lens_target(self) -> bool:
+        if _wrapper_looks_like_local_path(self.name):
+            return True
+        if self.pretrained_path is not None and _wrapper_looks_like_local_path(
+            self.pretrained_path
+        ):
+            return True
+        return is_transformer_lens_supported_model_name(self.name)
 
     def _prepare_model_inputs(self, batch: Batch) -> dict[str, Any]:
         kind = transformer_lens_model_kind(self.name)
@@ -1125,6 +1170,16 @@ def _no_grad_context() -> Any:
         return nullcontext()
 
 
+def _tokenizer_error_detail(error: Exception | None) -> str:
+    if error is None:
+        return "Call load_model() first or configure tokenizer files for the model."
+    return f"Tokenizer load error: {type(error).__name__}: {error}"
+
+
+def _wrapper_looks_like_local_path(value: str) -> bool:
+    return value.startswith((".", "/", "~"))
+
+
 def _first_present(batch: Batch, keys: Sequence[str]) -> Any:
     for key in keys:
         if key in batch:
@@ -1283,7 +1338,11 @@ def register_builtin_model_adapters() -> None:
                 "Qwen/Qwen*",
                 "google/gemma-*",
                 "google-bert/bert-*",
+                "FacebookAI/roberta-*",
+                "distilbert/distilbert-*",
                 "google-t5/t5-*",
+                "facebook/wav2vec2-*",
+                "facebook/hubert-*",
             ),
             capabilities=ModelAdapterCapabilities(
                 supported_hooks=(
@@ -1309,8 +1368,8 @@ def register_builtin_model_adapters() -> None:
                     "load through Transformers auto classes.",
                     "SafeLens architecture adapters map HF module paths to canonical "
                     "components for GPT-2, GPT-J, GPT-Neo, GPT-NeoX/Pythia, "
-                    "BLOOM/Falcon, MPT, Phi, OPT, BERT, T5, and LLaMA-like "
-                    "decoder families.",
+                    "BLOOM/Falcon, MPT, Phi, OPT, BERT/RoBERTa, DistilBERT, "
+                    "T5, Wav2Vec2/Hubert, and LLaMA-like decoder families.",
                     "Attention pattern and score hooks use eager softmax instrumentation; "
                     "flash or SDPA paths may need an eager attention implementation.",
                 ),
