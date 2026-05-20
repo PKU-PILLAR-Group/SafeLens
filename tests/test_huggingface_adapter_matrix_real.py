@@ -5,7 +5,6 @@ import os
 from collections.abc import Iterable
 from typing import Any
 
-import numpy as np
 import pytest
 
 from SafeLens.core.base import ModelLoadConfig
@@ -39,9 +38,7 @@ _DECODER_CASES = (
     ("llama", "hf-internal-testing/tiny-random-LlamaForCausalLM"),
     ("mistral", "hf-internal-testing/tiny-random-MistralForCausalLM"),
 )
-_TOKEN_ID_DECODER_CASES = (
-    ("mixtral", "hf-internal-testing/tiny-random-MixtralForCausalLM"),
-)
+_TOKEN_ID_DECODER_CASES = (("mixtral", "hf-internal-testing/tiny-random-MixtralForCausalLM"),)
 _ENCODER_CASES = (
     ("roberta", "hf-internal-testing/tiny-random-RobertaModel"),
     ("distilbert", "hf-internal-testing/tiny-random-DistilBertModel"),
@@ -102,7 +99,7 @@ def _token_id_batch() -> dict[str, Any]:
     return {"input_ids": torch.tensor([[1, 2, 3, 4]])}
 
 
-@pytest.mark.parametrize(("family", "model_id"), _DECODER_CASES)
+@pytest.mark.parametrize(("family", "model_id"), _DECODER_CASES)  # type: ignore[misc]
 def test_real_decoder_adapter_matrix_caches_head_components_and_patches(
     family: str,
     model_id: str,
@@ -157,7 +154,7 @@ def test_real_decoder_adapter_matrix_caches_head_components_and_patches(
         wrapper.remove_hooks()
 
 
-@pytest.mark.parametrize(("family", "model_id"), _TOKEN_ID_DECODER_CASES)
+@pytest.mark.parametrize(("family", "model_id"), _TOKEN_ID_DECODER_CASES)  # type: ignore[misc]
 def test_real_decoder_adapter_matrix_allows_token_id_batches_without_tokenizer(
     family: str,
     model_id: str,
@@ -195,7 +192,7 @@ def test_real_decoder_adapter_matrix_allows_token_id_batches_without_tokenizer(
         wrapper.remove_hooks()
 
 
-@pytest.mark.parametrize(("family", "model_id"), _DECODER_CASES)
+@pytest.mark.parametrize(("family", "model_id"), _DECODER_CASES)  # type: ignore[misc]
 def test_real_decoder_adapter_matrix_caches_attention_pattern_and_scores(
     family: str,
     model_id: str,
@@ -218,7 +215,7 @@ def test_real_decoder_adapter_matrix_caches_attention_pattern_and_scores(
         wrapper.remove_hooks()
 
 
-@pytest.mark.parametrize(("family", "model_id"), _ENCODER_CASES)
+@pytest.mark.parametrize(("family", "model_id"), _ENCODER_CASES)  # type: ignore[misc]
 def test_real_encoder_adapter_matrix_caches_head_components_and_patches(
     family: str,
     model_id: str,
@@ -272,12 +269,13 @@ def test_real_encoder_adapter_matrix_caches_head_components_and_patches(
         wrapper.remove_hooks()
 
 
-@pytest.mark.parametrize(("family", "model_id"), _AUDIO_CASES)
+@pytest.mark.parametrize(("family", "model_id"), _AUDIO_CASES)  # type: ignore[misc]
 def test_real_audio_adapter_matrix_caches_head_components_and_patches(
     family: str,
     model_id: str,
 ) -> None:
     _skip_unless_enabled()
+    np = pytest.importorskip("numpy")
     wrapper = _load_wrapper(model_id, source="transformer_lens")
     audio = np.zeros(4000, dtype=np.float32)
     batch = {"audio": audio, "sampling_rate": 16000}
