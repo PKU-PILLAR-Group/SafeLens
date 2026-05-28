@@ -212,6 +212,7 @@ def test_qwen3_real_model_runs_all_supported_component_patch_helpers(
         "dest_positions": [0],
         "source_positions": [0],
         "cache_layers": [],
+        "return_details": True,
     }
 
     single_result_helpers: tuple[Callable[..., list[PatchResult]], ...] = (

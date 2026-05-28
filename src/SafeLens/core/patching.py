@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from inspect import Parameter, signature
 from itertools import product
 from typing import Any, Literal
 
@@ -21,10 +22,12 @@ from SafeLens.core.hooks import (
 PatchMode = Literal["replace", "add"]
 PatchMetric = Callable[[Any], float]
 PatchSetter = Callable[[Any, "PatchSpec", ActivationCache], Any]
+TransformerLensPatchSetter = Callable[[Any, Sequence[int], Any], Any]
 AxisName = Literal["layer", "pos", "head_index", "head", "src_pos", "dest_pos"]
 ActivationNameStyle = Literal["safelens", "transformer_lens"]
 
 FULL_SLICE = slice(None)
+PATTERN_COMPONENTS = {"pattern", "attn_scores"}
 
 TRANSFORMER_LENS_ACTIVATION_TEMPLATES = {
     "resid_pre": "blocks.{layer}.hook_resid_pre",
@@ -113,7 +116,7 @@ def replace_patch_setter(
     """Replace the whole activation or a slice with the clean activation value."""
     patch_value = get_patch_value(spec, clean_cache)
     if spec.target_index is None:
-        return patch_value
+        return coerce_value_like(corrupted_activation, patch_value)
 
     patched = clone_activation(corrupted_activation)
     set_indexed(patched, spec.target_index, patch_value)
@@ -166,7 +169,7 @@ def make_patch_hook(spec: PatchSpec, clean_cache: ActivationCache) -> HookFn:
 
 def run_activation_patch(
     model: ModelWrapper,
-    corrupted_batch: Batch,
+    corrupted_batch: Any,
     clean_cache: ActivationCache,
     spec: PatchSpec,
     metric: PatchMetric,
@@ -174,32 +177,209 @@ def run_activation_patch(
     layers: Sequence[LayerRef] | None = None,
 ) -> PatchResult:
     """Run one patched corrupted forward pass and score it with a metric."""
-    with temporary_hooks(model, [(spec.layer, make_patch_hook(spec, clean_cache))]):
-        output, cache = model.run_with_cache(corrupted_batch, layers=layers)
+    patch_hook = make_patch_hook(spec, clean_cache)
+    wrapper_run_with_hooks = getattr(model, "run_with_hooks", None)
+    if callable(wrapper_run_with_hooks) and layers is None:
+        output = wrapper_run_with_hooks(
+            corrupted_batch,
+            fwd_hooks=[(spec.layer, patch_hook)],
+        )
+        cache = {}
+    else:
+        with temporary_hooks(model, [(spec.layer, patch_hook)]):
+            output, cache = model.run_with_cache(corrupted_batch, layers=layers)
     return PatchResult(spec=spec, metric=float(metric(output)), output=output, cache=cache)
 
 
 def generic_activation_patch(
     model: ModelWrapper,
-    corrupted_batch: Batch,
+    corrupted_batch: Any,
     clean_cache: ActivationCache,
-    specs: Iterable[PatchSpec],
-    metric: PatchMetric,
+    specs: Iterable[PatchSpec] | PatchMetric | None = None,
+    metric: PatchMetric | PatchSetter | TransformerLensPatchSetter | None = None,
+    activation_name: str | None = None,
+    index_axis_names: Sequence[AxisName] | None = None,
+    index_df: Any = None,
+    return_index_df: bool = False,
     *,
     layers: Sequence[LayerRef] | None = None,
-) -> list[PatchResult]:
+    patching_metric: PatchMetric | None = None,
+    patch_setter: PatchSetter | TransformerLensPatchSetter | None = None,
+    return_details: bool | None = None,
+    return_metric_grid: bool = False,
+    return_index_table: bool = False,
+) -> Any:
     """Run a sequence of activation patches, similar to TransformerLens' generic patcher."""
-    return [
+    transformer_lens_style = specs is None and (
+        patching_metric is not None or patch_setter is not None or activation_name is not None
+    )
+    if specs is not None and callable(specs) and not _looks_like_patch_specs(specs):
+        if patching_metric is not None:
+            raise TypeError("Pass patching_metric either positionally or by keyword, not both.")
+        patching_metric = specs
+        specs = None
+        transformer_lens_style = True
+    if metric is not None and callable(metric) and specs is None and patch_setter is None:
+        patch_setter = metric
+        metric = None
+        transformer_lens_style = True
+
+    metric_fn = metric or patching_metric
+    if metric_fn is None:
+        raise TypeError("generic_activation_patch requires `metric` or `patching_metric`.")
+
+    resolved_index_axis_names = index_axis_names
+    if specs is None:
+        if patch_setter is None or activation_name is None:
+            raise TypeError(
+                "TL-style generic_activation_patch requires `patch_setter` and "
+                "`activation_name` when `specs` is not supplied."
+            )
+        flattened_output = index_df is not None
+        if index_df is None:
+            if index_axis_names is None:
+                raise TypeError("Pass `index_axis_names` or `index_df` for TL-style patching.")
+            index_df = infer_index_table(
+                model,
+                corrupted_batch,
+                clean_cache,
+                activation_name,
+                index_axis_names,
+                name_style="transformer_lens",
+            )
+        else:
+            index_df, resolved_index_axis_names = normalize_index_table(
+                index_df,
+                index_axis_names,
+            )
+        specs = make_transformer_lens_patch_specs(
+            activation_name,
+            index_df,
+            patch_setter=patch_setter,
+        )
+    elif patch_setter is not None or activation_name is not None or index_df is not None:
+        raise TypeError(
+            "Pass either SafeLens `specs` or TL-style `patch_setter`/`activation_name`, not both."
+        )
+    if isinstance(specs, PatchSpec):
+        specs = [specs]
+
+    if return_details is None:
+        return_details = not transformer_lens_style
+    if not return_details:
+        return_metric_grid = True
+
+    results = [
         run_activation_patch(
             model,
             corrupted_batch,
             clean_cache,
             spec,
-            metric,
+            metric_fn,
             layers=layers,
         )
         for spec in specs
     ]
+    return format_patch_results(
+        results,
+        resolved_index_axis_names,
+        return_details=return_details,
+        return_metric_grid=return_metric_grid,
+        return_index_table=return_index_table,
+        return_index_df=return_index_df,
+        flatten_metric_output=locals().get("flattened_output", False),
+    )
+
+
+def _looks_like_patch_specs(value: Any) -> bool:
+    if isinstance(value, PatchSpec):
+        return True
+    if callable(value):
+        return False
+    return isinstance(value, Iterable)
+
+
+def patch_results_to_index_table(
+    results: Sequence[PatchResult],
+    index_axis_names: Sequence[AxisName] | None = None,
+) -> list[dict[str, Any]]:
+    """Return a dependency-free index table for a patch result sequence."""
+    table: list[dict[str, Any]] = []
+    for result_index, result in enumerate(results):
+        index = normalize_index(result.spec.target_index)
+        if index_axis_names is None:
+            row: dict[str, Any] = {"patch_index": result_index}
+            row.update({f"index_{axis_index}": value for axis_index, value in enumerate(index)})
+        else:
+            row = {}
+            if index_axis_names and index_axis_names[0] == "layer":
+                row["layer"] = index[0] if len(index) == len(index_axis_names) else result.spec.layer
+            for axis_index, axis_name in enumerate(index_axis_names):
+                if axis_name == "layer" and "layer" in row:
+                    continue
+                source_index = axis_index if len(index) == len(index_axis_names) else axis_index - 1
+                if 0 <= source_index < len(index):
+                    row[axis_name] = index[source_index]
+        table.append(row)
+    return table
+
+
+def patch_results_to_metric_grid(
+    results: Sequence[PatchResult],
+    index_axis_names: Sequence[AxisName] | None = None,
+) -> Any:
+    """Convert patch results to a TransformerLens-style metric grid."""
+    if index_axis_names is None:
+        return [result.metric for result in results]
+    if not index_axis_names:
+        return results[0].metric if results else 0.0
+
+    index_table = patch_results_to_index_table(results, index_axis_names)
+    axis_values = [
+        _ordered_unique(row[axis_name] for row in index_table if axis_name in row)
+        for axis_name in index_axis_names
+    ]
+    grid = make_nested_grid([len(values) for values in axis_values], fill_value=0.0)
+    axis_lookup = [
+        {value: position for position, value in enumerate(values)} for values in axis_values
+    ]
+
+    for result, row in zip(results, index_table, strict=True):
+        coordinate = tuple(
+            axis_lookup[axis_index][row[axis_name]]
+            for axis_index, axis_name in enumerate(index_axis_names)
+        )
+        set_nested(grid, coordinate, result.metric)
+    return grid
+
+
+def format_patch_results(
+    results: Sequence[PatchResult],
+    index_axis_names: Sequence[AxisName] | None = None,
+    *,
+    return_details: bool = True,
+    return_metric_grid: bool = False,
+    return_index_table: bool = False,
+    return_index_df: bool = False,
+    flatten_metric_output: bool = False,
+) -> Any:
+    """Format patch results as details or TL-style metric outputs."""
+    include_index = return_index_table or return_index_df
+    if return_index_df:
+        return_metric_grid = True
+        return_details = False
+
+    output = (
+        patch_results_to_metric_grid(
+            results,
+            None if flatten_metric_output else index_axis_names,
+        )
+        if return_metric_grid or not return_details
+        else list(results)
+    )
+    if include_index:
+        return output, patch_results_to_index_table(results, index_axis_names)
+    return output
 
 
 def make_patch_specs(
@@ -272,6 +452,93 @@ def make_component_patch_specs(
     return specs
 
 
+def make_transformer_lens_patch_specs(
+    activation_name: str,
+    index_table: Sequence[Mapping[str, Any]],
+    *,
+    patch_setter: PatchSetter | TransformerLensPatchSetter,
+) -> list[PatchSpec]:
+    """Create specs for a TransformerLens-style `generic_activation_patch` call."""
+    specs: list[PatchSpec] = []
+    for row in index_table:
+        if "layer" not in row:
+            raise ValueError("TL-style patch index rows must include a `layer` column.")
+        layer = row["layer"]
+        index = tuple(row[column] for column in row.keys())
+        target_name = activation_name_for_component(
+            activation_name,
+            layer,
+            name_style="transformer_lens",
+        )
+        specs.append(
+            PatchSpec(
+                layer=target_name,
+                activation_name=target_name,
+                target_index=index,
+                setter=adapt_transformer_lens_patch_setter(patch_setter),
+            )
+        )
+    return specs
+
+
+def adapt_transformer_lens_patch_setter(
+    patch_setter: PatchSetter | TransformerLensPatchSetter,
+) -> PatchSetter:
+    """Adapt TL-style `(activation, index, clean_activation)` setters to PatchSpec setters."""
+    call_style = infer_patch_setter_call_style(patch_setter)
+
+    def setter(corrupted_activation: Any, spec: PatchSpec, clean_cache: ActivationCache) -> Any:
+        clean_activation = spec.value if spec.value is not None else clean_cache[spec.clean_name]
+        index = normalize_index(spec.target_index)
+        if call_style == "safelens":
+            return patch_setter(corrupted_activation, spec, clean_cache)
+        if call_style == "transformer_lens":
+            return patch_setter(corrupted_activation, index, clean_activation)
+        try:
+            return patch_setter(corrupted_activation, index, clean_activation)
+        except (AttributeError, TypeError, IndexError, KeyError, AssertionError) as tl_error:
+            try:
+                return patch_setter(corrupted_activation, spec, clean_cache)
+            except (AttributeError, TypeError, IndexError, KeyError, AssertionError):
+                raise tl_error
+
+    return setter
+
+
+def infer_patch_setter_call_style(
+    patch_setter: PatchSetter | TransformerLensPatchSetter,
+) -> Literal["safelens", "transformer_lens"] | None:
+    """Infer patch-setter calling convention from common parameter names."""
+    try:
+        parameters = list(signature(patch_setter).parameters.values())
+    except (TypeError, ValueError):
+        return None
+
+    positional_parameters = [
+        parameter
+        for parameter in parameters
+        if parameter.kind
+        in (
+            Parameter.POSITIONAL_ONLY,
+            Parameter.POSITIONAL_OR_KEYWORD,
+            Parameter.KEYWORD_ONLY,
+        )
+    ]
+    names = [parameter.name for parameter in positional_parameters]
+    second_name = names[1] if len(names) > 1 else ""
+    third_name = names[2] if len(names) > 2 else ""
+
+    if second_name in {"spec", "patch_spec"} or third_name in {"clean_cache", "cache"}:
+        return "safelens"
+    if second_name in {"index", "indices", "patch_index"} or third_name in {
+        "clean_activation",
+        "clean_act",
+        "clean_value",
+    }:
+        return "transformer_lens"
+    return None
+
+
 def component_activation_patch(
     model: ModelWrapper,
     corrupted_batch: Batch,
@@ -291,7 +558,11 @@ def component_activation_patch(
     name_style: ActivationNameStyle = "safelens",
     name_template: str | None = None,
     cache_layers: Sequence[LayerRef] | None = None,
-) -> list[PatchResult]:
+    return_details: bool = True,
+    return_metric_grid: bool = False,
+    return_index_table: bool = False,
+    return_index_df: bool = False,
+) -> Any:
     """Run a component-level activation patch grid."""
     layer_values = list(
         layers
@@ -302,7 +573,13 @@ def component_activation_patch(
     if "pos" in index_axis_names:
         axis_values["pos"] = _values_or_range(
             positions,
-            infer_positions(corrupted_batch, clean_cache, component, layer_values),
+            infer_positions(
+                corrupted_batch,
+                clean_cache,
+                component,
+                layer_values,
+                axis_name="pos",
+            ),
             "positions",
         )
     if "head" in index_axis_names:
@@ -320,13 +597,25 @@ def component_activation_patch(
     if "dest_pos" in index_axis_names:
         axis_values["dest_pos"] = _values_or_range(
             dest_positions,
-            infer_positions(corrupted_batch, clean_cache, component, layer_values),
+            infer_positions(
+                corrupted_batch,
+                clean_cache,
+                component,
+                layer_values,
+                axis_name="dest_pos",
+            ),
             "dest_positions",
         )
     if "src_pos" in index_axis_names:
         axis_values["src_pos"] = _values_or_range(
             source_positions,
-            infer_positions(corrupted_batch, clean_cache, component, layer_values),
+            infer_positions(
+                corrupted_batch,
+                clean_cache,
+                component,
+                layer_values,
+                axis_name="src_pos",
+            ),
             "source_positions",
         )
     specs = make_component_patch_specs(
@@ -340,7 +629,7 @@ def component_activation_patch(
         name_style=name_style,
         name_template=name_template,
     )
-    return generic_activation_patch(
+    results = generic_activation_patch(
         model,
         corrupted_batch,
         clean_cache,
@@ -348,111 +637,212 @@ def component_activation_patch(
         metric,
         layers=cache_layers,
     )
+    return format_patch_results(
+        results,
+        index_axis_names,
+        return_details=return_details,
+        return_metric_grid=return_metric_grid,
+        return_index_table=return_index_table,
+        return_index_df=return_index_df,
+    )
 
 
 def layer_pos_patch_setter(
     corrupted_activation: Any,
-    spec: PatchSpec,
-    clean_cache: ActivationCache,
+    spec: PatchSpec | Sequence[int],
+    clean_cache: ActivationCache | Any,
 ) -> Any:
     """Patch activations shaped `[batch, pos, ...]` at one layer and position."""
+    tl_output = maybe_apply_transformer_lens_patch_setter(
+        corrupted_activation,
+        spec,
+        clean_cache,
+        expected_length=2,
+        setter_name="layer_pos_patch_setter",
+        target_slice_fn=lambda index: (FULL_SLICE, index[1]),
+        source_slice_fn=lambda index: (FULL_SLICE, index[1]),
+    )
+    if tl_output is not None:
+        return tl_output
     index = require_patch_index(spec, 2, "layer_pos_patch_setter")
     source_index = source_index_or_target(spec, index)
+    target_has_batch = patch_target_has_batch_dim(corrupted_activation, spec, clean_cache)
+    source_has_batch = patch_source_has_batch_dim(spec, clean_cache)
     return patch_slice(
         corrupted_activation,
         spec,
         clean_cache,
-        target_slice=(FULL_SLICE, index[1]),
-        source_slice=(FULL_SLICE, source_index[1]),
+        target_slice=batch_prefixed_slice(target_has_batch, index[1]),
+        source_slice=batch_prefixed_slice(source_has_batch, source_index[1]),
     )
 
 
 def layer_pos_head_vector_patch_setter(
     corrupted_activation: Any,
-    spec: PatchSpec,
-    clean_cache: ActivationCache,
+    spec: PatchSpec | Sequence[int],
+    clean_cache: ActivationCache | Any,
 ) -> Any:
     """Patch head vector activations shaped `[batch, pos, head, ...]`."""
+    tl_output = maybe_apply_transformer_lens_patch_setter(
+        corrupted_activation,
+        spec,
+        clean_cache,
+        expected_length=3,
+        setter_name="layer_pos_head_vector_patch_setter",
+        target_slice_fn=lambda index: (FULL_SLICE, index[1], index[2]),
+        source_slice_fn=lambda index: (FULL_SLICE, index[1], index[2]),
+    )
+    if tl_output is not None:
+        return tl_output
     index = require_patch_index(spec, 3, "layer_pos_head_vector_patch_setter")
     source_index = source_index_or_target(spec, index)
+    target_has_batch = patch_target_has_batch_dim(corrupted_activation, spec, clean_cache)
+    source_has_batch = patch_source_has_batch_dim(spec, clean_cache)
     return patch_slice(
         corrupted_activation,
         spec,
         clean_cache,
-        target_slice=(FULL_SLICE, index[1], index[2]),
-        source_slice=(FULL_SLICE, source_index[1], source_index[2]),
+        target_slice=batch_prefixed_slice(target_has_batch, index[1], index[2]),
+        source_slice=batch_prefixed_slice(source_has_batch, source_index[1], source_index[2]),
     )
 
 
 def layer_head_vector_patch_setter(
     corrupted_activation: Any,
-    spec: PatchSpec,
-    clean_cache: ActivationCache,
+    spec: PatchSpec | Sequence[int],
+    clean_cache: ActivationCache | Any,
 ) -> Any:
     """Patch a head vector across all positions for `[batch, pos, head, ...]`."""
+    tl_output = maybe_apply_transformer_lens_patch_setter(
+        corrupted_activation,
+        spec,
+        clean_cache,
+        expected_length=2,
+        setter_name="layer_head_vector_patch_setter",
+        target_slice_fn=lambda index: (FULL_SLICE, FULL_SLICE, index[1]),
+        source_slice_fn=lambda index: (FULL_SLICE, FULL_SLICE, index[1]),
+    )
+    if tl_output is not None:
+        return tl_output
     index = require_patch_index(spec, 2, "layer_head_vector_patch_setter")
     source_index = source_index_or_target(spec, index)
+    target_has_batch = patch_target_has_batch_dim(corrupted_activation, spec, clean_cache)
+    source_has_batch = patch_source_has_batch_dim(spec, clean_cache)
     return patch_slice(
         corrupted_activation,
         spec,
         clean_cache,
-        target_slice=(FULL_SLICE, FULL_SLICE, index[1]),
-        source_slice=(FULL_SLICE, FULL_SLICE, source_index[1]),
+        target_slice=batch_prefixed_slice(target_has_batch, FULL_SLICE, index[1]),
+        source_slice=batch_prefixed_slice(source_has_batch, FULL_SLICE, source_index[1]),
     )
 
 
 def layer_head_pattern_patch_setter(
     corrupted_activation: Any,
-    spec: PatchSpec,
-    clean_cache: ActivationCache,
+    spec: PatchSpec | Sequence[int],
+    clean_cache: ActivationCache | Any,
 ) -> Any:
     """Patch an attention pattern head shaped `[batch, head, dest_pos, src_pos]`."""
+    tl_output = maybe_apply_transformer_lens_patch_setter(
+        corrupted_activation,
+        spec,
+        clean_cache,
+        expected_length=2,
+        setter_name="layer_head_pattern_patch_setter",
+        target_slice_fn=lambda index: (FULL_SLICE, index[1], FULL_SLICE, FULL_SLICE),
+        source_slice_fn=lambda index: (FULL_SLICE, index[1], FULL_SLICE, FULL_SLICE),
+    )
+    if tl_output is not None:
+        return tl_output
     index = require_patch_index(spec, 2, "layer_head_pattern_patch_setter")
     source_index = source_index_or_target(spec, index)
+    target_has_batch = patch_target_has_batch_dim(corrupted_activation, spec, clean_cache)
+    source_has_batch = patch_source_has_batch_dim(spec, clean_cache)
     return patch_slice(
         corrupted_activation,
         spec,
         clean_cache,
-        target_slice=(FULL_SLICE, index[1], FULL_SLICE, FULL_SLICE),
-        source_slice=(FULL_SLICE, source_index[1], FULL_SLICE, FULL_SLICE),
+        target_slice=batch_prefixed_slice(target_has_batch, index[1], FULL_SLICE, FULL_SLICE),
+        source_slice=batch_prefixed_slice(
+            source_has_batch,
+            source_index[1],
+            FULL_SLICE,
+            FULL_SLICE,
+        ),
     )
 
 
 def layer_head_pos_pattern_patch_setter(
     corrupted_activation: Any,
-    spec: PatchSpec,
-    clean_cache: ActivationCache,
+    spec: PatchSpec | Sequence[int],
+    clean_cache: ActivationCache | Any,
 ) -> Any:
     """Patch one destination position in an attention pattern."""
+    tl_output = maybe_apply_transformer_lens_patch_setter(
+        corrupted_activation,
+        spec,
+        clean_cache,
+        expected_length=3,
+        setter_name="layer_head_pos_pattern_patch_setter",
+        target_slice_fn=lambda index: (FULL_SLICE, index[1], index[2], FULL_SLICE),
+        source_slice_fn=lambda index: (FULL_SLICE, index[1], index[2], FULL_SLICE),
+    )
+    if tl_output is not None:
+        return tl_output
     index = require_patch_index(spec, 3, "layer_head_pos_pattern_patch_setter")
     source_index = source_index_or_target(spec, index)
+    target_has_batch = patch_target_has_batch_dim(corrupted_activation, spec, clean_cache)
+    source_has_batch = patch_source_has_batch_dim(spec, clean_cache)
     return patch_slice(
         corrupted_activation,
         spec,
         clean_cache,
-        target_slice=(FULL_SLICE, index[1], index[2], FULL_SLICE),
-        source_slice=(FULL_SLICE, source_index[1], source_index[2], FULL_SLICE),
+        target_slice=batch_prefixed_slice(target_has_batch, index[1], index[2], FULL_SLICE),
+        source_slice=batch_prefixed_slice(
+            source_has_batch,
+            source_index[1],
+            source_index[2],
+            FULL_SLICE,
+        ),
     )
 
 
 def layer_head_dest_src_pos_pattern_patch_setter(
     corrupted_activation: Any,
-    spec: PatchSpec,
-    clean_cache: ActivationCache,
+    spec: PatchSpec | Sequence[int],
+    clean_cache: ActivationCache | Any,
 ) -> Any:
     """Patch one `(destination, source)` entry in an attention pattern."""
+    tl_output = maybe_apply_transformer_lens_patch_setter(
+        corrupted_activation,
+        spec,
+        clean_cache,
+        expected_length=4,
+        setter_name="layer_head_dest_src_pos_pattern_patch_setter",
+        target_slice_fn=lambda index: (FULL_SLICE, index[1], index[2], index[3]),
+        source_slice_fn=lambda index: (FULL_SLICE, index[1], index[2], index[3]),
+    )
+    if tl_output is not None:
+        return tl_output
     index = require_patch_index(
         spec,
         4,
         "layer_head_dest_src_pos_pattern_patch_setter",
     )
     source_index = source_index_or_target(spec, index)
+    target_has_batch = patch_target_has_batch_dim(corrupted_activation, spec, clean_cache)
+    source_has_batch = patch_source_has_batch_dim(spec, clean_cache)
     return patch_slice(
         corrupted_activation,
         spec,
         clean_cache,
-        target_slice=(FULL_SLICE, index[1], index[2], index[3]),
-        source_slice=(FULL_SLICE, source_index[1], source_index[2], source_index[3]),
+        target_slice=batch_prefixed_slice(target_has_batch, index[1], index[2], index[3]),
+        source_slice=batch_prefixed_slice(
+            source_has_batch,
+            source_index[1],
+            source_index[2],
+            source_index[3],
+        ),
     )
 
 
@@ -462,10 +852,10 @@ def get_act_patch_resid_pre(
     clean_cache: ActivationCache,
     metric: PatchMetric,
     **kwargs: Any,
-) -> list[PatchResult]:
+) -> Any:
     """Patch residual stream activations at the start of each block by position."""
     return _layer_pos_component_patch(
-        model, corrupted_batch, clean_cache, metric, "resid_pre", kwargs
+        model, corrupted_batch, clean_cache, metric, "resid_pre", _component_helper_kwargs(kwargs)
     )
 
 
@@ -475,10 +865,10 @@ def get_act_patch_resid_mid(
     clean_cache: ActivationCache,
     metric: PatchMetric,
     **kwargs: Any,
-) -> list[PatchResult]:
+) -> Any:
     """Patch residual stream activations between attention and MLP by position."""
     return _layer_pos_component_patch(
-        model, corrupted_batch, clean_cache, metric, "resid_mid", kwargs
+        model, corrupted_batch, clean_cache, metric, "resid_mid", _component_helper_kwargs(kwargs)
     )
 
 
@@ -488,10 +878,10 @@ def get_act_patch_resid_post(
     clean_cache: ActivationCache,
     metric: PatchMetric,
     **kwargs: Any,
-) -> list[PatchResult]:
+) -> Any:
     """Patch residual stream activations at the end of each block by position."""
     return _layer_pos_component_patch(
-        model, corrupted_batch, clean_cache, metric, "resid_post", kwargs
+        model, corrupted_batch, clean_cache, metric, "resid_post", _component_helper_kwargs(kwargs)
     )
 
 
@@ -501,10 +891,10 @@ def get_act_patch_attn_out(
     clean_cache: ActivationCache,
     metric: PatchMetric,
     **kwargs: Any,
-) -> list[PatchResult]:
+) -> Any:
     """Patch attention layer outputs by position."""
     return _layer_pos_component_patch(
-        model, corrupted_batch, clean_cache, metric, "attn_out", kwargs
+        model, corrupted_batch, clean_cache, metric, "attn_out", _component_helper_kwargs(kwargs)
     )
 
 
@@ -514,10 +904,10 @@ def get_act_patch_mlp_out(
     clean_cache: ActivationCache,
     metric: PatchMetric,
     **kwargs: Any,
-) -> list[PatchResult]:
+) -> Any:
     """Patch MLP layer outputs by position."""
     return _layer_pos_component_patch(
-        model, corrupted_batch, clean_cache, metric, "mlp_out", kwargs
+        model, corrupted_batch, clean_cache, metric, "mlp_out", _component_helper_kwargs(kwargs)
     )
 
 
@@ -527,9 +917,11 @@ def get_act_patch_attn_head_out_by_pos(
     clean_cache: ActivationCache,
     metric: PatchMetric,
     **kwargs: Any,
-) -> list[PatchResult]:
+) -> Any:
     """Patch attention head outputs `z` by layer, position, and head."""
-    return _head_vector_by_pos_patch(model, corrupted_batch, clean_cache, metric, "z", kwargs)
+    return _head_vector_by_pos_patch(
+        model, corrupted_batch, clean_cache, metric, "z", _component_helper_kwargs(kwargs)
+    )
 
 
 def get_act_patch_attn_head_q_by_pos(
@@ -538,9 +930,11 @@ def get_act_patch_attn_head_q_by_pos(
     clean_cache: ActivationCache,
     metric: PatchMetric,
     **kwargs: Any,
-) -> list[PatchResult]:
+) -> Any:
     """Patch attention queries by layer, position, and head."""
-    return _head_vector_by_pos_patch(model, corrupted_batch, clean_cache, metric, "q", kwargs)
+    return _head_vector_by_pos_patch(
+        model, corrupted_batch, clean_cache, metric, "q", _component_helper_kwargs(kwargs)
+    )
 
 
 def get_act_patch_attn_head_k_by_pos(
@@ -549,9 +943,11 @@ def get_act_patch_attn_head_k_by_pos(
     clean_cache: ActivationCache,
     metric: PatchMetric,
     **kwargs: Any,
-) -> list[PatchResult]:
+) -> Any:
     """Patch attention keys by layer, position, and head."""
-    return _head_vector_by_pos_patch(model, corrupted_batch, clean_cache, metric, "k", kwargs)
+    return _head_vector_by_pos_patch(
+        model, corrupted_batch, clean_cache, metric, "k", _component_helper_kwargs(kwargs)
+    )
 
 
 def get_act_patch_attn_head_v_by_pos(
@@ -560,9 +956,11 @@ def get_act_patch_attn_head_v_by_pos(
     clean_cache: ActivationCache,
     metric: PatchMetric,
     **kwargs: Any,
-) -> list[PatchResult]:
+) -> Any:
     """Patch attention values by layer, position, and head."""
-    return _head_vector_by_pos_patch(model, corrupted_batch, clean_cache, metric, "v", kwargs)
+    return _head_vector_by_pos_patch(
+        model, corrupted_batch, clean_cache, metric, "v", _component_helper_kwargs(kwargs)
+    )
 
 
 def get_act_patch_attn_head_result_by_pos(
@@ -571,9 +969,16 @@ def get_act_patch_attn_head_result_by_pos(
     clean_cache: ActivationCache,
     metric: PatchMetric,
     **kwargs: Any,
-) -> list[PatchResult]:
+) -> Any:
     """Patch per-head attention result vectors by layer, position, and head."""
-    return _head_vector_by_pos_patch(model, corrupted_batch, clean_cache, metric, "result", kwargs)
+    return _head_vector_by_pos_patch(
+        model,
+        corrupted_batch,
+        clean_cache,
+        metric,
+        "result",
+        _component_helper_kwargs(kwargs),
+    )
 
 
 def get_act_patch_attn_head_out_all_pos(
@@ -582,9 +987,11 @@ def get_act_patch_attn_head_out_all_pos(
     clean_cache: ActivationCache,
     metric: PatchMetric,
     **kwargs: Any,
-) -> list[PatchResult]:
+) -> Any:
     """Patch attention head outputs `z` across all positions."""
-    return _head_vector_all_pos_patch(model, corrupted_batch, clean_cache, metric, "z", kwargs)
+    return _head_vector_all_pos_patch(
+        model, corrupted_batch, clean_cache, metric, "z", _component_helper_kwargs(kwargs)
+    )
 
 
 def get_act_patch_attn_head_q_all_pos(
@@ -593,9 +1000,11 @@ def get_act_patch_attn_head_q_all_pos(
     clean_cache: ActivationCache,
     metric: PatchMetric,
     **kwargs: Any,
-) -> list[PatchResult]:
+) -> Any:
     """Patch attention queries across all positions."""
-    return _head_vector_all_pos_patch(model, corrupted_batch, clean_cache, metric, "q", kwargs)
+    return _head_vector_all_pos_patch(
+        model, corrupted_batch, clean_cache, metric, "q", _component_helper_kwargs(kwargs)
+    )
 
 
 def get_act_patch_attn_head_k_all_pos(
@@ -604,9 +1013,11 @@ def get_act_patch_attn_head_k_all_pos(
     clean_cache: ActivationCache,
     metric: PatchMetric,
     **kwargs: Any,
-) -> list[PatchResult]:
+) -> Any:
     """Patch attention keys across all positions."""
-    return _head_vector_all_pos_patch(model, corrupted_batch, clean_cache, metric, "k", kwargs)
+    return _head_vector_all_pos_patch(
+        model, corrupted_batch, clean_cache, metric, "k", _component_helper_kwargs(kwargs)
+    )
 
 
 def get_act_patch_attn_head_v_all_pos(
@@ -615,9 +1026,11 @@ def get_act_patch_attn_head_v_all_pos(
     clean_cache: ActivationCache,
     metric: PatchMetric,
     **kwargs: Any,
-) -> list[PatchResult]:
+) -> Any:
     """Patch attention values across all positions."""
-    return _head_vector_all_pos_patch(model, corrupted_batch, clean_cache, metric, "v", kwargs)
+    return _head_vector_all_pos_patch(
+        model, corrupted_batch, clean_cache, metric, "v", _component_helper_kwargs(kwargs)
+    )
 
 
 def get_act_patch_attn_head_result_all_pos(
@@ -626,9 +1039,16 @@ def get_act_patch_attn_head_result_all_pos(
     clean_cache: ActivationCache,
     metric: PatchMetric,
     **kwargs: Any,
-) -> list[PatchResult]:
+) -> Any:
     """Patch per-head attention result vectors across all positions."""
-    return _head_vector_all_pos_patch(model, corrupted_batch, clean_cache, metric, "result", kwargs)
+    return _head_vector_all_pos_patch(
+        model,
+        corrupted_batch,
+        clean_cache,
+        metric,
+        "result",
+        _component_helper_kwargs(kwargs),
+    )
 
 
 def get_act_patch_attn_head_pattern_all_pos(
@@ -637,9 +1057,11 @@ def get_act_patch_attn_head_pattern_all_pos(
     clean_cache: ActivationCache,
     metric: PatchMetric,
     **kwargs: Any,
-) -> list[PatchResult]:
+) -> Any:
     """Patch full attention patterns by layer and head."""
-    return _head_pattern_patch(model, corrupted_batch, clean_cache, metric, "pattern", kwargs)
+    return _head_pattern_patch(
+        model, corrupted_batch, clean_cache, metric, "pattern", _component_helper_kwargs(kwargs)
+    )
 
 
 def get_act_patch_attn_head_pattern_by_pos(
@@ -648,10 +1070,15 @@ def get_act_patch_attn_head_pattern_by_pos(
     clean_cache: ActivationCache,
     metric: PatchMetric,
     **kwargs: Any,
-) -> list[PatchResult]:
+) -> Any:
     """Patch attention patterns by layer, head, and destination position."""
     return _head_pattern_by_pos_patch(
-        model, corrupted_batch, clean_cache, metric, "pattern", kwargs
+        model,
+        corrupted_batch,
+        clean_cache,
+        metric,
+        "pattern",
+        _component_helper_kwargs(kwargs),
     )
 
 
@@ -661,10 +1088,15 @@ def get_act_patch_attn_head_pattern_dest_src_pos(
     clean_cache: ActivationCache,
     metric: PatchMetric,
     **kwargs: Any,
-) -> list[PatchResult]:
+) -> Any:
     """Patch attention patterns by layer, head, destination, and source position."""
     return _head_pattern_dest_src_patch(
-        model, corrupted_batch, clean_cache, metric, "pattern", kwargs
+        model,
+        corrupted_batch,
+        clean_cache,
+        metric,
+        "pattern",
+        _component_helper_kwargs(kwargs),
     )
 
 
@@ -674,9 +1106,16 @@ def get_act_patch_attn_scores_all_pos(
     clean_cache: ActivationCache,
     metric: PatchMetric,
     **kwargs: Any,
-) -> list[PatchResult]:
+) -> Any:
     """Patch raw attention scores by layer and head."""
-    return _head_pattern_patch(model, corrupted_batch, clean_cache, metric, "attn_scores", kwargs)
+    return _head_pattern_patch(
+        model,
+        corrupted_batch,
+        clean_cache,
+        metric,
+        "attn_scores",
+        _component_helper_kwargs(kwargs),
+    )
 
 
 def get_act_patch_attn_scores_by_pos(
@@ -685,10 +1124,15 @@ def get_act_patch_attn_scores_by_pos(
     clean_cache: ActivationCache,
     metric: PatchMetric,
     **kwargs: Any,
-) -> list[PatchResult]:
+) -> Any:
     """Patch raw attention scores by layer, head, and destination position."""
     return _head_pattern_by_pos_patch(
-        model, corrupted_batch, clean_cache, metric, "attn_scores", kwargs
+        model,
+        corrupted_batch,
+        clean_cache,
+        metric,
+        "attn_scores",
+        _component_helper_kwargs(kwargs),
     )
 
 
@@ -698,10 +1142,15 @@ def get_act_patch_attn_scores_dest_src_pos(
     clean_cache: ActivationCache,
     metric: PatchMetric,
     **kwargs: Any,
-) -> list[PatchResult]:
+) -> Any:
     """Patch raw attention scores by layer, head, destination, and source position."""
     return _head_pattern_dest_src_patch(
-        model, corrupted_batch, clean_cache, metric, "attn_scores", kwargs
+        model,
+        corrupted_batch,
+        clean_cache,
+        metric,
+        "attn_scores",
+        _component_helper_kwargs(kwargs),
     )
 
 
@@ -711,13 +1160,22 @@ def get_act_patch_block_every(
     clean_cache: ActivationCache,
     metric: PatchMetric,
     **kwargs: Any,
-) -> dict[str, list[PatchResult]]:
+) -> Any:
     """Patch residual pre, attention output, and MLP output by layer and position."""
-    return {
-        "resid_pre": get_act_patch_resid_pre(model, corrupted_batch, clean_cache, metric, **kwargs),
-        "attn_out": get_act_patch_attn_out(model, corrupted_batch, clean_cache, metric, **kwargs),
-        "mlp_out": get_act_patch_mlp_out(model, corrupted_batch, clean_cache, metric, **kwargs),
-    }
+    named_outputs = [
+        (
+            "resid_pre",
+            get_act_patch_resid_pre(model, corrupted_batch, clean_cache, metric, **kwargs),
+        ),
+        (
+            "attn_out",
+            get_act_patch_attn_out(model, corrupted_batch, clean_cache, metric, **kwargs),
+        ),
+        ("mlp_out", get_act_patch_mlp_out(model, corrupted_batch, clean_cache, metric, **kwargs)),
+    ]
+    if _returns_details(kwargs):
+        return dict(named_outputs)
+    return _stack_named_metric_outputs(named_outputs)
 
 
 def get_act_patch_attn_head_all_pos_every(
@@ -726,33 +1184,51 @@ def get_act_patch_attn_head_all_pos_every(
     clean_cache: ActivationCache,
     metric: PatchMetric,
     **kwargs: Any,
-) -> dict[str, list[PatchResult]]:
+) -> Any:
     """Patch `z`, `q`, `k`, `v`, and `pattern` by layer and head."""
-    return {
-        "z": get_act_patch_attn_head_out_all_pos(
-            model,
-            corrupted_batch,
-            clean_cache,
-            metric,
-            **kwargs,
+    named_outputs = [
+        (
+            "z",
+            get_act_patch_attn_head_out_all_pos(
+                model,
+                corrupted_batch,
+                clean_cache,
+                metric,
+                **kwargs,
+            ),
         ),
-        "q": get_act_patch_attn_head_q_all_pos(
-            model, corrupted_batch, clean_cache, metric, **kwargs
+        (
+            "q",
+            get_act_patch_attn_head_q_all_pos(
+                model, corrupted_batch, clean_cache, metric, **kwargs
+            ),
         ),
-        "k": get_act_patch_attn_head_k_all_pos(
-            model, corrupted_batch, clean_cache, metric, **kwargs
+        (
+            "k",
+            get_act_patch_attn_head_k_all_pos(
+                model, corrupted_batch, clean_cache, metric, **kwargs
+            ),
         ),
-        "v": get_act_patch_attn_head_v_all_pos(
-            model, corrupted_batch, clean_cache, metric, **kwargs
+        (
+            "v",
+            get_act_patch_attn_head_v_all_pos(
+                model, corrupted_batch, clean_cache, metric, **kwargs
+            ),
         ),
-        "pattern": get_act_patch_attn_head_pattern_all_pos(
-            model,
-            corrupted_batch,
-            clean_cache,
-            metric,
-            **kwargs,
+        (
+            "pattern",
+            get_act_patch_attn_head_pattern_all_pos(
+                model,
+                corrupted_batch,
+                clean_cache,
+                metric,
+                **kwargs,
+            ),
         ),
-    }
+    ]
+    if _returns_details(kwargs):
+        return dict(named_outputs)
+    return _stack_named_metric_outputs(_pad_kv_metric_outputs(named_outputs))
 
 
 def get_act_patch_attn_head_by_pos_every(
@@ -761,33 +1237,196 @@ def get_act_patch_attn_head_by_pos_every(
     clean_cache: ActivationCache,
     metric: PatchMetric,
     **kwargs: Any,
-) -> dict[str, list[PatchResult]]:
+) -> Any:
     """Patch `z`, `q`, `k`, `v`, and `pattern` by position where applicable."""
-    return {
-        "z": get_act_patch_attn_head_out_by_pos(
-            model,
-            corrupted_batch,
-            clean_cache,
-            metric,
-            **kwargs,
+    pattern_output = get_act_patch_attn_head_pattern_by_pos(
+        model,
+        corrupted_batch,
+        clean_cache,
+        metric,
+        **kwargs,
+    )
+    named_outputs = [
+        (
+            "z",
+            get_act_patch_attn_head_out_by_pos(
+                model,
+                corrupted_batch,
+                clean_cache,
+                metric,
+                **kwargs,
+            ),
         ),
-        "q": get_act_patch_attn_head_q_by_pos(
-            model, corrupted_batch, clean_cache, metric, **kwargs
+        (
+            "q",
+            get_act_patch_attn_head_q_by_pos(
+                model, corrupted_batch, clean_cache, metric, **kwargs
+            ),
         ),
-        "k": get_act_patch_attn_head_k_by_pos(
-            model, corrupted_batch, clean_cache, metric, **kwargs
+        (
+            "k",
+            get_act_patch_attn_head_k_by_pos(
+                model, corrupted_batch, clean_cache, metric, **kwargs
+            ),
         ),
-        "v": get_act_patch_attn_head_v_by_pos(
-            model, corrupted_batch, clean_cache, metric, **kwargs
+        (
+            "v",
+            get_act_patch_attn_head_v_by_pos(
+                model, corrupted_batch, clean_cache, metric, **kwargs
+            ),
         ),
-        "pattern": get_act_patch_attn_head_pattern_by_pos(
-            model,
-            corrupted_batch,
-            clean_cache,
-            metric,
-            **kwargs,
+        (
+            "pattern",
+            pattern_output,
         ),
-    }
+    ]
+    if _returns_details(kwargs):
+        return dict(named_outputs)
+    named_outputs[-1] = ("pattern", _move_metric_axis(pattern_output, 1, 2))
+    return _stack_named_metric_outputs(_pad_kv_metric_outputs(named_outputs))
+
+
+def _component_helper_kwargs(kwargs: Mapping[str, Any]) -> dict[str, Any]:
+    """Return helper kwargs with TransformerLens-style grid output by default."""
+    helper_kwargs = dict(kwargs)
+    helper_kwargs.setdefault("return_details", False)
+    return helper_kwargs
+
+
+def _returns_details(kwargs: Mapping[str, Any]) -> bool:
+    return kwargs.get("return_details") is True
+
+
+def _split_metric_output(output: Any) -> tuple[Any, Any | None]:
+    if isinstance(output, tuple) and len(output) == 2:
+        return output[0], output[1]
+    return output, None
+
+
+def _replace_metric_output(output: Any, metric_output: Any) -> Any:
+    _metric_output, index_table = _split_metric_output(output)
+    if index_table is None:
+        return metric_output
+    return metric_output, index_table
+
+
+def _stack_named_metric_outputs(named_outputs: Sequence[tuple[str, Any]]) -> Any:
+    metric_outputs: list[Any] = []
+    index_tables: dict[str, Any] = {}
+    for name, output in named_outputs:
+        metric_output, index_table = _split_metric_output(output)
+        metric_outputs.append(metric_output)
+        if index_table is not None:
+            index_tables[name] = index_table
+
+    stacked_output = _stack_metric_outputs(metric_outputs)
+    if index_tables:
+        return stacked_output, index_tables
+    return stacked_output
+
+
+def _stack_metric_outputs(metric_outputs: Sequence[Any]) -> Any:
+    if not metric_outputs:
+        return []
+    try:
+        import torch
+
+        if any(hasattr(output, "shape") for output in metric_outputs):
+            return torch.stack([torch.as_tensor(output) for output in metric_outputs], dim=0)
+    except ImportError:
+        pass
+    except (AttributeError, RuntimeError, TypeError, ValueError):
+        pass
+    return list(metric_outputs)
+
+
+def _pad_kv_metric_outputs(named_outputs: Sequence[tuple[str, Any]]) -> list[tuple[str, Any]]:
+    metric_outputs = [_split_metric_output(output)[0] for _name, output in named_outputs]
+    last_dim = max((shape_of(output)[-1] for output in metric_outputs if shape_of(output)), default=0)
+    padded_outputs: list[tuple[str, Any]] = []
+    for name, output in named_outputs:
+        if name in {"k", "v"}:
+            metric_output, _index_table = _split_metric_output(output)
+            output = _replace_metric_output(output, _pad_metric_last_dim(metric_output, last_dim))
+        padded_outputs.append((name, output))
+    return padded_outputs
+
+
+def _pad_metric_last_dim(metric_output: Any, width: int) -> Any:
+    shape = shape_of(metric_output)
+    if not shape or shape[-1] >= width:
+        return metric_output
+    pad_width = width - shape[-1]
+    try:
+        import torch
+
+        if hasattr(metric_output, "shape"):
+            return torch.nn.functional.pad(metric_output, (0, pad_width))
+    except ImportError:
+        pass
+    except (AttributeError, RuntimeError, TypeError, ValueError):
+        pass
+    return _pad_nested_last_dim(metric_output, pad_width)
+
+
+def _pad_nested_last_dim(value: Any, pad_width: int) -> Any:
+    if not isinstance(value, list):
+        return value
+    if not value or not isinstance(value[0], list):
+        return [*value, *([0.0] * pad_width)]
+    return [_pad_nested_last_dim(item, pad_width) for item in value]
+
+
+def _move_metric_axis(output: Any, source: int, destination: int) -> Any:
+    metric_output, _index_table = _split_metric_output(output)
+    return _replace_metric_output(output, _move_axis(metric_output, source, destination))
+
+
+def _move_axis(value: Any, source: int, destination: int) -> Any:
+    try:
+        movedim = getattr(value, "movedim")
+        if callable(movedim):
+            return movedim(source, destination)
+    except (AttributeError, RuntimeError, TypeError, ValueError):
+        pass
+
+    shape = shape_of(value)
+    rank = len(shape)
+    if rank == 0:
+        return value
+    if source < 0:
+        source += rank
+    if destination < 0:
+        destination += rank
+    if source == destination:
+        return value
+    if not (0 <= source < rank and 0 <= destination < rank):
+        raise ValueError(f"Cannot move axis {source} to {destination} for shape {shape!r}.")
+
+    output_shape = list(shape)
+    moved_dim = output_shape.pop(source)
+    output_shape.insert(destination, moved_dim)
+
+    def read_output(coordinate: tuple[int, ...]) -> Any:
+        input_coordinate = list(coordinate)
+        moved_coordinate = input_coordinate.pop(destination)
+        input_coordinate.insert(source, moved_coordinate)
+        return get_indexed(value, tuple(input_coordinate))
+
+    return _build_nested_from_shape(tuple(output_shape), read_output)
+
+
+def _build_nested_from_shape(
+    shape: tuple[int, ...],
+    value_fn: Callable[[tuple[int, ...]], Any],
+    prefix: tuple[int, ...] = (),
+) -> Any:
+    if not shape:
+        return value_fn(prefix)
+    return [
+        _build_nested_from_shape(shape[1:], value_fn, (*prefix, index))
+        for index in range(shape[0])
+    ]
 
 
 def _layer_pos_component_patch(
@@ -930,6 +1569,34 @@ def source_index_or_target(spec: PatchSpec, target_index: tuple[Any, ...]) -> tu
     return source_index
 
 
+def batch_prefixed_slice(has_batch_dim: bool, *indices: Any) -> tuple[Any, ...]:
+    """Return a slice tuple with an optional leading batch axis."""
+    if has_batch_dim:
+        return (FULL_SLICE, *indices)
+    return tuple(indices)
+
+
+def patch_source_has_batch_dim(spec: PatchSpec, clean_cache: ActivationCache | Any) -> bool:
+    """Return whether the clean activation used by a patch includes batch."""
+    if isinstance(clean_cache, ActivationCache):
+        return clean_cache.has_batch_dim
+    return True
+
+
+def patch_target_has_batch_dim(
+    corrupted_activation: Any,
+    spec: PatchSpec,
+    clean_cache: ActivationCache | Any,
+) -> bool:
+    """Infer whether the current corrupted activation includes a batch axis."""
+    clean_activation = spec.value if spec.value is not None else clean_cache[spec.clean_name]
+    clean_rank = len(shape_of(clean_activation))
+    corrupted_rank = len(shape_of(corrupted_activation))
+    if patch_source_has_batch_dim(spec, clean_cache):
+        return corrupted_rank + 1 != clean_rank
+    return corrupted_rank == clean_rank + 1
+
+
 def patch_slice(
     corrupted_activation: Any,
     spec: PatchSpec,
@@ -941,6 +1608,7 @@ def patch_slice(
     """Patch a target slice from the matching clean activation slice."""
     clean_activation = spec.value if spec.value is not None else clean_cache[spec.clean_name]
     patch_value = scale_value(get_indexed(clean_activation, source_slice), spec.scale)
+    patch_value = broadcast_patch_value_to_slice(corrupted_activation, target_slice, patch_value)
     patched = clone_activation(corrupted_activation)
     if spec.mode == "replace":
         set_indexed(patched, target_slice, patch_value)
@@ -950,6 +1618,62 @@ def patch_slice(
         set_indexed(patched, target_slice, add_values(current_value, patch_value))
         return patched
     raise ValueError(f"Unsupported patch mode: {spec.mode}")
+
+
+def broadcast_patch_value_to_slice(
+    corrupted_activation: Any,
+    target_slice: tuple[Any, ...],
+    patch_value: Any,
+) -> Any:
+    """Broadcast a no-batch patch value across a batched target slice when needed."""
+    target_shape = shape_of(get_indexed(corrupted_activation, target_slice))
+    patch_shape = shape_of(patch_value)
+    if target_shape == patch_shape or not target_shape:
+        return patch_value
+    if target_shape[1:] == patch_shape:
+        return repeat_value_like(patch_value, target_shape[0])
+    return patch_value
+
+
+def repeat_value_like(value: Any, times: int) -> Any:
+    """Clone a value `times` times while preserving tensor/array backends when possible."""
+    try:
+        import torch
+
+        if isinstance(value, torch.Tensor):
+            return value.unsqueeze(0).expand((times, *value.shape)).clone()
+    except Exception:
+        pass
+    try:
+        import numpy as np
+
+        if isinstance(value, np.ndarray):
+            return np.broadcast_to(value, (times, *value.shape)).copy()
+    except Exception:
+        pass
+    return [clone_activation(value) for _ in range(times)]
+
+
+def maybe_apply_transformer_lens_patch_setter(
+    corrupted_activation: Any,
+    index_or_spec: Any,
+    clean_activation_or_cache: Any,
+    *,
+    expected_length: int,
+    setter_name: str,
+    target_slice_fn: Callable[[tuple[Any, ...]], tuple[Any, ...]],
+    source_slice_fn: Callable[[tuple[Any, ...]], tuple[Any, ...]],
+) -> Any | None:
+    """Apply a direct TL-style patch setter call when no PatchSpec is supplied."""
+    if isinstance(index_or_spec, PatchSpec):
+        return None
+    index = normalize_index(index_or_spec)
+    if len(index) != expected_length:
+        raise ValueError(f"{setter_name} expects an index of length {expected_length}; got {index!r}.")
+    patched = clone_activation(corrupted_activation)
+    patch_value = get_indexed(clean_activation_or_cache, source_slice_fn(index))
+    set_indexed(patched, target_slice_fn(index), patch_value)
+    return patched
 
 
 def normalize_index(index: Any) -> tuple[Any, ...]:
@@ -980,6 +1704,7 @@ def get_indexed(value: Any, index: Any) -> Any:
 def set_indexed(value: Any, index: Any, replacement: Any) -> None:
     """Assign into tensor-like or nested-list values."""
     normalized = normalize_index(index)
+    replacement = coerce_value_like(value, replacement)
     if len(normalized) == 1:
         try:
             value[normalized[0]] = replacement
@@ -1045,6 +1770,7 @@ def scale_value(value: Any, scale: float) -> Any:
 
 def add_values(left: Any, right: Any) -> Any:
     """Add tensor-like or nested-list values elementwise."""
+    right = coerce_value_like(left, right)
     try:
         if isinstance(left, list) and isinstance(right, list):
             return [
@@ -1054,6 +1780,74 @@ def add_values(left: Any, right: Any) -> Any:
         return left + right
     except TypeError:
         return right
+
+
+def coerce_value_like(reference: Any, value: Any) -> Any:
+    """Coerce patch values to the target activation backend when possible."""
+    if isinstance(reference, list):
+        return to_python_container(value)
+
+    torch_value = coerce_torch_value_like(reference, value)
+    if torch_value is not value:
+        return torch_value
+
+    numpy_value = coerce_numpy_value_like(reference, value)
+    if numpy_value is not value:
+        return numpy_value
+
+    return value
+
+
+def coerce_torch_value_like(reference: Any, value: Any) -> Any:
+    """Return `value` as a torch tensor matching `reference`, if applicable."""
+    try:
+        import torch
+    except ImportError:
+        return value
+
+    if not isinstance(reference, torch.Tensor):
+        return value
+    if isinstance(value, torch.Tensor):
+        if value.dtype == reference.dtype and value.device == reference.device:
+            return value
+        return value.to(dtype=reference.dtype, device=reference.device)
+    return torch.as_tensor(value, dtype=reference.dtype, device=reference.device)
+
+
+def coerce_numpy_value_like(reference: Any, value: Any) -> Any:
+    """Return `value` as a numpy array matching `reference`, if applicable."""
+    try:
+        import numpy as np
+    except ImportError:
+        return value
+
+    if not isinstance(reference, np.ndarray):
+        return value
+    if isinstance(value, np.ndarray):
+        return value.astype(reference.dtype, copy=False)
+    return np.asarray(tensor_to_numpy_source(value), dtype=reference.dtype)
+
+
+def tensor_to_numpy_source(value: Any) -> Any:
+    """Detach/copy tensor-like values before numpy converts them."""
+    detach = getattr(value, "detach", None)
+    if callable(detach):
+        value = detach()
+    cpu = getattr(value, "cpu", None)
+    if callable(cpu):
+        value = cpu()
+    numpy = getattr(value, "numpy", None)
+    if callable(numpy):
+        return numpy()
+    return value
+
+
+def to_python_container(value: Any) -> Any:
+    """Convert array/tensor values into Python containers for list activations."""
+    tolist = getattr(value, "tolist", None)
+    if callable(tolist):
+        return tolist()
+    return value
 
 
 def infer_layers(
@@ -1082,15 +1876,48 @@ def infer_layers_from_cache(
     name_style: ActivationNameStyle = "safelens",
 ) -> list[LayerRef]:
     """Infer layer indices from SafeLens or TransformerLens-style activation names."""
+    _ = name_style
     layers: set[int] = set()
     for name in clean_cache:
-        if name_style == "transformer_lens":
-            match = re.search(r"blocks\.(\d+)\.", name)
-        else:
-            match = re.search(r"layer_(\d+)\.", name)
-        if match is not None and component in name:
-            layers.add(int(match.group(1)))
+        parsed = _layer_and_component_from_cache_name(name)
+        if parsed is None:
+            continue
+        layer, cache_component = parsed
+        if _normalize_patch_component(cache_component) == _normalize_patch_component(component):
+            layers.add(layer)
     return sorted(layers)
+
+
+def _layer_and_component_from_cache_name(name: str) -> tuple[int, str] | None:
+    safe_match = re.fullmatch(
+        r"layer_(\d+)\.([a-zA-Z0-9_]+)(?:\.([a-zA-Z0-9_]+))?",
+        name,
+    )
+    if safe_match is not None:
+        return int(safe_match.group(1)), safe_match.group(3) or safe_match.group(2)
+
+    block_match = re.fullmatch(
+        r"blocks\.(\d+)\.(?:([a-zA-Z0-9_]+)\.)?hook_([a-zA-Z0-9_]+)",
+        name,
+    )
+    if block_match is not None:
+        return int(block_match.group(1)), block_match.group(3)
+
+    return None
+
+
+def _normalize_patch_component(component: str) -> str:
+    aliases = {
+        "attn": "pattern",
+        "attn_logits": "attn_scores",
+        "key": "k",
+        "query": "q",
+        "value": "v",
+        "mlp_pre": "pre",
+        "mlp_mid": "mid",
+        "mlp_post": "post",
+    }
+    return aliases.get(component, component)
 
 
 def infer_positions(
@@ -1098,19 +1925,26 @@ def infer_positions(
     clean_cache: ActivationCache,
     component: str,
     layers: Sequence[LayerRef],
+    *,
+    axis_name: AxisName = "pos",
 ) -> int:
     """Infer sequence length from batch tensors or cached activations."""
+    activation = first_component_activation(clean_cache, component, layers)
+    if activation is not None:
+        shape = shape_of(activation)
+        has_batch_dim = getattr(clean_cache, "has_batch_dim", True)
+        if component in PATTERN_COMPONENTS and len(shape) >= (4 if has_batch_dim else 3):
+            if axis_name == "src_pos":
+                return int(shape[-1])
+            return int(shape[-2])
+        if len(shape) >= (2 if has_batch_dim else 1):
+            return int(shape[1 if has_batch_dim else 0])
+
     for key in ("input_ids", "tokens"):
         if key in corrupted_batch:
             shape = shape_of(corrupted_batch[key])
             if len(shape) >= 2:
-                return shape[-1]
-
-    activation = first_component_activation(clean_cache, component, layers)
-    if activation is not None:
-        shape = shape_of(activation)
-        if len(shape) >= 2:
-            return shape[1]
+                return int(shape[-1])
 
     raise ValueError("Could not infer positions. Pass `positions=[...]` explicitly.")
 
@@ -1134,12 +1968,107 @@ def infer_heads(
     activation = first_component_activation(clean_cache, component, layers)
     if activation is not None:
         shape = shape_of(activation)
-        if component in {"pattern", "attn_scores"} and len(shape) >= 2:
-            return shape[1]
-        if len(shape) >= 3:
-            return shape[2]
+        has_batch_dim = getattr(clean_cache, "has_batch_dim", True)
+        if component in {"pattern", "attn_scores"} and len(shape) >= (2 if has_batch_dim else 1):
+            return shape[1 if has_batch_dim else 0]
+        if len(shape) >= (3 if has_batch_dim else 2):
+            return shape[2 if has_batch_dim else 1]
 
     raise ValueError("Could not infer heads. Pass `heads=[...]` explicitly.")
+
+
+def infer_index_table(
+    model: ModelWrapper,
+    corrupted_batch: Batch,
+    clean_cache: ActivationCache,
+    activation_name: str,
+    index_axis_names: Sequence[AxisName],
+    *,
+    name_style: ActivationNameStyle = "safelens",
+) -> list[dict[str, Any]]:
+    """Infer a TL-style patch index table from axis names."""
+    layers = infer_layers(model, clean_cache, activation_name, name_style=name_style)
+    axis_values: dict[AxisName, Iterable[int]] = {"layer": layers}
+    if "pos" in index_axis_names:
+        axis_values["pos"] = range(
+            infer_positions(
+                corrupted_batch,
+                clean_cache,
+                activation_name,
+                layers,
+                axis_name="pos",
+            )
+        )
+    if "head" in index_axis_names:
+        axis_values["head"] = range(infer_heads(model, clean_cache, activation_name, layers))
+    if "head_index" in index_axis_names:
+        axis_values["head_index"] = range(
+            infer_heads(model, clean_cache, activation_name, layers)
+        )
+    if "dest_pos" in index_axis_names:
+        axis_values["dest_pos"] = range(
+            infer_positions(
+                corrupted_batch,
+                clean_cache,
+                activation_name,
+                layers,
+                axis_name="dest_pos",
+            )
+        )
+    if "src_pos" in index_axis_names:
+        axis_values["src_pos"] = range(
+            infer_positions(
+                corrupted_batch,
+                clean_cache,
+                activation_name,
+                layers,
+                axis_name="src_pos",
+            )
+        )
+    return make_index_table(index_axis_names, axis_values)
+
+
+def make_index_table(
+    index_axis_names: Sequence[AxisName],
+    axis_values: Mapping[AxisName, Iterable[int]],
+) -> list[dict[str, Any]]:
+    """Create an ordered list of index rows from named axis values."""
+    rows: list[dict[str, Any]] = []
+    value_lists = [_axis_values(axis_values, axis_name) for axis_name in index_axis_names]
+    for values in product(*value_lists):
+        rows.append(dict(zip(index_axis_names, values, strict=True)))
+    return rows
+
+
+def normalize_index_table(
+    index_df: Any,
+    index_axis_names: Sequence[AxisName] | None = None,
+) -> tuple[list[dict[str, Any]], Sequence[AxisName]]:
+    """Normalize pandas-like, dict, or sequence index tables."""
+    columns = list(index_axis_names) if index_axis_names is not None else None
+    to_dict = getattr(index_df, "to_dict", None)
+    if callable(to_dict):
+        try:
+            records = to_dict("records")
+            if columns is None:
+                columns = list(getattr(index_df, "columns"))
+            return [dict(record) for record in records], tuple(columns)
+        except TypeError:
+            pass
+
+    rows: list[dict[str, Any]] = []
+    for row in index_df:
+        if isinstance(row, Mapping):
+            if columns is None:
+                columns = list(row.keys())
+            rows.append({column: row[column] for column in columns if column in row})
+        else:
+            if columns is None:
+                raise ValueError("Pass `index_axis_names` when index rows are not mappings.")
+            rows.append(dict(zip(columns, row, strict=True)))
+    if columns is None:
+        columns = []
+    return rows, tuple(columns)
 
 
 def first_component_activation(
@@ -1211,3 +2140,18 @@ def _axis_values(axis_values: Mapping[AxisName, Iterable[int]], axis_name: AxisN
         return list(axis_values[axis_name])
     except KeyError as exc:
         raise ValueError(f"Missing axis values for {axis_name!r}.") from exc
+
+
+def make_nested_grid(shape: Sequence[int], *, fill_value: float = 0.0) -> Any:
+    """Create a nested-list metric grid with the requested shape."""
+    if not shape:
+        return fill_value
+    return [make_nested_grid(shape[1:], fill_value=fill_value) for _ in range(shape[0])]
+
+
+def _ordered_unique(values: Iterable[Any]) -> list[Any]:
+    result: list[Any] = []
+    for value in values:
+        if value not in result:
+            result.append(value)
+    return result

@@ -191,12 +191,17 @@ class ModelWrapper(ABC):
     def add_hook(self, layer: LayerRef, hook_fn: HookFn) -> Any:
         """Register a forward hook on a target layer."""
 
+    def add_perma_hook(self, layer: LayerRef, hook_fn: HookFn) -> Any:
+        """Register a persistent forward hook when the wrapper supports it."""
+        return self.add_hook(layer, hook_fn)
+
     @abstractmethod
     def run_with_cache(
         self,
         batch: Batch,
         layers: Sequence[LayerRef] | None = None,
-    ) -> tuple[Any, dict[str, Any]]:
+        **kwargs: Any,
+    ) -> tuple[Any, Any]:
         """Run inference and optionally return cached activations for selected layers."""
 
     @abstractmethod
@@ -206,6 +211,19 @@ class ModelWrapper(ABC):
     @abstractmethod
     def remove_hooks(self) -> None:
         """Remove all active hooks managed by this wrapper."""
+
+    def reset_hooks(
+        self,
+        *,
+        clear_contexts: bool = True,
+        direction: Any = None,
+        dir: Any = None,
+        including_permanent: bool = False,
+        level: Any = None,
+    ) -> None:
+        """TransformerLens-compatible alias for clearing wrapper-managed hooks."""
+        _ = clear_contexts, direction, dir, including_permanent, level
+        self.remove_hooks()
 
 
 class BaseProbe(ABC):

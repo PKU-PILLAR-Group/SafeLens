@@ -6,6 +6,7 @@ import pytest
 
 from SafeLens.core.analysis import zero_ablation_hook
 from SafeLens.core.base import PipelineConfig
+from SafeLens.core.hooks import ActivationCache
 from SafeLens.utils import (
     Qwen3DenseModelWrapper,
     build_model_wrapper,
@@ -25,9 +26,10 @@ class _Handle:
 
 
 class _FakeModule:
-    def __init__(self) -> None:
+    def __init__(self, weight: Any | None = None) -> None:
         self.forward_hooks: list[Any] = []
         self.pre_hooks: list[Any] = []
+        self.weight = weight
 
     def register_forward_hook(self, hook_fn: Any) -> _Handle:
         self.forward_hooks.append(hook_fn)
@@ -37,10 +39,10 @@ class _FakeModule:
         self.pre_hooks.append(hook_fn)
         return _Handle(lambda: self.pre_hooks.remove(hook_fn))
 
-    def run_forward(self, output: Any) -> Any:
+    def run_forward(self, output: Any, inputs: tuple[Any, ...] = ()) -> Any:
         current = output
         for hook_fn in list(self.forward_hooks):
-            patched = hook_fn(self, (), current)
+            patched = hook_fn(self, inputs, current)
             if patched is not None:
                 current = patched
         return current
@@ -65,7 +67,8 @@ class _FakeAttention(_FakeModule):
         self.q_proj = _FakeModule()
         self.k_proj = _FakeModule()
         self.v_proj = _FakeModule()
-        self.o_proj = _FakeModule()
+        torch = pytest.importorskip("torch")
+        self.o_proj = _FakeModule(torch.arange(16, dtype=torch.float32).reshape(4, 4))
 
     def forward(self, scores: Any | None = None) -> Any:
         try:
@@ -76,6 +79,10 @@ class _FakeAttention(_FakeModule):
             actual_scores = scores if scores is not None else torch.zeros(1, 2, 3, 3)
             pattern = torch.softmax(actual_scores, dim=-1)
         return self.run_forward((["attn"], pattern))
+
+    def project(self, z: Any) -> Any:
+        projected = self.o_proj.run_pre(z)
+        return self.o_proj.run_forward(projected, inputs=(projected,))
 
 
 class _FakeLayer(_FakeModule):
@@ -107,6 +114,9 @@ class _FakeQwen3CausalLM:
         if kwargs.get("output_attentions"):
             output = self.model.layers[0].self_attn.forward(kwargs.get("scores"))
             return {"attention": output, "output_attentions": True}
+        if "z" in kwargs:
+            attn_out = self.model.layers[0].self_attn.project(kwargs["z"])
+            return {"attn_out": attn_out}
         mlp = self.model.layers[0].mlp
         first = mlp.run_forward(["first"])
         second = mlp.run_forward(["second"])
@@ -189,6 +199,89 @@ def test_qwen3_component_hooks_accept_standard_activation_hook_signature() -> No
     assert layer.mlp.run_forward([1, 2, 3]) == [0, 0, 0]
 
 
+def test_qwen3_component_hooks_receive_transformerlens_hook_context() -> None:
+    wrapper = _wrapper_with_fake_model()
+    layer = wrapper.model.model.layers[0]
+    seen: list[tuple[str, int]] = []
+
+    def append_hook_metadata(activation: Any, hook: Any) -> Any:
+        seen.append((hook.name, hook.layer()))
+        hook.ctx["seen"] = True
+        return activation + [hook.name, hook.layer(), hook.ctx["seen"]]
+
+    wrapper.add_hook("layer_0.mlp_out", append_hook_metadata)
+
+    assert layer.mlp.run_forward(["x"]) == ["x", "blocks.0.hook_mlp_out", 0, True]
+    assert seen == [("blocks.0.hook_mlp_out", 0)]
+
+
+def test_qwen3_component_hook_context_persists_across_calls() -> None:
+    wrapper = _wrapper_with_fake_model()
+
+    def count_calls(activation: Any, hook: Any) -> Any:
+        hook.ctx["count"] = hook.ctx.get("count", 0) + 1
+        return activation + [hook.ctx["count"]]
+
+    wrapper.add_hook("layer_0.mlp_out", count_calls)
+
+    assert wrapper.run_with_cache({"input_ids": [[1, 2]]})[0] == {
+        "first": ["first", 1],
+        "second": ["second", 2],
+    }
+    assert wrapper.run_with_cache({"input_ids": [[1, 2]]})[0] == {
+        "first": ["first", 3],
+        "second": ["second", 4],
+    }
+
+
+def test_qwen3_run_with_hooks_does_not_keep_temporary_handles() -> None:
+    wrapper = _wrapper_with_fake_model()
+
+    output = wrapper.run_with_hooks(
+        {"input_ids": [[1, 2]]},
+        fwd_hooks=[("layer_0.mlp_out", lambda **kwargs: kwargs["activation"] + ["patched"])],
+    )
+
+    assert output == {"first": ["first", "patched"], "second": ["second", "patched"]}
+    assert wrapper._hooks == []
+    assert wrapper.model.model.layers[0].mlp.run_forward(["x"]) == ["x"]
+
+
+def test_qwen3_run_with_hooks_token_inputs_do_not_add_default_cache_hooks() -> None:
+    torch = pytest.importorskip("torch")
+
+    class _NoImplicitCacheQwen3CausalLM(_FakeQwen3CausalLM):
+        def __call__(self, **kwargs: Any) -> dict[str, Any]:
+            if kwargs.get("output_attentions"):
+                raise AssertionError("run_with_hooks should not add default cache attention hooks")
+            mlp_out = self.model.layers[0].mlp.run_forward(["mlp"])
+            return {"logits": kwargs["input_ids"] * 10, "mlp": mlp_out}
+
+    wrapper = Qwen3DenseModelWrapper(name="Qwen/Qwen3-8B")
+    wrapper.model = _NoImplicitCacheQwen3CausalLM()
+
+    logits = wrapper.run_with_hooks(
+        torch.tensor([1, 2]),
+        fwd_hooks=[("layer_0.mlp_out", lambda **kwargs: kwargs["activation"] + ["patched"])],
+    )
+
+    assert torch.equal(logits, torch.tensor([[10, 20]]))
+
+
+def test_qwen3_run_with_cache_cleans_up_after_invalid_layer() -> None:
+    wrapper = _wrapper_with_fake_model()
+    mlp = wrapper.model.model.layers[0].mlp
+
+    with pytest.raises(KeyError):
+        wrapper.run_with_cache(
+            {"input_ids": [[1, 2]]},
+            layers=["layer_0.mlp_out", "layer_99.mlp_out"],
+        )
+
+    assert mlp.forward_hooks == []
+    assert mlp.run_forward(["x"]) == ["x"]
+
+
 def test_qwen3_run_with_cache_component_hooks_do_not_patch_outputs() -> None:
     wrapper = _wrapper_with_fake_model()
 
@@ -196,6 +289,258 @@ def test_qwen3_run_with_cache_component_hooks_do_not_patch_outputs() -> None:
 
     assert output == {"first": ["first"], "second": ["second"]}
     assert cache == {"layer_0.mlp_out": ["second"]}
+
+
+def test_qwen3_run_with_cache_accepts_names_filter_and_cache_object() -> None:
+    wrapper = _wrapper_with_fake_model()
+
+    output, cache = wrapper.run_with_cache(
+        {"input_ids": [[1, 2]]},
+        names_filter=lambda name: name == "layer_0.mlp_out",
+        return_cache_object=True,
+    )
+
+    assert output == {"first": ["first"], "second": ["second"]}
+    assert isinstance(cache, ActivationCache)
+    assert cache["layer_0.mlp_out"] == ["second"]
+
+
+def test_qwen3_token_inputs_cache_all_by_default() -> None:
+    torch = pytest.importorskip("torch")
+
+    class _TokenCacheQwen3CausalLM(_FakeQwen3CausalLM):
+        def __call__(self, **kwargs: Any) -> dict[str, Any]:
+            mlp = self.model.layers[0].mlp
+            mlp_out = mlp.run_forward(["mlp"])
+            return {"logits": kwargs["input_ids"] * 10, "mlp": mlp_out}
+
+    wrapper = Qwen3DenseModelWrapper(name="Qwen/Qwen3-8B")
+    wrapper.model = _TokenCacheQwen3CausalLM()
+
+    logits, cache = wrapper.run_with_cache(torch.tensor([1, 2]))
+
+    assert torch.equal(logits, torch.tensor([[10, 20]]))
+    assert isinstance(cache, ActivationCache)
+    assert cache[("mlp_out", 0)] == ["mlp"]
+
+
+def test_qwen3_mapping_inputs_can_explicitly_cache_all() -> None:
+    class _CacheAllQwen3CausalLM(_FakeQwen3CausalLM):
+        def __call__(self, **kwargs: Any) -> dict[str, Any]:
+            _ = kwargs
+            mlp = self.model.layers[0].mlp
+            first = mlp.run_forward(["first"])
+            second = mlp.run_forward(["second"])
+            return {"first": first, "second": second}
+
+    wrapper = Qwen3DenseModelWrapper(name="Qwen/Qwen3-8B")
+    wrapper.model = _CacheAllQwen3CausalLM()
+
+    output, cache = wrapper.run_with_cache(
+        {"input_ids": [[1, 2]]},
+        cache_all=True,
+        return_cache_object=True,
+    )
+
+    assert output == {"first": ["first"], "second": ["second"]}
+    assert isinstance(cache, ActivationCache)
+    assert cache[("mlp_out", 0)] == ["second"]
+
+
+def test_qwen3_persistent_cache_hooks() -> None:
+    class _PersistentCacheQwen3CausalLM(_FakeQwen3CausalLM):
+        def __call__(self, **kwargs: Any) -> dict[str, Any]:
+            mlp = self.model.layers[0].mlp
+            value = kwargs["input_ids"][0][-1]
+            return {"mlp": mlp.run_forward(["mlp", value])}
+
+    wrapper = Qwen3DenseModelWrapper(name="Qwen/Qwen3-8B")
+    wrapper.model = _PersistentCacheQwen3CausalLM()
+
+    cache = wrapper.cache_some(lambda name: name == "layer_0.mlp_out")
+
+    assert wrapper({"input_ids": [[1, 2]]}, return_type="model_output") == {"mlp": ["mlp", 2]}
+    assert cache["layer_0.mlp_out"] == ["mlp", 2]
+
+    wrapper.reset_hooks()
+
+    assert wrapper({"input_ids": [[1, 3]]}, return_type="model_output") == {"mlp": ["mlp", 3]}
+    assert cache["layer_0.mlp_out"] == ["mlp", 3]
+
+    wrapper.reset_hooks(including_permanent=True)
+    wrapper({"input_ids": [[1, 4]]}, return_type="model_output")
+
+    assert cache["layer_0.mlp_out"] == ["mlp", 3]
+
+
+def test_qwen3_preserves_empty_external_cache_for_persistent_hooks() -> None:
+    wrapper = _wrapper_with_fake_model()
+    external_cache = ActivationCache()
+
+    cache = wrapper.add_caching_hooks(layers=["layer_0.mlp_out"], cache=external_cache)
+    wrapper({"input_ids": [[1, 2]]}, return_type="model_output")
+
+    assert cache is external_cache
+    assert external_cache.model is wrapper
+    assert external_cache["layer_0.mlp_out"] == ["second"]
+
+
+def test_qwen3_add_caching_hooks_defaults_to_cache_all() -> None:
+    wrapper = _wrapper_with_fake_model()
+
+    cache = wrapper.add_caching_hooks()
+    wrapper({"input_ids": [[1, 2]]}, return_type="model_output")
+
+    assert cache[("pattern", 0)].ndim == 4
+    assert ("attn_scores", 0) not in cache
+
+    wrapper.reset_hooks(including_permanent=True)
+    empty_cache = wrapper.add_caching_hooks(cache_all=False)
+    wrapper({"input_ids": [[1, 2]]}, return_type="model_output")
+
+    assert empty_cache.to_dict() == {}
+
+
+def test_qwen3_caching_hooks_remove_batch_dim() -> None:
+    wrapper = _wrapper_with_fake_model()
+
+    cache = wrapper.add_caching_hooks(
+        layers=["layer_0.mlp_out"],
+        remove_batch_dim=True,
+    )
+
+    wrapper({"input_ids": [[1, 2]]}, return_type="model_output")
+
+    assert cache.has_batch_dim is False
+    assert cache["layer_0.mlp_out"] == "second"
+
+
+def test_qwen3_run_with_cache_prepares_cached_values() -> None:
+    torch = pytest.importorskip("torch")
+    moved_devices: list[str] = []
+
+    class _DeviceAwareTensor:
+        def __init__(self, tensor: Any) -> None:
+            self.tensor = tensor
+            self.requires_grad = tensor.requires_grad
+            self.shape = tensor.shape
+
+        @property
+        def ndim(self) -> int:
+            return self.tensor.ndim
+
+        def __getitem__(self, index: Any) -> _DeviceAwareTensor:
+            return _DeviceAwareTensor(self.tensor[index])
+
+        def detach(self) -> _DeviceAwareTensor:
+            return _DeviceAwareTensor(self.tensor.detach())
+
+        def clone(self) -> _DeviceAwareTensor:
+            return _DeviceAwareTensor(self.tensor.clone())
+
+        def to(self, device: str) -> _DeviceAwareTensor:
+            moved_devices.append(device)
+            return self
+
+    class _TensorCacheQwen3CausalLM(_FakeQwen3CausalLM):
+        def __call__(self, **kwargs: Any) -> dict[str, Any]:
+            _ = kwargs
+            activation = torch.arange(12, dtype=torch.float32).reshape(1, 3, 4)
+            activation.requires_grad_(True)
+            mlp_out = self.model.layers[0].mlp.run_forward(_DeviceAwareTensor(activation))
+            return {"mlp": mlp_out}
+
+    wrapper = Qwen3DenseModelWrapper(name="Qwen/Qwen3-8B")
+    wrapper.model = _TensorCacheQwen3CausalLM()
+
+    _output, cache = wrapper.run_with_cache(
+        {"input_ids": [[1, 2, 3]]},
+        layers=["layer_0.mlp_out"],
+        pos_slice=1,
+        detach=True,
+        clone=True,
+        device="cpu",
+        return_cache_object=True,
+    )
+
+    cached = cache["layer_0.mlp_out"]
+    assert isinstance(cached, _DeviceAwareTensor)
+    assert tuple(cached.shape) == (1, 4)
+    assert cached.requires_grad is False
+    assert moved_devices == ["cpu"]
+
+
+def test_qwen3_run_with_hooks_filter_dedupes_safe_and_transformerlens_aliases() -> None:
+    wrapper = _wrapper_with_fake_model()
+    calls = 0
+
+    def append_once(**kwargs: Any) -> Any:
+        nonlocal calls
+        calls += 1
+        return kwargs["activation"] + ["patched"]
+
+    output = wrapper.run_with_hooks(
+        {"input_ids": [[1, 2]]},
+        fwd_hooks=[
+            (
+                lambda name: name.endswith(".mlp_out") or name.endswith(".hook_mlp_out"),
+                append_once,
+            )
+        ],
+    )
+
+    assert output == {
+        "first": ["first", "patched"],
+        "second": ["second", "patched"],
+    }
+    assert calls == 2
+
+
+def test_qwen3_permanent_hooks_survive_default_reset() -> None:
+    wrapper = _wrapper_with_fake_model()
+
+    wrapper.add_perma_hook("layer_0.mlp_out", lambda **kwargs: kwargs["activation"] + ["permanent"])
+    wrapper.add_hook("layer_0.mlp_out", lambda **kwargs: kwargs["activation"] + ["temp"])
+
+    assert wrapper.run_with_cache({"input_ids": [[1, 2]]})[0] == {
+        "first": ["first", "permanent", "temp"],
+        "second": ["second", "permanent", "temp"],
+    }
+
+    wrapper.reset_hooks()
+
+    assert wrapper.run_with_cache({"input_ids": [[1, 2]]})[0] == {
+        "first": ["first", "permanent"],
+        "second": ["second", "permanent"],
+    }
+
+    wrapper.reset_hooks(including_permanent=True)
+
+    assert wrapper._hooks == []
+    assert wrapper.run_with_cache({"input_ids": [[1, 2]]})[0] == {
+        "first": ["first"],
+        "second": ["second"],
+    }
+
+
+def test_qwen3_hooks_context_is_temporary() -> None:
+    wrapper = _wrapper_with_fake_model()
+
+    wrapper.add_perma_hook("layer_0.mlp_out", lambda **kwargs: kwargs["activation"] + ["permanent"])
+
+    with wrapper.hooks(
+        fwd_hooks=[("layer_0.mlp_out", lambda **kwargs: kwargs["activation"] + ["temp"])],
+    ):
+        output = wrapper.run_with_cache({"input_ids": [[1, 2]]})[0]
+
+    assert output == {
+        "first": ["first", "permanent", "temp"],
+        "second": ["second", "permanent", "temp"],
+    }
+    assert wrapper.run_with_cache({"input_ids": [[1, 2]]})[0] == {
+        "first": ["first", "permanent"],
+        "second": ["second", "permanent"],
+    }
 
 
 def test_qwen3_run_with_cache_captures_attention_pattern() -> None:
@@ -208,6 +553,52 @@ def test_qwen3_run_with_cache_captures_attention_pattern() -> None:
 
     assert output["output_attentions"] is True
     assert getattr(cache["blocks.0.attn.hook_pattern"], "ndim", None) == 4
+
+
+def test_qwen3_run_with_cache_captures_derived_attention_result() -> None:
+    torch = pytest.importorskip("torch")
+    wrapper = _wrapper_with_fake_model()
+    z = torch.arange(4, dtype=torch.float32).reshape(1, 1, 4)
+
+    output, cache = wrapper.run_with_cache(
+        {"z": z},
+        layers=["layer_0.result"],
+    )
+
+    z_by_head = z.reshape(1, 1, 2, 2)
+    W_O = wrapper.model.model.layers[0].self_attn.o_proj.weight.reshape(4, 2, 2).permute(1, 2, 0)
+    expected = torch.einsum("bphd,hdm->bphm", z_by_head, W_O)
+    assert torch.equal(output["attn_out"], z)
+    assert torch.equal(cache["layer_0.result"], expected)
+
+
+def test_qwen3_run_with_cache_filter_can_select_transformerlens_result() -> None:
+    torch = pytest.importorskip("torch")
+    wrapper = _wrapper_with_fake_model()
+
+    _output, cache = wrapper.run_with_cache(
+        {"z": torch.zeros(1, 1, 4)},
+        names_filter=lambda name: name.endswith(".hook_result"),
+    )
+
+    assert "blocks.0.attn.hook_result" in cache
+
+
+def test_qwen3_add_hook_patches_derived_attention_result() -> None:
+    torch = pytest.importorskip("torch")
+    wrapper = _wrapper_with_fake_model()
+    z = torch.arange(4, dtype=torch.float32).reshape(1, 1, 4)
+
+    wrapper.add_hook("layer_0.result", lambda **kwargs: kwargs["activation"] * 0)
+
+    original_result = torch.einsum(
+        "bphd,hdm->bphm",
+        z.reshape(1, 1, 2, 2),
+        wrapper.model.model.layers[0].self_attn.o_proj.weight.reshape(4, 2, 2).permute(1, 2, 0),
+    )
+    output, _cache = wrapper.run_with_cache({"z": z})
+
+    assert torch.equal(output["attn_out"], z - original_result.sum(dim=-2))
 
 
 def test_qwen3_run_with_cache_captures_attention_scores() -> None:
@@ -224,6 +615,24 @@ def test_qwen3_run_with_cache_captures_attention_scores() -> None:
     assert torch.equal(cache["blocks.0.attn.hook_attn_scores"], scores)
 
 
+def test_qwen3_run_with_cache_captures_attention_pattern_and_scores() -> None:
+    torch = pytest.importorskip("torch")
+    wrapper = _wrapper_with_fake_model()
+    scores = torch.randn(1, 2, 3, 3)
+
+    output, cache = wrapper.run_with_cache(
+        {"scores": scores},
+        layers=[
+            "blocks.0.attn.hook_pattern",
+            "blocks.0.attn.hook_attn_scores",
+        ],
+    )
+
+    assert output["output_attentions"] is True
+    assert torch.equal(cache["blocks.0.attn.hook_attn_scores"], scores)
+    assert torch.allclose(cache["blocks.0.attn.hook_pattern"], torch.softmax(scores, dim=-1))
+
+
 def test_qwen3_attention_scores_hooks_patch_softmax_inputs() -> None:
     torch = pytest.importorskip("torch")
     wrapper = _wrapper_with_fake_model()
@@ -237,6 +646,37 @@ def test_qwen3_attention_scores_hooks_patch_softmax_inputs() -> None:
 
     _tokens, pattern = wrapper.model.model.layers[0].self_attn.forward(torch.zeros(1, 2, 1, 2))
     assert torch.all(pattern[..., 0] > 0.99)
+
+
+def test_qwen3_attention_hook_remove_clears_output_attentions_flag() -> None:
+    wrapper = _wrapper_with_fake_model()
+
+    handle = wrapper.add_hook("layer_0.pattern", lambda **_kwargs: None)
+    assert wrapper.run_with_cache({"input_ids": [[1, 2]]})[0]["output_attentions"] is True
+
+    handle.remove()
+
+    assert wrapper.run_with_cache({"input_ids": [[1, 2]]})[0] == {
+        "first": ["first"],
+        "second": ["second"],
+    }
+    assert wrapper._hooks == []
+
+
+def test_qwen3_reset_hooks_clears_attention_output_flags() -> None:
+    wrapper = _wrapper_with_fake_model()
+
+    wrapper.add_hook("layer_0.pattern", lambda **_kwargs: None)
+    wrapper.add_hook("layer_0.attn_scores", lambda **_kwargs: None)
+    assert wrapper.run_with_cache({"input_ids": [[1, 2]]})[0]["output_attentions"] is True
+
+    wrapper.reset_hooks()
+
+    assert wrapper._hooks == []
+    assert wrapper.run_with_cache({"input_ids": [[1, 2]]})[0] == {
+        "first": ["first"],
+        "second": ["second"],
+    }
 
 
 def test_qwen3_attention_pattern_hooks_patch_softmax_outputs() -> None:

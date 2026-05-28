@@ -17,6 +17,9 @@ Core utilities:
 - `make_patch_specs`: creates a simple grid of patch specs.
 - `component_activation_patch`: runs a Transformer component patch grid.
 - `make_component_patch_specs`: creates component-level specs by named axes.
+- `patch_results_to_metric_grid`: converts detailed runs into a
+  TransformerLens-style metric grid.
+- `patch_results_to_index_table`: returns the axis index table for patch runs.
 
 Supported Transformer component helpers:
 
@@ -32,6 +35,32 @@ Supported Transformer component helpers:
 The component helpers support both SafeLens names such as `layer_0.resid_pre`
 and TransformerLens-style names such as `blocks.0.hook_resid_pre` by setting
 `name_style="transformer_lens"`.
+
+When explicit positions are omitted, residual/head-vector helpers infer sequence
+length from tokens or `[batch, pos, ...]` activations. Attention pattern and
+score helpers infer destination/source positions from
+`[batch, head, dest_pos, src_pos]` activations.
+
+The TransformerLens-style component helpers default to metric grids: for
+example `get_act_patch_resid_pre` returns a `[layer, pos]` grid and
+`get_act_patch_block_every` returns a stacked `[patch_type, layer, pos]`
+result. Pass `return_details=True` when you need detailed `PatchResult`
+records with the patched output and cache for each run. Pass
+`return_index_df=True` to also return the index table; the table is a list of
+dictionaries and does not require pandas.
+
+`generic_activation_patch` also accepts the TransformerLens-style call shape:
+pass `patching_metric`, a TL-style `patch_setter(activation, index,
+clean_activation)`, `activation_name`, and either `index_axis_names` or an
+explicit `index_df` table. When `index_df` is explicit, metric output is flat,
+matching TransformerLens' behavior. SafeLens-style calls that pass explicit
+`PatchSpec` objects still return detailed `PatchResult` records by default;
+pass `return_details=False` to format those as metric grids.
+
+The exported component setters such as `layer_pos_patch_setter` and
+`layer_head_vector_patch_setter` accept both SafeLens' internal
+`(activation, PatchSpec, ActivationCache)` shape and TransformerLens'
+`(activation, index, clean_activation)` shape.
 
 Model compatibility note: the patching layer can express the operations above,
 but a concrete `ModelWrapper` must expose matching hook points and tensor

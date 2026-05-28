@@ -18,7 +18,12 @@ from SafeLens.core.base import (
     SafetyReport,
     TokenAttribution,
 )
-from SafeLens.core.factored_matrix import FactoredMatrix
+from SafeLens.core.analysis import (
+    attention_pattern_score,
+    induction_attention_score,
+    previous_token_attention_score,
+)
+from SafeLens.core.factored_matrix import FactoredMatrix, composition_scores
 from SafeLens.core.hooked_root import HookedRoot
 from SafeLens.core.hooks import ActivationCache, HookPoint
 from SafeLens.core.kv_cache import KeyValueCache, KeyValueCacheEntry
@@ -27,13 +32,16 @@ from SafeLens.core.patching import PatchResult, PatchSpec
 __all__ = [
     "AttributionResult",
     "ActivationCache",
+    "attention_pattern_score",
     "BaseAttributor",
     "BaseMethodConfig",
     "BaseMonitor",
     "BaseProbe",
     "FactoredMatrix",
+    "composition_scores",
     "HookPoint",
     "HookedRoot",
+    "induction_attention_score",
     "KeyValueCache",
     "KeyValueCacheEntry",
     "MethodSpec",
@@ -46,6 +54,7 @@ __all__ = [
     "PatchResult",
     "PatchSpec",
     "ProbeResult",
+    "previous_token_attention_score",
     "RunReport",
     "SafetyReport",
     "TokenAttribution",

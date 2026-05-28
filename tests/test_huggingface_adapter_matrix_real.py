@@ -128,6 +128,7 @@ def test_real_decoder_adapter_matrix_caches_head_components_and_patches(
                 layers=[0],
                 positions=[0],
                 cache_layers=[],
+                return_details=True,
             )
         )
         _assert_one_finite_result(
@@ -140,6 +141,7 @@ def test_real_decoder_adapter_matrix_caches_head_components_and_patches(
                 positions=[0],
                 heads=[0],
                 cache_layers=[],
+                return_details=True,
             )
         )
         _attention_output, attention_cache = wrapper.run_with_cache(
@@ -184,6 +186,7 @@ def test_real_decoder_adapter_matrix_allows_token_id_batches_without_tokenizer(
                 positions=[0],
                 heads=[0],
                 cache_layers=[],
+                return_details=True,
             )
         )
         with pytest.raises(ValueError, match="did not load a tokenizer"):
@@ -243,6 +246,7 @@ def test_real_encoder_adapter_matrix_caches_head_components_and_patches(
                 layers=[0],
                 positions=[0],
                 cache_layers=[],
+                return_details=True,
             )
         )
         _assert_one_finite_result(
@@ -255,6 +259,7 @@ def test_real_encoder_adapter_matrix_caches_head_components_and_patches(
                 positions=[0],
                 heads=[0],
                 cache_layers=[],
+                return_details=True,
             )
         )
         _attention_output, attention_cache = wrapper.run_with_cache(
@@ -300,6 +305,7 @@ def test_real_audio_adapter_matrix_caches_head_components_and_patches(
                 layers=[0],
                 positions=[0],
                 cache_layers=[],
+                return_details=True,
             )
         )
         _assert_one_finite_result(
@@ -312,6 +318,7 @@ def test_real_audio_adapter_matrix_caches_head_components_and_patches(
                 positions=[0],
                 heads=[0],
                 cache_layers=[],
+                return_details=True,
             )
         )
         _attention_output, attention_cache = wrapper.run_with_cache(

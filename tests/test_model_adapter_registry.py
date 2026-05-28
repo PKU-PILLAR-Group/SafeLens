@@ -29,8 +29,10 @@ def test_model_adapter_registry_lists_capabilities() -> None:
         "transformer_lens",
     }.issubset(adapters)
     assert "q" in adapters["qwen3_dense"]["capabilities"]["supported_hooks"]
+    assert "result" in adapters["qwen3_dense"]["capabilities"]["supported_patches"]
     assert adapters["qwen3_dense"]["capabilities"]["supports_attention_pattern"] is True
     assert adapters["qwen3_dense"]["capabilities"]["supports_attention_scores"] is True
+    assert "result" in adapters["transformer_lens"]["capabilities"]["supported_patches"]
     assert adapters["transformer_lens"]["capabilities"]["supports_attention_pattern"] is True
     assert adapters["transformer_lens"]["capabilities"]["supports_attention_scores"] is True
     assert adapters["local"]["capabilities"]["supports_remote_download"] is False
@@ -67,6 +69,7 @@ def test_model_adapter_registry_inspects_transformerlens_models_without_loading(
     assert payload["download_plan"]["provider"] == "huggingface"
     assert payload["resolved_pretrained_model"] == "gpt2"
     assert payload["official_model_count"] >= 150
+    assert "result" in payload["bridge_components"]
 
 
 def test_transformerlens_supports_official_names_and_common_aliases() -> None:
@@ -154,3 +157,5 @@ def test_all_registered_adapters_satisfy_model_wrapper_contract() -> None:
         assert callable(wrapper.run_with_cache)
         assert callable(wrapper.generate)
         assert callable(wrapper.remove_hooks)
+        assert callable(wrapper.reset_hooks)
+        assert callable(wrapper.add_perma_hook)

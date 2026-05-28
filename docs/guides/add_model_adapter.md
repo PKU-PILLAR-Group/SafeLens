@@ -35,6 +35,13 @@ class MyModelWrapper(ModelWrapper):
         pass
 ```
 
+`ModelWrapper.reset_hooks()` and `add_perma_hook()` are provided as
+TransformerLens-compatible defaults. Override them only if the adapter can
+distinguish temporary hooks, permanent hooks, hook levels, or additional hook
+context state.
+Transformers-backed wrappers also provide `add_caching_hooks()`, `cache_all()`,
+and `cache_some()` for persistent activation caches.
+
 Then wire it into `build_model_wrapper` with a new `model.source` value and
 document:
 

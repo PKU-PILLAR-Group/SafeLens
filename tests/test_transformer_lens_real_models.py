@@ -155,6 +155,7 @@ def test_transformer_lens_real_model_runs_core_patches(
                 layers=[0],
                 positions=[0],
                 cache_layers=[],
+                return_details=True,
             )
         )
         _assert_finite_results(
@@ -167,6 +168,7 @@ def test_transformer_lens_real_model_runs_core_patches(
                 positions=[0],
                 heads=[0],
                 cache_layers=[],
+                return_details=True,
             )
         )
     finally:

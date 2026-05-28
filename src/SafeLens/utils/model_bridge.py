@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from inspect import Parameter, signature
 from typing import Any, Literal
 
@@ -39,9 +39,11 @@ _UNSUPPORTED_ATTENTION_REASON = (
     "this fallback adapter has no known attention module path for softmax instrumentation"
 )
 _UNSUPPORTED_RESULT_REASON = (
-    "Transformers modules expose merged attention outputs here, not per-head "
-    "TransformerLens result vectors"
+    "TransformerLens result vectors are derived from z @ W_O for HuggingFace "
+    "projection modules"
 )
+_ATTENTION_SOFTMAX_STATE_ATTR = "_safelens_attention_softmax_hook_state"
+_HOOK_CONTEXTS_ATTR = "_safelens_hook_contexts"
 
 
 @dataclass(frozen=True)
@@ -59,6 +61,20 @@ class ComponentRef:
     @property
     def transformer_lens_name(self) -> str:
         return transformer_lens_component_name(self.component, self.layer)
+
+
+class ComponentHookContext:
+    """Small TransformerLens-style hook object passed to component hooks."""
+
+    def __init__(self, component_ref: ComponentRef) -> None:
+        self.name = component_ref.transformer_lens_name
+        self.component = component_ref.component
+        self.ctx: dict[str, Any] = {}
+        self._layer = component_ref.layer
+        self.safelens_name = component_ref.safelens_name
+
+    def layer(self) -> int:
+        return self._layer
 
 
 @dataclass(frozen=True)
@@ -110,10 +126,24 @@ class ArchitectureAdapter:
             marker in lowered_model_name for marker in self.model_name_markers
         )
 
-    def supported_components(self, *, include_unsupported: bool = False) -> tuple[str, ...]:
-        return tuple(
-            spec.component for spec in self._specs.values() if include_unsupported or spec.supported
-        )
+    def supported_components(
+        self,
+        *,
+        include_unsupported: bool = False,
+        for_cache: bool | None = None,
+    ) -> tuple[str, ...]:
+        components: list[str] = []
+        for spec in self._specs.values():
+            if not include_unsupported and not spec.supported:
+                continue
+            if for_cache is True and not spec.cacheable:
+                continue
+            if for_cache is False and not spec.patchable:
+                continue
+            if for_cache is None and not include_unsupported and not spec.patchable:
+                continue
+            components.append(spec.component)
+        return tuple(components)
 
     def inspect(self) -> dict[str, Any]:
         return {
@@ -121,6 +151,8 @@ class ArchitectureAdapter:
             "model_types": list(self.model_types),
             "model_name_markers": list(self.model_name_markers),
             "supported_components": list(self.supported_components()),
+            "cacheable_components": list(self.supported_components(for_cache=True)),
+            "patchable_components": list(self.supported_components(for_cache=False)),
             "target_components": list(self.supported_components(include_unsupported=True)),
             "notes": list(self.notes),
         }
@@ -178,12 +210,28 @@ class ArchitectureAdapter:
                 self.name,
                 spec,
             )
-        if spec.mode == "forward_input":
-            return module.register_forward_pre_hook(
-                _make_component_input_hook(hook_fn, component_ref, self.name, spec, model)
+        if spec.component == "result" and not for_cache:
+            hook = _make_attention_result_output_hook(
+                hook_fn,
+                component_ref,
+                self.name,
+                spec,
+                model,
             )
-        return module.register_forward_hook(
-            _make_component_output_hook(hook_fn, component_ref, self.name, spec, model)
+            return _ComponentHookHandle(
+                module.register_forward_hook(hook),
+                _hook_contexts_for(hook),
+            )
+        if spec.mode == "forward_input":
+            hook = _make_component_input_hook(hook_fn, component_ref, self.name, spec, model)
+            return _ComponentHookHandle(
+                module.register_forward_pre_hook(hook),
+                _hook_contexts_for(hook),
+            )
+        hook = _make_component_output_hook(hook_fn, component_ref, self.name, spec, model)
+        return _ComponentHookHandle(
+            module.register_forward_hook(hook),
+            _hook_contexts_for(hook),
         )
 
     def requires_output_attentions(self, layer: LayerRef) -> bool:
@@ -209,6 +257,87 @@ class ArchitectureAdapter:
             f"{self.name!r}. Tried module paths: {attempted}."
         )
 
+    def get_attention_weight(self, model: Any, component: str, layer: int) -> Any:
+        """Return a TransformerLens-shaped attention weight tensor for one layer."""
+        component_ref = self._make_ref(layer, component, component)
+        if component_ref is None:
+            raise KeyError(f"Unknown attention component {component!r}.")
+        spec = self._spec_for_ref(component_ref, for_cache=True)
+        module = self.get_component(model, component_ref)
+        weight = getattr(module, "weight", None)
+        if weight is None:
+            raise KeyError(f"Component {component!r} at layer {layer} has no weight.")
+        if spec.activation == "split_qkv_heads":
+            return reshape_joint_qkv_attention_weight(
+                weight,
+                component=component,
+                q_heads=head_count_for_component(model, "q"),
+                kv_heads=head_count_for_component(model, "k"),
+                qkv_layout=spec.qkv_layout,
+                packed_axis=preferred_qkv_weight_packed_axis(module, architecture=self.name),
+            )
+        if spec.activation != "split_heads":
+            raise NotImplementedError(
+                f"{self.name} cannot expose W_{component.upper()} from "
+                f"{spec.activation!r} projections yet."
+            )
+        n_heads = head_count_for_component(model, component)
+        return reshape_attention_weight(
+            weight,
+            component=component,
+            n_heads=n_heads,
+            packed_axis=preferred_attention_weight_packed_axis(
+                module,
+                architecture=self.name,
+                component=component,
+            ),
+        )
+
+    def get_embedding_weight(self, model: Any, *, positional: bool = False) -> Any:
+        """Return token or positional embedding weights for common Transformers layouts."""
+        paths = (
+            (
+                "transformer.wpe",
+                "wpe",
+                "model.embed_positions",
+                "embed_positions",
+                "model.wpe",
+            )
+            if positional
+            else (
+                "transformer.wte",
+                "wte",
+                "model.embed_tokens",
+                "embed_tokens",
+                "encoder.embed_tokens",
+                "shared",
+            )
+        )
+        kind = "positional embedding" if positional else "token embedding"
+        return _weight_from_first_path(model, paths, kind=kind)
+
+    def get_mlp_weight(self, model: Any, component: str, layer: int) -> Any:
+        """Return a TransformerLens-shaped MLP weight matrix for one layer."""
+        if component == "in":
+            paths = (
+                f"model.layers.{layer}.mlp.gate_proj",
+                f"model.layers.{layer}.mlp.up_proj",
+                f"transformer.h.{layer}.mlp.c_fc",
+                f"gpt_neox.layers.{layer}.mlp.dense_h_to_4h",
+                f"model.decoder.layers.{layer}.fc1",
+            )
+        elif component == "out":
+            paths = (
+                f"model.layers.{layer}.mlp.down_proj",
+                f"transformer.h.{layer}.mlp.c_proj",
+                f"gpt_neox.layers.{layer}.mlp.dense_4h_to_h",
+                f"model.decoder.layers.{layer}.fc2",
+            )
+        else:
+            raise ValueError(f"Unsupported MLP weight component {component!r}.")
+        weight = _weight_from_first_path(model, paths, kind=f"MLP {component} weight")
+        return weight.T if hasattr(weight, "T") and getattr(weight, "ndim", 0) == 2 else weight
+
     def _make_ref(self, layer: int, component: str, original: LayerRef) -> ComponentRef | None:
         normalized = _normalize_component(component)
         if normalized not in self._aliases:
@@ -223,6 +352,11 @@ class ArchitectureAdapter:
         if for_cache and not spec.cacheable:
             raise NotImplementedError(f"{self.name} cannot cache {spec.component!r}.")
         if not for_cache and not spec.patchable:
+            if spec.unsupported_reason:
+                raise NotImplementedError(
+                    f"{self.name} can cache {spec.component!r}, but cannot patch it: "
+                    f"{spec.unsupported_reason}."
+                )
             raise NotImplementedError(
                 f"{self.name} can cache {spec.component!r}, but cannot patch it "
                 "without instrumenting the attention computation before value mixing."
@@ -241,6 +375,21 @@ def resolve_module_path(model: Any, path: str) -> Any:
     return target
 
 
+def _weight_from_first_path(model: Any, paths: Sequence[str], *, kind: str) -> Any:
+    attempted: list[str] = []
+    for path in paths:
+        attempted.append(path)
+        try:
+            module = resolve_module_path(model, path)
+        except (AttributeError, IndexError, KeyError, TypeError):
+            continue
+        weight = getattr(module, "weight", None)
+        if weight is not None:
+            return weight
+    attempted_paths = ", ".join(attempted)
+    raise KeyError(f"Could not resolve {kind}. Tried module paths: {attempted_paths}.")
+
+
 def transformer_lens_component_name(component: str, layer: int) -> str:
     """Return a TransformerLens-style hook name for a canonical component."""
     if component in {"q", "k", "v", "z", "pattern", "attn_scores", "result"}:
@@ -255,19 +404,26 @@ def supported_transformer_component_names(
     *,
     include_pattern: bool = False,
     include_attention: bool = False,
+    include_result: bool = True,
 ) -> tuple[str, ...]:
     """Return the canonical component vocabulary exposed by model bridges."""
     supported_components = tuple(
-        component for component in CANONICAL_TRANSFORMER_COMPONENTS if component != "result"
+        component
+        for component in CANONICAL_TRANSFORMER_COMPONENTS
+        if include_result or component != "result"
     )
     if include_attention:
         return supported_components
     if include_pattern:
-        return tuple(component for component in supported_components if component != "attn_scores")
+        return tuple(
+            component
+            for component in supported_components
+            if component not in {"result", "attn_scores"}
+        )
     return tuple(
         component
         for component in supported_components
-        if component not in {"pattern", "attn_scores"}
+        if component not in {"result", "pattern", "attn_scores"}
     )
 
 
@@ -302,6 +458,8 @@ def _make_component_output_hook(
     spec: ComponentHookSpec,
     model: Any,
 ) -> Callable[[Any, Any, Any], Any]:
+    hook_context = ComponentHookContext(component_ref)
+
     def hook(_module: Any, _inputs: Any, output: Any) -> Any:
         activation = extract_component_activation(output, spec, model)
         patched = call_component_hook(
@@ -309,6 +467,7 @@ def _make_component_output_hook(
             activation=activation,
             component_ref=component_ref,
             architecture=architecture,
+            hook_context=hook_context,
         )
         if spec.value != "output":
             return None
@@ -316,6 +475,7 @@ def _make_component_output_hook(
             return None
         return replace_component_activation(output, patched, spec, model)
 
+    _set_hook_contexts(hook, (hook_context,))
     return hook
 
 
@@ -326,23 +486,85 @@ def _make_component_input_hook(
     spec: ComponentHookSpec,
     model: Any,
 ) -> Callable[[Any, Any], Any]:
+    hook_context = ComponentHookContext(component_ref)
+
     def hook(_module: Any, inputs: Any) -> Any:
         if not inputs:
             return None
         raw_activation = inputs[0]
-        activation = transform_component_activation(raw_activation, spec, model)
+        activation = transform_component_activation(
+            raw_activation,
+            spec,
+            model,
+            module=_module,
+            component_ref=component_ref,
+            architecture=architecture,
+        )
         patched = call_component_hook(
             hook_fn,
             activation=activation,
             component_ref=component_ref,
             architecture=architecture,
+            hook_context=hook_context,
         )
+        if spec.component == "result":
+            return None
         if patched is None:
             return None
         merged = merge_component_activation(patched, raw_activation, spec, model)
         return (merged, *tuple(inputs[1:]))
 
+    _set_hook_contexts(hook, (hook_context,))
     return hook
+
+
+def _make_attention_result_output_hook(
+    hook_fn: HookFn,
+    component_ref: ComponentRef,
+    architecture: str,
+    spec: ComponentHookSpec,
+    model: Any,
+) -> Callable[[Any, Any, Any], Any]:
+    hook_context = ComponentHookContext(component_ref)
+
+    def hook(module: Any, inputs: Any, output: Any) -> Any:
+        if not inputs:
+            return None
+        raw_z = inputs[0]
+        raw_output = first_output(output)
+        activation = compute_attention_result_activation(
+            raw_z,
+            model,
+            spec,
+            module=module,
+            component_ref=component_ref,
+            architecture=architecture,
+        )
+        patched = call_component_hook(
+            hook_fn,
+            activation=activation,
+            component_ref=component_ref,
+            architecture=architecture,
+            hook_context=hook_context,
+        )
+        if patched is None:
+            return None
+        merged_output = apply_attention_result_patch(raw_output, activation, patched)
+        if isinstance(output, tuple):
+            return (merged_output, *output[1:])
+        return merged_output
+
+    _set_hook_contexts(hook, (hook_context,))
+    return hook
+
+
+def _set_hook_contexts(hook: Callable[..., Any], contexts: tuple[ComponentHookContext, ...]) -> None:
+    setattr(hook, _HOOK_CONTEXTS_ATTR, contexts)
+
+
+def _hook_contexts_for(value: Any) -> tuple[ComponentHookContext, ...]:
+    contexts = getattr(value, _HOOK_CONTEXTS_ATTR, ())
+    return tuple(context for context in contexts if isinstance(context, ComponentHookContext))
 
 
 def call_component_hook(
@@ -351,8 +573,11 @@ def call_component_hook(
     activation: Any,
     component_ref: ComponentRef,
     architecture: str,
+    hook_context: ComponentHookContext | None = None,
 ) -> Any:
     """Call a user hook with SafeLens component metadata when accepted."""
+    if hook_context is None:
+        hook_context = ComponentHookContext(component_ref)
     hook_kwargs = {
         "activation": activation,
         "output": activation,
@@ -361,12 +586,12 @@ def call_component_hook(
         "hook_name": component_ref.safelens_name,
         "transformer_lens_name": component_ref.transformer_lens_name,
         "architecture": architecture,
-        "hook": None,
+        "hook": hook_context,
     }
     try:
         hook_signature = signature(hook_fn)
     except (TypeError, ValueError):
-        return hook_fn(activation, None)
+        return hook_fn(activation, hook_context)
 
     parameters = hook_signature.parameters.values()
     if any(param.kind == Parameter.VAR_KEYWORD for param in parameters):
@@ -388,7 +613,7 @@ def call_component_hook(
     if required_names.issubset(filtered_kwargs):
         return hook_fn(**filtered_kwargs)
     try:
-        return hook_fn(activation, None)
+        return hook_fn(activation, hook_context)
     except TypeError:
         return hook_fn(activation)
 
@@ -440,13 +665,143 @@ def replace_component_activation(
     return merged
 
 
-def transform_component_activation(activation: Any, spec: ComponentHookSpec, model: Any) -> Any:
+def transform_component_activation(
+    activation: Any,
+    spec: ComponentHookSpec,
+    model: Any,
+    *,
+    module: Any | None = None,
+    component_ref: ComponentRef | None = None,
+    architecture: str | None = None,
+) -> Any:
     """Convert raw HF projection tensors into SafeLens component activation shape."""
+    if spec.component == "result":
+        return compute_attention_result_activation(
+            activation,
+            model,
+            spec,
+            module=module,
+            component_ref=component_ref,
+            architecture=architecture,
+        )
     if spec.activation == "split_heads":
         return split_heads(activation, head_count_for_component(model, spec.component))
     if spec.activation == "split_qkv_heads":
         return split_qkv_heads(activation, model, spec)
     return activation
+
+
+def compute_attention_result_activation(
+    activation: Any,
+    model: Any,
+    spec: ComponentHookSpec,
+    *,
+    module: Any | None,
+    component_ref: ComponentRef | None,
+    architecture: str | None,
+) -> Any:
+    """Compute TransformerLens-style per-head `result` from merged `z` input."""
+    if module is None:
+        raise ValueError("Computing attention result activations requires the output module.")
+    if component_ref is None:
+        raise ValueError("Computing attention result activations requires a component ref.")
+    weight = getattr(module, "weight", None)
+    if weight is None:
+        raise KeyError(
+            f"Cannot compute {component_ref.safelens_name!r}: output projection has no weight."
+        )
+    n_heads = head_count_for_component(model, "z")
+    z_activation = split_heads(activation, n_heads)
+    W_O = reshape_attention_weight(
+        weight,
+        component="z",
+        n_heads=n_heads,
+        packed_axis=preferred_attention_weight_packed_axis(
+            module,
+            architecture=architecture or "",
+            component="z",
+        ),
+    )
+    from SafeLens.core.analysis import compute_head_results_from_z
+
+    return compute_head_results_from_z(z_activation, W_O)
+
+
+def apply_attention_result_patch(output: Any, original_result: Any, patched_result: Any) -> Any:
+    """Apply a patched per-head `result` tensor to the merged attention output."""
+    delta = subtract_values(patched_result, original_result)
+    merged_delta = sum_attention_heads(delta)
+    return add_values(output, merged_delta)
+
+
+def sum_attention_heads(value: Any) -> Any:
+    """Sum the head axis in a TransformerLens `result` tensor."""
+    try:
+        import torch
+
+        if hasattr(value, "shape") and isinstance(value, torch.Tensor):
+            return value.sum(dim=-2)
+    except Exception:
+        pass
+    try:
+        import numpy as np
+
+        if hasattr(value, "shape"):
+            return np.asarray(value).sum(axis=-2)
+    except Exception:
+        pass
+    shape = getattr(value, "shape", None)
+    if shape is not None:
+        value = value.tolist()
+    return _sum_nested_head_axis(value)
+
+
+def add_values(left: Any, right: Any) -> Any:
+    try:
+        if hasattr(left, "shape") or hasattr(right, "shape"):
+            return left + right
+    except Exception:
+        pass
+    if isinstance(left, list) and isinstance(right, list):
+        return [add_values(left_item, right_item) for left_item, right_item in zip(left, right)]
+    return left + right
+
+
+def subtract_values(left: Any, right: Any) -> Any:
+    try:
+        if hasattr(left, "shape") or hasattr(right, "shape"):
+            return left - right
+    except Exception:
+        pass
+    if isinstance(left, list) and isinstance(right, list):
+        return [
+            subtract_values(left_item, right_item)
+            for left_item, right_item in zip(left, right)
+        ]
+    return left - right
+
+
+def _sum_nested_head_axis(value: Any) -> Any:
+    shape = _nested_shape(value)
+    if len(shape) < 2:
+        raise ValueError(f"Attention result must have at least head and d_model axes, got {shape}.")
+    if len(shape) == 2:
+        if not value:
+            return []
+        width = len(value[0])
+        return [sum(float(head[col]) for head in value) for col in range(width)]
+    return [_sum_nested_head_axis(item) for item in value]
+
+
+def _nested_shape(value: Any) -> tuple[int, ...]:
+    shape = getattr(value, "shape", None)
+    if shape is not None:
+        return tuple(int(dim) for dim in shape)
+    if isinstance(value, list):
+        if not value:
+            return (0,)
+        return (len(value), *_nested_shape(value[0]))
+    return ()
 
 
 def merge_component_activation(
@@ -658,6 +1013,316 @@ def head_count_for_component(model: Any, component: str) -> int:
     )
 
 
+def reshape_attention_weight(
+    weight: Any,
+    *,
+    component: str,
+    n_heads: int,
+    packed_axis: int | None = 0,
+) -> Any:
+    """Convert HF linear weights to TransformerLens attention weight shapes."""
+    shape = getattr(weight, "shape", None)
+    reshape = getattr(weight, "reshape", None)
+    if shape is None or not callable(reshape) or len(shape) != 2:
+        raise ValueError(f"Cannot reshape attention weight for component {component!r}.")
+    axis = packed_axis
+    if axis is None:
+        axis = infer_attention_weight_packed_axis(weight, n_heads=n_heads)
+    if axis not in {0, 1}:
+        raise ValueError(f"packed_axis must be 0, 1, or None, got {packed_axis!r}.")
+    packed_dim = int(shape[axis])
+    other_dim = int(shape[1 - axis])
+    if n_heads <= 0 or packed_dim % n_heads != 0:
+        raise ValueError(
+            f"Cannot split packed dimension {packed_dim} into {n_heads} heads for {component!r}."
+        )
+    head_dim = packed_dim // n_heads
+    if component in {"q", "k", "v"}:
+        if axis == 0:
+            return weight.reshape(n_heads, head_dim, other_dim).permute(0, 2, 1)
+        return weight.reshape(other_dim, n_heads, head_dim).permute(1, 0, 2)
+    if component == "z":
+        if axis == 0:
+            return weight.reshape(n_heads, head_dim, other_dim)
+        return weight.reshape(other_dim, n_heads, head_dim).permute(1, 2, 0)
+    raise ValueError(f"Unsupported attention weight component {component!r}.")
+
+
+def preferred_attention_weight_packed_axis(
+    module: Any,
+    *,
+    architecture: str,
+    component: str,
+) -> int | None:
+    """Return the likely packed axis for architecture-specific attention weights."""
+    module_type = type(module).__name__.lower()
+    if component == "z":
+        if architecture == "gpt2_decoder" or module_type == "conv1d":
+            return 0
+        return 1
+    if module_type == "conv1d":
+        return 1
+    return 0
+
+
+def infer_attention_weight_packed_axis(weight: Any, *, n_heads: int) -> int:
+    shape = getattr(weight, "shape", None)
+    if shape is None or len(shape) != 2:
+        raise ValueError("Cannot infer attention weight axis without a 2D shape.")
+    packed_on_rows = int(shape[0]) % n_heads == 0
+    packed_on_columns = int(shape[1]) % n_heads == 0
+    if packed_on_rows and not packed_on_columns:
+        return 0
+    if packed_on_columns and not packed_on_rows:
+        return 1
+    if packed_on_rows:
+        return 0
+    raise ValueError(
+        f"Cannot infer attention weight axis from shape {tuple(shape)} with n_heads={n_heads}."
+    )
+
+
+def reshape_joint_qkv_attention_weight(
+    weight: Any,
+    *,
+    component: str,
+    q_heads: int,
+    kv_heads: int,
+    qkv_layout: QKVLayout,
+    packed_axis: int | None = None,
+) -> Any:
+    """Convert joint QKV projection weights to TransformerLens attention shapes."""
+    shape = getattr(weight, "shape", None)
+    reshape = getattr(weight, "reshape", None)
+    if shape is None or not callable(reshape) or len(shape) != 2:
+        raise ValueError(f"Cannot reshape joint QKV weight for component {component!r}.")
+    if component not in {"q", "k", "v"}:
+        raise ValueError(f"Joint QKV weights only expose q/k/v, got {component!r}.")
+
+    axis = packed_axis
+    if axis is None:
+        axis = infer_qkv_weight_packed_axis(weight, q_heads=q_heads, kv_heads=kv_heads)
+    if axis == 0:
+        return reshape_joint_qkv_weight_packed_rows(
+            weight,
+            component=component,
+            q_heads=q_heads,
+            kv_heads=kv_heads,
+            qkv_layout=qkv_layout,
+        )
+    if axis == 1:
+        return reshape_joint_qkv_weight_packed_columns(
+            weight,
+            component=component,
+            q_heads=q_heads,
+            kv_heads=kv_heads,
+            qkv_layout=qkv_layout,
+        )
+    raise ValueError(f"packed_axis must be 0, 1, or None, got {packed_axis!r}.")
+
+
+def preferred_qkv_weight_packed_axis(module: Any, *, architecture: str) -> int | None:
+    """Return the likely packed axis for architecture-specific joint QKV weights."""
+    if architecture == "gpt2_decoder":
+        return 1
+    module_type = type(module).__name__.lower()
+    if module_type == "conv1d":
+        return 1
+    return None
+
+
+def infer_qkv_weight_packed_axis(weight: Any, *, q_heads: int, kv_heads: int) -> int:
+    shape = getattr(weight, "shape", None)
+    if shape is None or len(shape) != 2:
+        raise ValueError("Cannot infer packed QKV weight axis without a 2D shape.")
+    total_heads = q_heads + 2 * kv_heads
+    packed_on_rows = int(shape[0]) % total_heads == 0
+    packed_on_columns = int(shape[1]) % total_heads == 0
+    if packed_on_rows and not packed_on_columns:
+        return 0
+    if packed_on_columns and not packed_on_rows:
+        return 1
+    if packed_on_rows:
+        return 0
+    raise ValueError(
+        "Cannot infer packed QKV weight axis from shape "
+        f"{tuple(shape)} with q_heads={q_heads}, kv_heads={kv_heads}."
+    )
+
+
+def reshape_joint_qkv_weight_packed_rows(
+    weight: Any,
+    *,
+    component: str,
+    q_heads: int,
+    kv_heads: int,
+    qkv_layout: QKVLayout,
+) -> Any:
+    """Handle linear-style joint weights shaped `[qkv_out, d_model]`."""
+    packed_dim = int(weight.shape[0])
+    d_model = int(weight.shape[1])
+    component_weight, n_heads = extract_qkv_weight_rows(
+        weight,
+        component=component,
+        q_heads=q_heads,
+        kv_heads=kv_heads,
+        qkv_layout=qkv_layout,
+    )
+    head_dim = packed_dim // (q_heads + 2 * kv_heads)
+    return component_weight.reshape(n_heads, head_dim, d_model).permute(0, 2, 1)
+
+
+def reshape_joint_qkv_weight_packed_columns(
+    weight: Any,
+    *,
+    component: str,
+    q_heads: int,
+    kv_heads: int,
+    qkv_layout: QKVLayout,
+) -> Any:
+    """Handle Conv1D-style joint weights shaped `[d_model, qkv_out]`."""
+    packed_dim = int(weight.shape[1])
+    d_model = int(weight.shape[0])
+    component_weight, n_heads = extract_qkv_weight_columns(
+        weight,
+        component=component,
+        q_heads=q_heads,
+        kv_heads=kv_heads,
+        qkv_layout=qkv_layout,
+    )
+    head_dim = packed_dim // (q_heads + 2 * kv_heads)
+    return component_weight.reshape(d_model, n_heads, head_dim).permute(1, 0, 2)
+
+
+def extract_qkv_weight_rows(
+    weight: Any,
+    *,
+    component: str,
+    q_heads: int,
+    kv_heads: int,
+    qkv_layout: QKVLayout,
+) -> tuple[Any, int]:
+    total_heads = q_heads + 2 * kv_heads
+    packed_dim = int(weight.shape[0])
+    if total_heads <= 0 or packed_dim % total_heads != 0:
+        raise ValueError(
+            "Cannot split joint QKV weight rows with output dimension "
+            f"{packed_dim}, q_heads={q_heads}, kv_heads={kv_heads}."
+        )
+    head_dim = packed_dim // total_heads
+    if qkv_layout == "split":
+        bounds = qkv_weight_bounds(head_dim, q_heads=q_heads, kv_heads=kv_heads)
+        start, stop = bounds[component]
+        n_heads = q_heads if component == "q" else kv_heads
+        return weight[start:stop, :], n_heads
+    if qkv_layout == "interleaved":
+        return extract_interleaved_qkv_weight_rows(
+            weight,
+            component=component,
+            head_dim=head_dim,
+            q_heads=q_heads,
+            kv_heads=kv_heads,
+        )
+    raise ValueError(f"Unsupported QKV layout {qkv_layout!r}.")
+
+
+def extract_qkv_weight_columns(
+    weight: Any,
+    *,
+    component: str,
+    q_heads: int,
+    kv_heads: int,
+    qkv_layout: QKVLayout,
+) -> tuple[Any, int]:
+    total_heads = q_heads + 2 * kv_heads
+    packed_dim = int(weight.shape[1])
+    if total_heads <= 0 or packed_dim % total_heads != 0:
+        raise ValueError(
+            "Cannot split joint QKV weight columns with output dimension "
+            f"{packed_dim}, q_heads={q_heads}, kv_heads={kv_heads}."
+        )
+    head_dim = packed_dim // total_heads
+    if qkv_layout == "split":
+        bounds = qkv_weight_bounds(head_dim, q_heads=q_heads, kv_heads=kv_heads)
+        start, stop = bounds[component]
+        n_heads = q_heads if component == "q" else kv_heads
+        return weight[:, start:stop], n_heads
+    if qkv_layout == "interleaved":
+        return extract_interleaved_qkv_weight_columns(
+            weight,
+            component=component,
+            head_dim=head_dim,
+            q_heads=q_heads,
+            kv_heads=kv_heads,
+        )
+    raise ValueError(f"Unsupported QKV layout {qkv_layout!r}.")
+
+
+def qkv_weight_bounds(
+    head_dim: int,
+    *,
+    q_heads: int,
+    kv_heads: int,
+) -> dict[str, tuple[int, int]]:
+    q_stop = q_heads * head_dim
+    k_stop = q_stop + kv_heads * head_dim
+    v_stop = k_stop + kv_heads * head_dim
+    return {"q": (0, q_stop), "k": (q_stop, k_stop), "v": (k_stop, v_stop)}
+
+
+def extract_interleaved_qkv_weight_rows(
+    weight: Any,
+    *,
+    component: str,
+    head_dim: int,
+    q_heads: int,
+    kv_heads: int,
+) -> tuple[Any, int]:
+    d_model = int(weight.shape[1])
+    if q_heads == kv_heads:
+        component_index = {"q": 0, "k": 1, "v": 2}[component]
+        view = weight.reshape(q_heads, 3, head_dim, d_model)
+        return view[:, component_index, :, :].reshape(q_heads * head_dim, d_model), q_heads
+
+    q_per_group = qkv_group_size(q_heads=q_heads, kv_heads=kv_heads)
+    view = weight.reshape(kv_heads, q_per_group + 2, head_dim, d_model)
+    if component == "q":
+        return view[:, :q_per_group, :, :].reshape(q_heads * head_dim, d_model), q_heads
+    offset = -2 if component == "k" else -1
+    return view[:, offset, :, :].reshape(kv_heads * head_dim, d_model), kv_heads
+
+
+def extract_interleaved_qkv_weight_columns(
+    weight: Any,
+    *,
+    component: str,
+    head_dim: int,
+    q_heads: int,
+    kv_heads: int,
+) -> tuple[Any, int]:
+    d_model = int(weight.shape[0])
+    if q_heads == kv_heads:
+        component_index = {"q": 0, "k": 1, "v": 2}[component]
+        view = weight.reshape(d_model, q_heads, 3, head_dim)
+        return view[:, :, component_index, :].reshape(d_model, q_heads * head_dim), q_heads
+
+    q_per_group = qkv_group_size(q_heads=q_heads, kv_heads=kv_heads)
+    view = weight.reshape(d_model, kv_heads, q_per_group + 2, head_dim)
+    if component == "q":
+        return view[:, :, :q_per_group, :].reshape(d_model, q_heads * head_dim), q_heads
+    offset = -2 if component == "k" else -1
+    return view[:, :, offset, :].reshape(d_model, kv_heads * head_dim), kv_heads
+
+
+def qkv_group_size(*, q_heads: int, kv_heads: int) -> int:
+    if kv_heads <= 0 or q_heads % kv_heads != 0:
+        raise ValueError(
+            f"Grouped QKV requires q_heads to be a multiple of kv_heads, got "
+            f"q_heads={q_heads}, kv_heads={kv_heads}."
+        )
+    return q_heads // kv_heads
+
+
 def _register_attention_softmax_hook(
     module: Any,
     hook_fn: HookFn,
@@ -674,66 +1339,96 @@ def _register_attention_softmax_hook(
             "Install model dependencies with `pip install -e '.[models]'`."
         ) from exc
 
-    original_forward = module.forward
+    state = getattr(module, _ATTENTION_SOFTMAX_STATE_ATTR, None)
+    if state is None:
+        original_forward = module.forward
+        state = _AttentionSoftmaxHookState(module=module, original_forward=original_forward)
 
-    def wrapped_forward(*args: Any, **kwargs: Any) -> Any:
-        original_torch_softmax = torch.softmax
-        original_functional_softmax = functional.softmax
-        captured = False
+        def wrapped_forward(*args: Any, **kwargs: Any) -> Any:
+            active_records = list(state.records)
+            if not active_records:
+                return state.original_forward(*args, **kwargs)
 
-        def make_instrumented_softmax(original_softmax: Callable[..., Any]) -> Callable[..., Any]:
-            def instrumented_softmax(
-                input_tensor: Any,
-                *softmax_args: Any,
-                **softmax_kwargs: Any,
-            ) -> Any:
-                nonlocal captured
-                if not _looks_like_attention_scores(input_tensor, softmax_args, softmax_kwargs):
-                    return original_softmax(input_tensor, *softmax_args, **softmax_kwargs)
-                captured = True
-                scores = input_tensor
-                if spec.value == "attention_scores":
-                    patched_scores = call_component_hook(
-                        hook_fn,
-                        activation=scores,
-                        component_ref=component_ref,
-                        architecture=architecture,
-                    )
-                    if patched_scores is not None:
-                        scores = patched_scores
-                pattern = original_softmax(scores, *softmax_args, **softmax_kwargs)
-                if spec.value == "attention_pattern":
-                    patched_pattern = call_component_hook(
-                        hook_fn,
-                        activation=pattern,
-                        component_ref=component_ref,
-                        architecture=architecture,
-                    )
-                    if patched_pattern is not None:
-                        return patched_pattern
-                return pattern
+            original_torch_softmax = torch.softmax
+            original_functional_softmax = functional.softmax
+            captured = False
 
-            return instrumented_softmax
+            def make_instrumented_softmax(
+                original_softmax: Callable[..., Any],
+            ) -> Callable[..., Any]:
+                def instrumented_softmax(
+                    input_tensor: Any,
+                    *softmax_args: Any,
+                    **softmax_kwargs: Any,
+                ) -> Any:
+                    nonlocal captured
+                    if not _looks_like_attention_scores(input_tensor, softmax_args, softmax_kwargs):
+                        return original_softmax(input_tensor, *softmax_args, **softmax_kwargs)
+                    captured = True
+                    scores = input_tensor
+                    for record in active_records:
+                        if record.spec.value != "attention_scores":
+                            continue
+                        patched_scores = call_component_hook(
+                            record.hook_fn,
+                            activation=scores,
+                            component_ref=record.component_ref,
+                            architecture=record.architecture,
+                            hook_context=record.hook_context,
+                        )
+                        if patched_scores is not None:
+                            scores = patched_scores
 
-        torch.softmax = make_instrumented_softmax(original_torch_softmax)
-        functional.softmax = make_instrumented_softmax(original_functional_softmax)
-        try:
-            output = original_forward(*args, **kwargs)
-        finally:
-            torch.softmax = original_torch_softmax
-            functional.softmax = original_functional_softmax
+                    pattern = original_softmax(scores, *softmax_args, **softmax_kwargs)
+                    for record in active_records:
+                        if record.spec.value != "attention_pattern":
+                            continue
+                        patched_pattern = call_component_hook(
+                            record.hook_fn,
+                            activation=pattern,
+                            component_ref=record.component_ref,
+                            architecture=record.architecture,
+                            hook_context=record.hook_context,
+                        )
+                        if patched_pattern is not None:
+                            pattern = patched_pattern
+                    return pattern
 
-        if not captured:
-            raise RuntimeError(
-                f"Attention instrumentation for {component_ref.safelens_name!r} did not "
-                "observe an attention-shaped Python torch.softmax call. Use an eager "
-                "attention implementation or a model adapter with explicit attention "
-                "forward instrumentation."
-            )
-        return output
+                return instrumented_softmax
 
-    module.forward = wrapped_forward
-    return _ForwardPatchHandle(module, original_forward, wrapped_forward)
+            torch.softmax = make_instrumented_softmax(original_torch_softmax)
+            functional.softmax = make_instrumented_softmax(original_functional_softmax)
+            try:
+                output = state.original_forward(*args, **kwargs)
+            finally:
+                torch.softmax = original_torch_softmax
+                functional.softmax = original_functional_softmax
+
+            if not captured:
+                components = ", ".join(
+                    record.component_ref.safelens_name for record in active_records
+                )
+                raise RuntimeError(
+                    f"Attention instrumentation for {components!r} did not observe an "
+                    "attention-shaped Python torch.softmax call. Use an eager attention "
+                    "implementation or a model adapter with explicit attention forward "
+                    "instrumentation."
+                )
+            return output
+
+        state.wrapped_forward = wrapped_forward
+        module.forward = wrapped_forward
+        setattr(module, _ATTENTION_SOFTMAX_STATE_ATTR, state)
+
+    record = _AttentionSoftmaxHookRecord(
+        hook_fn=hook_fn,
+        component_ref=component_ref,
+        architecture=architecture,
+        spec=spec,
+        hook_context=ComponentHookContext(component_ref),
+    )
+    state.records.append(record)
+    return _AttentionSoftmaxHookHandle(state, record)
 
 
 def _looks_like_attention_scores(
@@ -768,6 +1463,60 @@ class _ForwardPatchHandle:
             return
         if getattr(self._module, "forward", None) is self._wrapped_forward:
             self._module.forward = self._original_forward
+        self._removed = True
+
+
+class _ComponentHookHandle:
+    def __init__(self, handle: Any, hook_contexts: Sequence[ComponentHookContext]) -> None:
+        self._handle = handle
+        self.hook_contexts = tuple(hook_contexts)
+
+    def remove(self) -> None:
+        remove = getattr(self._handle, "remove", None)
+        if callable(remove):
+            remove()
+
+
+@dataclass(eq=False)
+class _AttentionSoftmaxHookRecord:
+    hook_fn: HookFn
+    component_ref: ComponentRef
+    architecture: str
+    spec: ComponentHookSpec
+    hook_context: ComponentHookContext
+
+
+@dataclass
+class _AttentionSoftmaxHookState:
+    module: Any
+    original_forward: Any
+    wrapped_forward: Any | None = None
+    records: list[_AttentionSoftmaxHookRecord] = field(default_factory=list)
+
+
+class _AttentionSoftmaxHookHandle:
+    def __init__(
+        self,
+        state: _AttentionSoftmaxHookState,
+        record: _AttentionSoftmaxHookRecord,
+    ) -> None:
+        self._state = state
+        self._record = record
+        self.hook_contexts = (record.hook_context,)
+        self._removed = False
+
+    def remove(self) -> None:
+        if self._removed:
+            return
+        try:
+            self._state.records.remove(self._record)
+        except ValueError:
+            pass
+        if not self._state.records:
+            if getattr(self._state.module, "forward", None) is self._state.wrapped_forward:
+                self._state.module.forward = self._state.original_forward
+                if getattr(self._state.module, _ATTENTION_SOFTMAX_STATE_ATTR, None) is self._state:
+                    delattr(self._state.module, _ATTENTION_SOFTMAX_STATE_ATTR)
         self._removed = True
 
 
@@ -892,12 +1641,14 @@ def _unsupported_attention_scores_spec() -> ComponentHookSpec:
     )
 
 
-def _unsupported_result_spec() -> ComponentHookSpec:
+def _result_spec(*module_paths: str) -> ComponentHookSpec:
     return _spec(
         "result",
-        "forward_output",
-        "",
-        supported=False,
+        "forward_input",
+        *module_paths,
+        activation="split_heads",
+        patchable=True,
+        cacheable=True,
         unsupported_reason=_UNSUPPORTED_RESULT_REASON,
     )
 
@@ -950,7 +1701,7 @@ LLAMA_LIKE_ADAPTER = ArchitectureAdapter(
         _spec(
             "z", "forward_input", "model.layers.{layer}.self_attn.o_proj", activation="split_heads"
         ),
-        _unsupported_result_spec(),
+        _result_spec("model.layers.{layer}.self_attn.o_proj"),
         _pattern_spec("model.layers.{layer}.self_attn"),
         _scores_spec("model.layers.{layer}.self_attn"),
     ),
@@ -986,7 +1737,7 @@ GPT2_ADAPTER = ArchitectureAdapter(
             activation="split_qkv_heads",
         ),
         _spec("z", "forward_input", "transformer.h.{layer}.attn.c_proj", activation="split_heads"),
-        _unsupported_result_spec(),
+        _result_spec("transformer.h.{layer}.attn.c_proj"),
         _pattern_spec("transformer.h.{layer}.attn"),
         _scores_spec("transformer.h.{layer}.attn"),
     ),
@@ -1030,7 +1781,7 @@ GPT_NEOX_ADAPTER = ArchitectureAdapter(
             "gpt_neox.layers.{layer}.attention.dense",
             activation="split_heads",
         ),
-        _unsupported_result_spec(),
+        _result_spec("gpt_neox.layers.{layer}.attention.dense"),
         _pattern_spec("gpt_neox.layers.{layer}.attention"),
         _scores_spec("gpt_neox.layers.{layer}.attention"),
     ),
@@ -1052,7 +1803,7 @@ GPTJ_ADAPTER = ArchitectureAdapter(
         _spec(
             "z", "forward_input", "transformer.h.{layer}.attn.out_proj", activation="split_heads"
         ),
-        _unsupported_result_spec(),
+        _result_spec("transformer.h.{layer}.attn.out_proj"),
         _pattern_spec("transformer.h.{layer}.attn"),
         _scores_spec("transformer.h.{layer}.attn"),
     ),
@@ -1093,7 +1844,7 @@ GPT_NEO_ADAPTER = ArchitectureAdapter(
             "transformer.h.{layer}.attn.attention.out_proj",
             activation="split_heads",
         ),
-        _unsupported_result_spec(),
+        _result_spec("transformer.h.{layer}.attn.attention.out_proj"),
         _pattern_spec("transformer.h.{layer}.attn.attention"),
         _scores_spec("transformer.h.{layer}.attn.attention"),
     ),
@@ -1145,7 +1896,7 @@ JOINT_QKV_DECODER_ADAPTER = ArchitectureAdapter(
             "transformer.h.{layer}.self_attention.dense",
             activation="split_heads",
         ),
-        _unsupported_result_spec(),
+        _result_spec("transformer.h.{layer}.self_attention.dense"),
         _pattern_spec("transformer.h.{layer}.self_attention"),
         _scores_spec("transformer.h.{layer}.self_attention"),
     ),
@@ -1186,7 +1937,7 @@ MPT_ADAPTER = ArchitectureAdapter(
             "transformer.blocks.{layer}.attn.out_proj",
             activation="split_heads",
         ),
-        _unsupported_result_spec(),
+        _result_spec("transformer.blocks.{layer}.attn.out_proj"),
         _pattern_spec("transformer.blocks.{layer}.attn"),
         _scores_spec("transformer.blocks.{layer}.attn"),
     ),
@@ -1223,7 +1974,7 @@ PHI_ADAPTER = ArchitectureAdapter(
             "model.layers.{layer}.self_attn.o_proj",
             activation="split_heads",
         ),
-        _unsupported_result_spec(),
+        _result_spec("model.layers.{layer}.self_attn.dense", "model.layers.{layer}.self_attn.o_proj"),
         _pattern_spec("model.layers.{layer}.self_attn"),
         _scores_spec("model.layers.{layer}.self_attn"),
     ),
@@ -1264,7 +2015,7 @@ OPT_ADAPTER = ArchitectureAdapter(
             "model.decoder.layers.{layer}.self_attn.out_proj",
             activation="split_heads",
         ),
-        _unsupported_result_spec(),
+        _result_spec("model.decoder.layers.{layer}.self_attn.out_proj"),
         _pattern_spec("model.decoder.layers.{layer}.self_attn"),
         _scores_spec("model.decoder.layers.{layer}.self_attn"),
     ),
@@ -1328,7 +2079,7 @@ BERT_ADAPTER = ArchitectureAdapter(
             "bert.encoder.layer.{layer}.attention.output.dense",
             activation="split_heads",
         ),
-        _unsupported_result_spec(),
+        _result_spec("encoder.layer.{layer}.attention.output.dense", "bert.encoder.layer.{layer}.attention.output.dense"),
         _pattern_spec(
             "encoder.layer.{layer}.attention.self",
             "bert.encoder.layer.{layer}.attention.self",
@@ -1374,7 +2125,7 @@ DISTILBERT_ADAPTER = ArchitectureAdapter(
             "transformer.layer.{layer}.attention.out_lin",
             activation="split_heads",
         ),
-        _unsupported_result_spec(),
+        _result_spec("transformer.layer.{layer}.attention.out_lin"),
         _pattern_spec("transformer.layer.{layer}.attention"),
         _scores_spec("transformer.layer.{layer}.attention"),
     ),
@@ -1414,7 +2165,7 @@ AUDIO_ENCODER_ADAPTER = ArchitectureAdapter(
             "encoder.layers.{layer}.attention.out_proj",
             activation="split_heads",
         ),
-        _unsupported_result_spec(),
+        _result_spec("encoder.layers.{layer}.attention.out_proj"),
         _pattern_spec("encoder.layers.{layer}.attention"),
         _scores_spec("encoder.layers.{layer}.attention"),
     ),
@@ -1454,7 +2205,7 @@ T5_ENCODER_ADAPTER = ArchitectureAdapter(
             "encoder.block.{layer}.layer.0.SelfAttention.o",
             activation="split_heads",
         ),
-        _unsupported_result_spec(),
+        _result_spec("encoder.block.{layer}.layer.0.SelfAttention.o"),
         _pattern_spec("encoder.block.{layer}.layer.0.SelfAttention"),
         _scores_spec("encoder.block.{layer}.layer.0.SelfAttention"),
     ),
