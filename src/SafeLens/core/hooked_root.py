@@ -256,37 +256,33 @@ class HookedRoot:
         cache: ActivationCache | None = None,
     ) -> ActivationCache:
         """Add caching hooks and return the mutable cache."""
-        cache = ActivationCache(has_batch_dim=not remove_batch_dim) if cache is None else cache
+        previous_cache_model = cache.model if cache is not None else None
+        previous_has_batch_dim = cache.has_batch_dim if cache is not None else not remove_batch_dim
+        activation_cache, fwd_hooks, bwd_hooks = self.get_caching_hooks(
+            names_filter,
+            incl_bwd=incl_bwd,
+            detach=detach,
+            clone=clone,
+            device=device,
+            pos_slice=pos_slice,
+            remove_batch_dim=remove_batch_dim,
+            cache=cache,
+        )
         if remove_batch_dim:
-            cache.has_batch_dim = False
-        for name in self._matching_hook_names(names_filter):
-            self.check_and_add_hook(
-                name,
-                make_cache_hook(
-                    cache,
-                    name,
-                    detach=detach,
-                    clone=clone,
-                    device=device,
-                    pos_slice=pos_slice,
-                    remove_batch_dim=remove_batch_dim,
-                ),
-            )
-            if incl_bwd:
-                self.check_and_add_hook(
-                    name,
-                    make_cache_hook(
-                        cache,
-                        f"{name}_grad",
-                        detach=detach,
-                        clone=clone,
-                        device=device,
-                        pos_slice=pos_slice,
-                        remove_batch_dim=remove_batch_dim,
-                    ),
-                    dir="bwd",
-                )
-        return cache
+            activation_cache.has_batch_dim = False
+        handles: list[LensHandle] = []
+        try:
+            for name, hook_fn in fwd_hooks:
+                handles.append(self.check_and_add_hook(name, hook_fn))
+            for name, hook_fn in bwd_hooks:
+                handles.append(self.check_and_add_hook(name, hook_fn, dir="bwd"))
+        except Exception:
+            for handle in reversed(handles):
+                handle.remove()
+            activation_cache.model = previous_cache_model
+            activation_cache.has_batch_dim = previous_has_batch_dim
+            raise
+        return activation_cache
 
     def cache_all(
         self,
@@ -405,21 +401,34 @@ class HookedRoot:
         **kwargs: Any,
     ) -> tuple[Any, ActivationCache]:
         """Run a callable while temporarily caching matching hook-point activations."""
-        cache, fwd_hooks, bwd_hooks = self.get_caching_hooks(
-            names_filter,
-            incl_bwd=incl_bwd,
-            detach=detach,
-            clone=clone,
-            device=device,
-            pos_slice=pos_slice,
-            remove_batch_dim=remove_batch_dim,
-            cache=cache,
+        external_cache = cache
+        previous_cache_model = external_cache.model if external_cache is not None else None
+        previous_has_batch_dim = (
+            external_cache.has_batch_dim if external_cache is not None else not remove_batch_dim
         )
-        level = id(cache)
+        try:
+            activation_cache, fwd_hooks, bwd_hooks = self.get_caching_hooks(
+                names_filter,
+                incl_bwd=incl_bwd,
+                detach=detach,
+                clone=clone,
+                device=device,
+                pos_slice=pos_slice,
+                remove_batch_dim=remove_batch_dim,
+                cache=external_cache,
+            )
+        except Exception:
+            if external_cache is not None:
+                external_cache.model = previous_cache_model
+                external_cache.has_batch_dim = previous_has_batch_dim
+            raise
+        level = id(activation_cache)
         handles: list[LensHandle] = []
+        install_complete = False
         try:
             handles.extend(self._add_hook_specs(fwd_hooks, dir="fwd", level=level))
             handles.extend(self._add_hook_specs(bwd_hooks, dir="bwd", level=level))
+            install_complete = True
             output = run_fn(*args, **kwargs)
             if incl_bwd:
                 backward = getattr(output, "backward", None)
@@ -434,9 +443,12 @@ class HookedRoot:
                     handle.remove()
             if clear_contexts:
                 self.clear_contexts()
+            if not install_complete and external_cache is not None:
+                activation_cache.model = previous_cache_model
+                activation_cache.has_batch_dim = previous_has_batch_dim
         if remove_batch_dim:
-            cache = cache.remove_batch_dim()
-        return output, cache
+            activation_cache = activation_cache.remove_batch_dim()
+        return output, activation_cache
 
     def _add_hook_specs(
         self,

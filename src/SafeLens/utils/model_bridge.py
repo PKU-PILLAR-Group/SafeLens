@@ -10,10 +10,10 @@ from __future__ import annotations
 import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from inspect import Parameter, signature
 from typing import Any, Literal
 
 from SafeLens.core.base import HookFn, LayerRef
+from SafeLens.core.hook_call import call_user_hook
 
 HookMode = Literal["forward_output", "forward_input"]
 ComponentValue = Literal["output", "attention_pattern", "attention_scores"]
@@ -712,34 +712,11 @@ def call_component_hook(
         "architecture": architecture,
         "hook": hook_context,
     }
-    try:
-        hook_signature = signature(hook_fn)
-    except (TypeError, ValueError):
-        return hook_fn(activation, hook_context)
-
-    parameters = hook_signature.parameters.values()
-    if any(param.kind == Parameter.VAR_KEYWORD for param in parameters):
-        return hook_fn(**hook_kwargs)
-
-    parameters = hook_signature.parameters.values()
-    accepted_names = {
-        param.name
-        for param in parameters
-        if param.kind in (Parameter.POSITIONAL_OR_KEYWORD, Parameter.KEYWORD_ONLY)
-    }
-    required_names = {
-        param.name
-        for param in hook_signature.parameters.values()
-        if param.default is Parameter.empty
-        and param.kind in (Parameter.POSITIONAL_OR_KEYWORD, Parameter.KEYWORD_ONLY)
-    }
-    filtered_kwargs = {name: value for name, value in hook_kwargs.items() if name in accepted_names}
-    if required_names.issubset(filtered_kwargs):
-        return hook_fn(**filtered_kwargs)
-    try:
-        return hook_fn(activation, hook_context)
-    except TypeError:
-        return hook_fn(activation)
+    return call_user_hook(
+        hook_fn,
+        hook_kwargs,
+        positional_arg_options=((activation, hook_context), (activation,)),
+    )
 
 
 def extract_component_activation(output: Any, spec: ComponentHookSpec, model: Any) -> Any:

@@ -16,7 +16,10 @@ from SafeLens.utils import (
     supported_transformer_component_names,
 )
 from SafeLens.utils.model_bridge import (
+    ComponentHookContext,
+    ComponentRef,
     ComponentHookSpec,
+    call_component_hook,
     extract_component_activation,
     merge_component_activation,
     reshape_attention_weight,
@@ -855,6 +858,85 @@ def test_architecture_adapter_maps_qwen3_components() -> None:
     assert layer.self_attn.o_proj.run_pre(["x"]) == ["x", "z"]
 
 
+def test_component_hook_accepts_positional_activation_with_extra_kwargs() -> None:
+    ref = ComponentRef(layer=0, component="q", original="layer_0.q")
+
+    def append_metadata(value: list[str], **kwargs: Any) -> list[str]:
+        return value + [kwargs["component"], kwargs["hook"].name]
+
+    output = call_component_hook(
+        append_metadata,
+        activation=["x"],
+        component_ref=ref,
+        architecture="llama_like_decoder",
+    )
+
+    assert output == ["x", "q", "blocks.0.attn.hook_q"]
+
+
+def test_component_hook_passes_activation_and_context_to_variadic_positional_hooks() -> None:
+    ref = ComponentRef(layer=0, component="q", original="layer_0.q")
+    seen: list[tuple[Any, ...]] = []
+
+    def variadic(*args: Any) -> list[str]:
+        seen.append(args)
+        activation, hook = args
+        return activation + [hook.name]
+
+    output = call_component_hook(
+        variadic,
+        activation=["x"],
+        component_ref=ref,
+        architecture="llama_like_decoder",
+    )
+
+    assert output == ["x", "blocks.0.attn.hook_q"]
+    assert len(seen) == 1
+    assert seen[0][0] == ["x"]
+    assert isinstance(seen[0][1], ComponentHookContext)
+    assert seen[0][1].name == "blocks.0.attn.hook_q"
+
+
+def test_component_hook_prefers_keyword_metadata_for_variadic_keyword_hooks() -> None:
+    ref = ComponentRef(layer=0, component="q", original="layer_0.q")
+    seen: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+
+    def variadic(*args: Any, **kwargs: Any) -> list[str]:
+        seen.append((args, kwargs))
+        return kwargs["activation"] + [kwargs["component"], kwargs["hook"].name]
+
+    output = call_component_hook(
+        variadic,
+        activation=["x"],
+        component_ref=ref,
+        architecture="llama_like_decoder",
+    )
+
+    assert output == ["x", "q", "blocks.0.attn.hook_q"]
+    assert len(seen) == 1
+    args, kwargs = seen[0]
+    assert args == ()
+    assert kwargs["activation"] == ["x"]
+    assert kwargs["component"] == "q"
+    assert isinstance(kwargs["hook"], ComponentHookContext)
+
+
+def test_component_hook_propagates_internal_type_errors_with_alternate_names() -> None:
+    ref = ComponentRef(layer=0, component="q", original="layer_0.q")
+
+    def broken(value: list[str], point: ComponentHookContext) -> list[str]:
+        _ = value, point
+        raise TypeError("component hook inner bug")
+
+    with pytest.raises(TypeError, match="component hook inner bug"):
+        call_component_hook(
+            broken,
+            activation=["x"],
+            component_ref=ref,
+            architecture="llama_like_decoder",
+        )
+
+
 def test_architecture_adapter_patches_attention_patterns() -> None:
     torch = pytest.importorskip("torch")
     model = _FakeQwenModel()
@@ -1074,6 +1156,25 @@ def test_transformer_lens_compatible_wrapper_patches_top_level_embedding_hook() 
     expected_pos = wrapper.model.transformer.wpe.weight[torch.tensor([[0, 1]])]
     assert torch.equal(output["logits"], expected_embed + expected_pos)
     assert seen == [("hook_embed", 0)]
+    assert wrapper.model.transformer.wte.forward_hooks == []
+    assert wrapper._hooks == []
+
+
+def test_transformer_lens_compatible_top_level_hook_propagates_internal_type_errors() -> None:
+    wrapper = TransformerLensCompatibleModelWrapper(name="gpt2")
+    wrapper.model = _FakeGpt2EmbeddingModel()
+
+    def broken(value: Any, point: Any) -> Any:
+        _ = value, point
+        raise TypeError("top level hook inner bug")
+
+    with pytest.raises(TypeError, match="top level hook inner bug"):
+        wrapper.run_with_hooks(
+            {"input_ids": [[1, 2]]},
+            fwd_hooks=[("embed", broken)],
+            return_type="model_output",
+        )
+
     assert wrapper.model.transformer.wte.forward_hooks == []
     assert wrapper._hooks == []
 
@@ -1338,6 +1439,28 @@ def test_transformer_lens_compatible_wrapper_call_uses_tokenization_kwargs_for_t
     assert "truncate" not in call
 
 
+def test_transformer_lens_compatible_wrapper_call_tokenizes_tuple_text_batches() -> None:
+    torch = pytest.importorskip("torch")
+
+    class _EchoInputModel(_FakeQwenModel):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls: list[dict[str, Any]] = []
+
+        def __call__(self, **kwargs: Any) -> dict[str, Any]:
+            self.calls.append(kwargs)
+            return {"logits": kwargs["input_ids"]}
+
+    wrapper = TransformerLensCompatibleModelWrapper(name="gpt2")
+    wrapper.tokenizer = _PlainGpt2Tokenizer()
+    wrapper.model = _EchoInputModel()
+
+    logits = wrapper(("a", "bc"), prepend_bos=False, padding_side="left")
+
+    assert torch.equal(logits, wrapper.to_tokens(("a", "bc"), prepend_bos=False, padding_side="left"))
+    assert torch.equal(wrapper.model.calls[0]["attention_mask"], torch.tensor([[0, 1], [1, 1]]))
+
+
 def test_transformer_lens_compatible_wrapper_run_with_cache_uses_tokenization_kwargs_for_text() -> None:
     torch = pytest.importorskip("torch")
 
@@ -1482,6 +1605,87 @@ def test_transformer_lens_compatible_wrapper_both_returns_logits_and_computed_lo
     assert torch.equal(logits, wrapper.model()["logits"])
     assert torch.allclose(loss, expected)
     assert torch.allclose(per_token_loss, expected_per_token)
+
+
+def test_transformer_lens_compatible_wrapper_loss_masks_left_padding_transitions() -> None:
+    torch = pytest.importorskip("torch")
+
+    class _LogitsOnlyQwenModel(_FakeQwenModel):
+        def __call__(self, **kwargs: Any) -> dict[str, Any]:
+            _ = kwargs
+            logits = torch.tensor(
+                [
+                    [
+                        [4.0, 0.0, 0.0],
+                        [0.0, 4.0, 0.0],
+                        [0.0, 0.0, 4.0],
+                    ]
+                ],
+                dtype=torch.float32,
+            )
+            return {"logits": logits}
+
+    wrapper = TransformerLensCompatibleModelWrapper(name="Qwen/Qwen3-8B")
+    wrapper.model = _LogitsOnlyQwenModel()
+
+    per_token_loss = wrapper(
+        {"input_ids": [[0, 1, 2]], "attention_mask": [[0, 1, 1]]},
+        return_type="loss",
+        loss_per_token=True,
+    )
+    loss = wrapper(
+        {"input_ids": [[0, 1, 2]], "attention_mask": [[0, 1, 1]]},
+        return_type="loss",
+    )
+    expected_valid_loss = torch.nn.functional.cross_entropy(
+        torch.tensor([[0.0, 4.0, 0.0]]),
+        torch.tensor([2]),
+    )
+
+    assert torch.allclose(per_token_loss, torch.tensor([[0.0, expected_valid_loss.item()]]))
+    assert torch.allclose(loss, expected_valid_loss)
+
+
+def test_transformer_lens_compatible_run_with_hooks_supports_per_token_loss() -> None:
+    torch = pytest.importorskip("torch")
+
+    class _LogitsOnlyQwenModel(_FakeQwenModel):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls: list[dict[str, Any]] = []
+
+        def __call__(self, **kwargs: Any) -> dict[str, Any]:
+            self.calls.append(kwargs)
+            logits = torch.tensor(
+                [
+                    [
+                        [0.0, 3.0, 0.0],
+                        [0.0, 0.0, 3.0],
+                        [3.0, 0.0, 0.0],
+                    ]
+                ],
+                dtype=torch.float32,
+            )
+            q_out = self.model.layers[0].self_attn.q_proj.run_forward(["q"])
+            return {"logits": logits, "q": q_out}
+
+    wrapper = TransformerLensCompatibleModelWrapper(name="Qwen/Qwen3-8B")
+    wrapper.model = _LogitsOnlyQwenModel()
+
+    per_token_loss = wrapper.run_with_hooks(
+        {"input_ids": [[0, 1, 2]], "attention_mask": [[1, 1, 0]]},
+        fwd_hooks=[("blocks.0.attn.hook_q", lambda **kwargs: kwargs["activation"] + ["patched"])],
+        return_type="loss",
+        loss_per_token=True,
+    )
+
+    expected = torch.nn.functional.cross_entropy(
+        torch.tensor([[0.0, 3.0, 0.0]]),
+        torch.tensor([1]),
+    )
+    assert torch.allclose(per_token_loss, torch.tensor([[expected.item(), 0.0]]))
+    assert "loss_per_token" not in wrapper.model.calls[-1]
+    assert wrapper.model.model.layers[0].self_attn.q_proj.run_forward(["q"]) == ["q"]
 
 
 def test_transformer_lens_compatible_wrapper_call_does_not_cache_token_inputs() -> None:
@@ -1993,6 +2197,46 @@ def test_transformer_lens_compatible_wrapper_hooks_context_is_temporary() -> Non
     assert wrapper.run_with_cache({"input_ids": [[1, 2]]})[0] == {"q": ["q", "permanent"]}
 
 
+def test_transformer_lens_compatible_run_with_hooks_clear_contexts_clears_removed_hook() -> None:
+    wrapper = TransformerLensCompatibleModelWrapper(name="Qwen/Qwen3-8B")
+    wrapper.model = _FakeQwenModel()
+    seen_contexts: list[Any] = []
+
+    def record_context(activation: Any, hook: Any) -> Any:
+        hook.ctx["seen"] = True
+        seen_contexts.append(hook.ctx)
+        return activation
+
+    wrapper.run_with_hooks(
+        {"input_ids": [[1, 2]]},
+        fwd_hooks=[("blocks.0.attn.hook_q", record_context)],
+        clear_contexts=True,
+    )
+
+    assert seen_contexts == [{}]
+    assert wrapper._hooks == []
+
+
+def test_transformer_lens_compatible_hooks_clear_contexts_clears_removed_hook() -> None:
+    wrapper = TransformerLensCompatibleModelWrapper(name="Qwen/Qwen3-8B")
+    wrapper.model = _FakeQwenModel()
+    seen_contexts: list[Any] = []
+
+    def record_context(activation: Any, hook: Any) -> Any:
+        hook.ctx["seen"] = True
+        seen_contexts.append(hook.ctx)
+        return activation
+
+    with wrapper.hooks(
+        fwd_hooks=[("blocks.0.attn.hook_q", record_context)],
+        clear_contexts=True,
+    ):
+        wrapper.run_with_cache({"input_ids": [[1, 2]]})
+
+    assert seen_contexts == [{}]
+    assert wrapper._hooks == []
+
+
 def test_transformer_lens_compatible_wrapper_reset_hooks_can_clear_contexts() -> None:
     wrapper = TransformerLensCompatibleModelWrapper(name="Qwen/Qwen3-8B")
     wrapper.model = _FakeQwenModel()
@@ -2009,6 +2253,25 @@ def test_transformer_lens_compatible_wrapper_reset_hooks_can_clear_contexts() ->
     wrapper.reset_hooks()
 
     assert wrapper.run_with_cache({"input_ids": [[1, 2]]})[0] == {"q": ["q", 1]}
+
+
+def test_transformer_lens_compatible_remove_hooks_clears_removed_permanent_contexts() -> None:
+    wrapper = TransformerLensCompatibleModelWrapper(name="Qwen/Qwen3-8B")
+    wrapper.model = _FakeQwenModel()
+    seen_contexts: list[Any] = []
+
+    def record_context(activation: Any, hook: Any) -> Any:
+        hook.ctx["seen"] = True
+        seen_contexts.append(hook.ctx)
+        return activation
+
+    wrapper.add_perma_hook("blocks.0.attn.hook_q", record_context)
+    wrapper.run_with_cache({"input_ids": [[1, 2]]})
+
+    wrapper.remove_hooks()
+
+    assert seen_contexts == [{}]
+    assert wrapper._hooks == []
 
 
 def test_transformer_lens_compatible_run_with_hooks_attention_flag_is_temporary() -> None:
@@ -2062,6 +2325,8 @@ def test_huggingface_wrapper_allows_tensor_inputs_when_tokenizer_is_missing() ->
     inputs = wrapper._prepare_model_inputs(torch.tensor([1, 2, 3]))
     assert torch.equal(inputs["input_ids"], torch.tensor([[1, 2, 3]]))
     assert wrapper._prepare_model_inputs([1, 2, 3])["input_ids"] == [[1, 2, 3]]
+    assert wrapper._prepare_model_inputs((1, 2, 3))["input_ids"] == [[1, 2, 3]]
+    assert wrapper._prepare_model_inputs([])["input_ids"] == [[]]
     assert wrapper._prepare_model_inputs(7)["input_ids"] == [[7]]
     with pytest.raises(ValueError, match="did not load a tokenizer"):
         wrapper._prepare_model_inputs({"text": "needs tokenizer"})
@@ -2083,6 +2348,10 @@ def test_transformer_lens_decoder_text_inputs_match_to_tokens_semantics() -> Non
     assert torch.equal(
         wrapper._prepare_model_inputs("ab")["input_ids"],
         wrapper.to_tokens("ab"),
+    )
+    assert torch.equal(
+        wrapper._prepare_model_inputs(("a", "bc"))["input_ids"],
+        wrapper.to_tokens(("a", "bc")),
     )
     assert torch.equal(
         wrapper._prepare_model_inputs({"text": "ab", "prepend_bos": False})["input_ids"],
@@ -2602,6 +2871,56 @@ def test_transformer_lens_compatible_wrapper_residual_directions() -> None:
     directions = wrapper.tokens_to_residual_directions(torch.tensor([[0, 2]]))
 
     assert torch.equal(directions, torch.tensor([[[1.0, 10.0], [3.0, 30.0]]]))
+
+
+def test_transformer_lens_compatible_wrapper_residual_directions_for_python_tokens_with_torch_weight() -> None:
+    torch = pytest.importorskip("torch")
+    wrapper = TransformerLensCompatibleModelWrapper(name="gpt2")
+    weight = torch.tensor(
+        [
+            [1.0, 10.0],
+            [2.0, 20.0],
+            [3.0, 30.0],
+        ]
+    )
+    wrapper.model = _FakeUnembeddingModel(weight)
+
+    list_directions = wrapper.tokens_to_residual_directions([[0, 2], [1, 0]])
+    tuple_directions = wrapper.tokens_to_residual_directions(((0, 2), (1, 0)))
+
+    expected = torch.tensor(
+        [
+            [[1.0, 10.0], [3.0, 30.0]],
+            [[2.0, 20.0], [1.0, 10.0]],
+        ]
+    )
+    assert torch.equal(list_directions, expected)
+    assert torch.equal(tuple_directions, expected)
+
+
+def test_transformer_lens_compatible_wrapper_residual_directions_for_python_tokens_with_numpy_weight() -> None:
+    np = pytest.importorskip("numpy")
+    wrapper = TransformerLensCompatibleModelWrapper(name="gpt2")
+    weight = np.array(
+        [
+            [1.0, 10.0],
+            [2.0, 20.0],
+            [3.0, 30.0],
+        ]
+    )
+    wrapper.model = _FakeUnembeddingModel(weight)
+
+    directions = wrapper.tokens_to_residual_directions([[0, 2], [1, 0]])
+
+    assert np.array_equal(
+        directions,
+        np.array(
+            [
+                [[1.0, 10.0], [3.0, 30.0]],
+                [[2.0, 20.0], [1.0, 10.0]],
+            ]
+        ),
+    )
 
 
 def test_transformer_lens_compatible_wrapper_residual_directions_for_list_tokens() -> None:

@@ -33,6 +33,7 @@ from SafeLens.core.patching import (
     get_act_patch_block_every,
     get_act_patch_resid_pre,
     infer_heads,
+    infer_positions,
     get_indexed,
     layer_head_dest_src_pos_pattern_patch_setter,
     layer_head_pattern_patch_setter,
@@ -289,6 +290,70 @@ def test_hook_point_accepts_single_argument_hooks() -> None:
     hook.add_hook(lambda activation: activation + [1])
 
     assert hook([0]) == [0, 1]
+
+
+def test_hook_point_accepts_alternate_positional_hook_names() -> None:
+    hook = HookPoint("blocks.0.hook_resid_pre")
+
+    def append_layer(value: list[int], point: HookPoint) -> list[int]:
+        return value + [point.layer()]
+
+    hook.add_hook(append_layer)
+
+    assert hook([0]) == [0, 0]
+
+
+def test_hook_point_accepts_positional_activation_with_extra_kwargs() -> None:
+    hook = HookPoint("blocks.2.hook_resid_pre")
+
+    def append_metadata(value: list[int], **kwargs: Any) -> list[int]:
+        return value + [kwargs["hook"].layer(), kwargs["output"][0]]
+
+    hook.add_hook(append_metadata)
+
+    assert hook([9]) == [9, 2, 9]
+
+
+def test_hook_point_passes_activation_and_hook_to_variadic_positional_hooks() -> None:
+    hook = HookPoint("blocks.3.hook_resid_pre")
+    seen: list[tuple[Any, ...]] = []
+
+    def variadic(*args: Any) -> list[int]:
+        seen.append(args)
+        activation, point = args
+        return activation + [point.layer()]
+
+    hook.add_hook(variadic)
+
+    assert hook([0]) == [0, 3]
+    assert seen == [([0], hook)]
+
+
+def test_hook_point_prefers_keyword_metadata_for_variadic_keyword_hooks() -> None:
+    hook = HookPoint("blocks.4.hook_resid_pre")
+    seen: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+
+    def variadic(*args: Any, **kwargs: Any) -> list[int]:
+        seen.append((args, kwargs))
+        return kwargs["activation"] + [kwargs["hook"].layer(), kwargs["output"][0]]
+
+    hook.add_hook(variadic)
+
+    assert hook([9]) == [9, 4, 9]
+    assert seen == [((), {"activation": [9], "output": [9], "hook": hook})]
+
+
+def test_hook_point_propagates_internal_type_errors_with_alternate_names() -> None:
+    hook = HookPoint("blocks.0.hook_resid_pre")
+
+    def broken(value: list[int], point: HookPoint) -> list[int]:
+        _ = value, point
+        raise TypeError("inner hook bug")
+
+    hook.add_hook(broken)
+
+    with pytest.raises(TypeError, match="inner hook bug"):
+        hook([0])
 
 
 def test_model_wrapper_reset_hooks_alias_uses_remove_hooks() -> None:
@@ -926,6 +991,32 @@ def test_activation_cache_stack_head_results_auto_computes_from_z() -> None:
     ]
 
 
+def test_activation_cache_stack_head_results_computes_missing_result_layers_from_z() -> None:
+    cache = ActivationCache(
+        {
+            "layer_0.result": [[[[1, 10], [2, 20]]]],
+            "layer_1.z": [[[[3, 4], [5, 6]]]],
+        },
+        model=HeadResultModel(
+            W_O=[
+                [[[0, 0], [0, 0]], [[0, 0], [0, 0]]],
+                [[[1, 0], [0, 1]], [[1, 2], [3, 4]]],
+            ]
+        ),
+    )
+
+    head_stack, labels = cache.stack_head_results(return_labels=True)
+
+    assert labels == ["L0H0", "L0H1", "L1H0", "L1H1"]
+    assert head_stack == [
+        [[[1, 10]]],
+        [[[2, 20]]],
+        [[[3.0, 4.0]]],
+        [[[23.0, 34.0]]],
+    ]
+    assert cache["layer_1.result"] == [[[[3.0, 4.0], [23.0, 34.0]]]]
+
+
 def test_activation_cache_stack_head_results_auto_computes_from_z_without_batch_dim() -> None:
     cache = ActivationCache(
         {
@@ -977,6 +1068,18 @@ def test_activation_cache_stack_head_results_layer_zero_returns_empty_stack() ->
     assert head_stack == []
 
 
+def test_activation_cache_stack_head_results_requires_result_for_remainder() -> None:
+    cache = ActivationCache(
+        {
+            "layer_0.q": [[[[1, 2]]]],
+            "layer_0.resid_post": [[[3, 4]]],
+        }
+    )
+
+    with pytest.raises(ValueError, match="residual-space `result`"):
+        cache.stack_head_results(component="q", incl_remainder=True)
+
+
 def test_activation_cache_empty_head_and_neuron_stacks_preserve_torch_shape() -> None:
     torch = pytest.importorskip("torch")
     cache = ActivationCache({"hook_embed": torch.zeros(1, 3, 2)})
@@ -1010,8 +1113,8 @@ def test_activation_cache_full_residual_decomposition_and_logit_attrs() -> None:
     stack, labels = cache.get_full_resid_decomposition(return_labels=True)
     attrs = cache.logit_attrs([[1, 2], [3, 4]], [[10, 1], [1, 10]], apply_ln=False)
 
-    assert labels == ["L0H0", "L0N0", "L0N1", "embed"]
-    assert stack == [[[[2, 0]]], [[0]], [[3]], [[1, 0]]]
+    assert labels == ["L0H0", "embed"]
+    assert stack == [[[[2, 0]]], [[1, 0]]]
     assert attrs == [12.0, 43.0]
 
 
@@ -1235,6 +1338,18 @@ def test_activation_cache_stack_neuron_results_projects_after_layernorm() -> Non
     assert stack == [[[-3.0]], [[-4.0]]]
 
 
+def test_activation_cache_stack_neuron_results_requires_output_weights_for_remainder() -> None:
+    cache = ActivationCache(
+        {
+            "layer_0.post": [[[3, 5]]],
+            "layer_0.resid_post": [[[11, 16]]],
+        }
+    )
+
+    with pytest.raises(ValueError, match="W_out"):
+        cache.stack_neuron_results(incl_remainder=True)
+
+
 def test_activation_cache_head_and_neuron_stacks_support_remainder_and_layernorm() -> None:
     cache = ActivationCache(
         {
@@ -1275,6 +1390,22 @@ def test_activation_cache_full_decomposition_falls_back_to_layer_outputs() -> No
     stack, labels = cache.get_full_resid_decomposition(return_labels=True)
 
     assert labels == ["0_attn_out", "0_mlp_out", "embed"]
+    assert stack == [[[[2, 0]]], [[[0, 3]]], [[[1, 0]]]]
+
+
+def test_activation_cache_full_decomposition_uses_mlp_out_without_output_weights() -> None:
+    cache = ActivationCache(
+        {
+            "hook_embed": [[[1, 0]]],
+            "layer_0.result": [[[[2, 0]]]],
+            "layer_0.post": [[[10, 20, 30]]],
+            "layer_0.mlp_out": [[[0, 3]]],
+        }
+    )
+
+    stack, labels = cache.get_full_resid_decomposition(return_labels=True)
+
+    assert labels == ["L0H0", "0_mlp_out", "embed"]
     assert stack == [[[[2, 0]]], [[[0, 3]]], [[[1, 0]]]]
 
 
@@ -1642,6 +1773,19 @@ def test_dummy_wrapper_accepts_activation_hook_signature() -> None:
     assert cache["layer_0"] == {"patched": {"text": "hello"}, "hook": None}
 
 
+def test_dummy_wrapper_propagates_internal_type_errors_with_activation_signature() -> None:
+    model = DummyModelWrapper()
+
+    def broken(value: dict[str, Any], hook: Any) -> dict[str, Any]:
+        _ = value, hook
+        raise TypeError("dummy hook inner bug")
+
+    model.add_hook(0, broken)
+
+    with pytest.raises(TypeError, match="dummy hook inner bug"):
+        model.run_with_cache({"text": "hello"}, layers=[0])
+
+
 def test_dummy_wrapper_accepts_transformerlens_cache_options() -> None:
     model = DummyModelWrapper()
 
@@ -1885,6 +2029,54 @@ def test_generic_activation_patch_transformerlens_call_defaults_to_metric_grid()
     assert grid == [[1.0, 2.0]]
 
 
+def test_generic_activation_patch_propagates_internal_type_errors_from_tl_setter() -> None:
+    model = ComponentWrapper([[[0], [0]]])
+    model.n_layers = 1
+    clean_cache = ActivationCache({"blocks.0.hook_resid_pre": [[[1], [2]]]})
+
+    def broken_tl_setter(
+        corrupted_activation: Any,
+        index: Sequence[int],
+        clean_activation: Any,
+    ) -> Any:
+        _ = corrupted_activation, index, clean_activation
+        raise TypeError("setter inner bug")
+
+    with pytest.raises(TypeError, match="setter inner bug"):
+        generic_activation_patch(
+            model,
+            {"activation": [[[0], [0]]]},
+            clean_cache,
+            patching_metric=lambda output: _nested_sum(output["activation"]),
+            patch_setter=broken_tl_setter,
+            activation_name="resid_pre",
+            index_axis_names=("layer", "pos"),
+        )
+
+
+def test_generic_activation_patch_propagates_type_errors_from_ambiguous_setter() -> None:
+    model = ComponentWrapper([[[0], [0]]])
+    model.n_layers = 1
+    clean_cache = ActivationCache({"blocks.0.hook_resid_pre": [[[1], [2]]]})
+
+    def ambiguous_setter(corrupted_activation: Any, second: Any, third: Any) -> Any:
+        _ = third
+        if isinstance(second, tuple):
+            raise TypeError("ambiguous setter inner bug")
+        return corrupted_activation
+
+    with pytest.raises(TypeError, match="ambiguous setter inner bug"):
+        generic_activation_patch(
+            model,
+            {"activation": [[[0], [0]]]},
+            clean_cache,
+            patching_metric=lambda output: _nested_sum(output["activation"]),
+            patch_setter=ambiguous_setter,
+            activation_name="resid_pre",
+            index_axis_names=("layer", "pos"),
+        )
+
+
 def test_generic_activation_patch_transformerlens_call_infers_layers_from_safelens_cache() -> None:
     model = ComponentWrapper([[[0], [0]]])
     clean_cache = ActivationCache({"layer_0.resid_pre": [[[1], [2]]]})
@@ -2109,6 +2301,74 @@ def test_generic_activation_patch_accepts_make_df_from_ranges_output() -> None:
 
     assert metrics == [3.0, 4.0]
     assert index_table == [{"layer": 0, "pos": 0}, {"layer": 0, "pos": 1}]
+
+
+def test_component_activation_patch_infers_index_shape_from_requested_layers() -> None:
+    model = ComponentMapWrapper(
+        {
+            "layer_1.resid_pre": [[[0], [0], [0], [0]]],
+        }
+    )
+    clean_cache = ActivationCache(
+        {
+            "layer_0.resid_pre": [[[1], [2]]],
+            "layer_1.resid_pre": [[[10], [20], [30], [40]]],
+        }
+    )
+
+    results = get_act_patch_resid_pre(
+        model,
+        {},
+        clean_cache,
+        metric=lambda output: _nested_sum(output["activation"]),
+        layers=[1],
+        return_details=True,
+    )
+
+    assert [result.spec.target_index for result in results] == [
+        (1, 0),
+        (1, 1),
+        (1, 2),
+        (1, 3),
+    ]
+    assert [result.metric for result in results] == [10.0, 20.0, 30.0, 40.0]
+
+
+def test_infer_positions_accepts_direct_token_inputs() -> None:
+    assert infer_positions(11, ActivationCache(), "resid_pre", [0]) == 1
+    assert infer_positions([11, 12, 13], ActivationCache(), "resid_pre", [0]) == 3
+    assert infer_positions([[11, 12], [13, 14]], ActivationCache(), "resid_pre", [0]) == 2
+    assert infer_positions({"input_ids": 11}, ActivationCache(), "resid_pre", [0]) == 1
+    assert infer_positions({"input_ids": [11, 12, 13]}, ActivationCache(), "resid_pre", [0]) == 3
+    assert infer_positions(
+        {"tokens": [[11, 12, 13]]},
+        ActivationCache(),
+        "resid_pre",
+        [0],
+    ) == 3
+
+
+def test_infer_positions_accepts_embedding_inputs() -> None:
+    assert infer_positions(
+        {"inputs_embeds": [[[0.0, 0.1], [1.0, 1.1], [2.0, 2.1]]]},
+        ActivationCache(),
+        "resid_pre",
+        [0],
+    ) == 3
+    assert infer_positions(
+        {"inputs_embeds": [[0.0, 0.1], [1.0, 1.1]]},
+        ActivationCache(),
+        "resid_pre",
+        [0],
+    ) == 2
+
+
+def test_infer_positions_does_not_treat_raw_text_as_tokens() -> None:
+    with pytest.raises(ValueError, match="positions"):
+        infer_positions("hello", ActivationCache(), "resid_pre", [0])
+
+    with pytest.raises(ValueError, match="positions"):
+        infer_positions(["hello", "world"], ActivationCache(), "resid_pre", [0])
 
 
 def test_generic_activation_patch_rejects_index_axis_names_with_explicit_index_table() -> None:

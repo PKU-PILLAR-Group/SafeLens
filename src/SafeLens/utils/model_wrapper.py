@@ -23,6 +23,7 @@ from SafeLens.core.factored_matrix import (
     shape_of,
     transpose,
 )
+from SafeLens.core.hook_call import call_user_hook
 from SafeLens.core.hooks import (
     ActivationCache,
     NamesFilter,
@@ -391,35 +392,12 @@ def _call_dummy_hook(
         "output": activation,
         "hook": None,
     }
-    try:
-        hook_signature = signature(hook_fn)
-    except (TypeError, ValueError):
-        return hook_fn(**hook_kwargs)
-
-    parameters = hook_signature.parameters.values()
-    if any(param.kind == Parameter.VAR_KEYWORD for param in parameters):
-        return hook_fn(**hook_kwargs)
-
-    parameters = hook_signature.parameters.values()
-    accepted_names = {
-        param.name
-        for param in parameters
-        if param.kind in (Parameter.POSITIONAL_OR_KEYWORD, Parameter.KEYWORD_ONLY)
-    }
-    required_names = {
-        param.name
-        for param in hook_signature.parameters.values()
-        if param.default is Parameter.empty
-        and param.kind in (Parameter.POSITIONAL_OR_KEYWORD, Parameter.KEYWORD_ONLY)
-    }
-    filtered_kwargs = {name: value for name, value in hook_kwargs.items() if name in accepted_names}
-    if required_names.issubset(filtered_kwargs):
-        return hook_fn(**filtered_kwargs)
-
-    try:
-        return hook_fn(activation, None)
-    except TypeError:
-        return hook_fn(None, None, activation)
+    return call_user_hook(
+        hook_fn,
+        hook_kwargs,
+        positional_arg_options=((activation, None), (None, None, activation), (activation,)),
+        uninspectable="kwargs",
+    )
 
 
 class HuggingFaceModelWrapper(ModelWrapper):
@@ -937,6 +915,7 @@ class HuggingFaceModelWrapper(ModelWrapper):
         reset_hooks_end: bool = True,
         clear_contexts: bool = False,
         return_type: str | None | object = _DEFAULT_RETURN_TYPE,
+        loss_per_token: bool = False,
     ) -> Any:
         """Run one forward pass with temporary hooks, mirroring TransformerLens."""
         if list(bwd_hooks):
@@ -948,7 +927,11 @@ class HuggingFaceModelWrapper(ModelWrapper):
         try:
             for layer, hook_fn in self._expand_hook_specs(fwd_hooks):
                 handles.append(self._add_managed_hook(layer, hook_fn))
-            return self._run_model_forward(batch, return_type=return_type)
+            return self._run_model_forward(
+                batch,
+                return_type=return_type,
+                loss_per_token=loss_per_token,
+            )
         finally:
             if reset_hooks_end:
                 for handle in reversed(handles):
@@ -956,6 +939,7 @@ class HuggingFaceModelWrapper(ModelWrapper):
                     if callable(remove):
                         remove()
                 if clear_contexts:
+                    self._clear_hook_contexts_for_handles(handles)
                     self.clear_contexts()
 
     @contextmanager
@@ -985,6 +969,7 @@ class HuggingFaceModelWrapper(ModelWrapper):
                     if callable(remove):
                         remove()
                 if clear_contexts:
+                    self._clear_hook_contexts_for_handles(handles)
                     self.clear_contexts()
 
     def _run_model_forward(
@@ -1510,6 +1495,7 @@ class HuggingFaceModelWrapper(ModelWrapper):
         try:
             if isinstance(weight, list):
                 return _gather_list_residual_directions(weight, tokens)
+            tokens = _coerce_tokens_for_weight_index(weight, tokens)
             return weight[tokens]
         except Exception as exc:
             raise RuntimeError(
@@ -1530,18 +1516,25 @@ class HuggingFaceModelWrapper(ModelWrapper):
     ) -> None:
         """Remove wrapper-managed hooks using TransformerLens reset semantics."""
         _ = direction, dir
+        removed_handles: list[_ManagedWrapperHookHandle] = []
         for handle in reversed(list(self._hooks)):
             if handle.is_permanent and not including_permanent:
                 continue
             if level is not None and handle.level != level:
                 continue
+            removed_handles.append(handle)
             handle.remove()
         if clear_contexts:
+            self._clear_hook_contexts_for_handles(removed_handles)
             self.clear_contexts()
 
     def clear_contexts(self) -> None:
         """Clear mutable context dictionaries on component hook objects."""
-        for handle in list(self._hooks):
+        self._clear_hook_contexts_for_handles(list(self._hooks))
+
+    @staticmethod
+    def _clear_hook_contexts_for_handles(handles: Iterable[Any]) -> None:
+        for handle in handles:
             for hook_context in getattr(handle, "hook_contexts", ()):
                 clear = getattr(getattr(hook_context, "ctx", None), "clear", None)
                 if callable(clear):
@@ -2749,35 +2742,12 @@ def _call_qwen3_component_hook(
         "hook_name": component_ref.safelens_name,
         "transformer_lens_name": component_ref.transformer_lens_name,
     }
-    try:
-        hook_signature = signature(hook_fn)
-    except (TypeError, ValueError):
-        return hook_fn(**hook_kwargs)
-
-    parameters = hook_signature.parameters.values()
-    if any(param.kind == Parameter.VAR_KEYWORD for param in parameters):
-        return hook_fn(**hook_kwargs)
-
-    parameters = hook_signature.parameters.values()
-    accepted_names = {
-        param.name
-        for param in parameters
-        if param.kind in (Parameter.POSITIONAL_OR_KEYWORD, Parameter.KEYWORD_ONLY)
-    }
-    required_names = {
-        param.name
-        for param in hook_signature.parameters.values()
-        if param.default is Parameter.empty
-        and param.kind in (Parameter.POSITIONAL_OR_KEYWORD, Parameter.KEYWORD_ONLY)
-    }
-    filtered_kwargs = {name: value for name, value in hook_kwargs.items() if name in accepted_names}
-    if required_names.issubset(filtered_kwargs):
-        return hook_fn(**filtered_kwargs)
-
-    try:
-        return hook_fn(activation, hook_context)
-    except TypeError:
-        return hook_fn(None, None, activation)
+    return call_user_hook(
+        hook_fn,
+        hook_kwargs,
+        positional_arg_options=((activation, hook_context), (None, None, activation), (activation,)),
+        uninspectable="kwargs",
+    )
 
 
 def _qwen3_hook_context(layer: int, component: str) -> ComponentHookContext:
@@ -2998,7 +2968,12 @@ def _prepare_text_inputs_with_to_tokens(
 
 
 def _is_text_batch(value: Any) -> bool:
-    return isinstance(value, list) and all(isinstance(item, str) for item in value)
+    return (
+        isinstance(value, Sequence)
+        and not isinstance(value, str | bytes)
+        and bool(value)
+        and all(isinstance(item, str) for item in value)
+    )
 
 
 def _looks_like_input_embeds(value: Any) -> bool:
@@ -3329,10 +3304,13 @@ def _normalize_model_batch(batch: Any) -> dict[str, Any]:
         return dict(batch)
     if isinstance(batch, str):
         return {"text": batch}
+    if _is_text_batch(batch):
+        return {"text": batch}
     if _looks_like_token_ids(batch):
         return {"input_ids": _ensure_token_batch_dim(batch)}
     raise TypeError(
-        "Model inputs must be a mapping, text string, or token ids shaped [pos] or [batch, pos]."
+        "Model inputs must be a mapping, text string or batch, or token ids shaped "
+        "[pos] or [batch, pos]."
     )
 
 
@@ -3496,34 +3474,11 @@ def _call_top_level_hook(
         "transformer_lens_name": hook_name,
         "hook": hook_context,
     }
-    try:
-        hook_signature = signature(hook_fn)
-    except (TypeError, ValueError):
-        return hook_fn(activation, hook_context)
-
-    parameters = hook_signature.parameters.values()
-    if any(param.kind == Parameter.VAR_KEYWORD for param in parameters):
-        return hook_fn(**hook_kwargs)
-
-    parameters = hook_signature.parameters.values()
-    accepted_names = {
-        param.name
-        for param in parameters
-        if param.kind in (Parameter.POSITIONAL_OR_KEYWORD, Parameter.KEYWORD_ONLY)
-    }
-    required_names = {
-        param.name
-        for param in hook_signature.parameters.values()
-        if param.default is Parameter.empty
-        and param.kind in (Parameter.POSITIONAL_OR_KEYWORD, Parameter.KEYWORD_ONLY)
-    }
-    filtered_kwargs = {name: value for name, value in hook_kwargs.items() if name in accepted_names}
-    if required_names.issubset(filtered_kwargs):
-        return hook_fn(**filtered_kwargs)
-    try:
-        return hook_fn(activation, hook_context)
-    except TypeError:
-        return hook_fn(activation)
+    return call_user_hook(
+        hook_fn,
+        hook_kwargs,
+        positional_arg_options=((activation, hook_context), (activation,)),
+    )
 
 
 def _candidate_hook_names(model: Any, adapter: Any, *, for_cache: bool | None = None) -> list[str]:
@@ -3779,7 +3734,9 @@ def _extract_or_compute_loss(
                 attention_mask = torch.as_tensor(attention_mask, device=logits.device)
             else:
                 attention_mask = attention_mask.to(logits.device)
-            loss_mask = attention_mask[:, 1:].to(dtype=per_token_loss.dtype)
+            loss_mask = (attention_mask[:, :-1].bool() & attention_mask[:, 1:].bool()).to(
+                dtype=per_token_loss.dtype
+            )
             if loss_per_token:
                 return per_token_loss * loss_mask
             denominator = loss_mask.sum().clamp_min(1)
@@ -4217,6 +4174,33 @@ def _gather_list_residual_directions(weight: list[Any], tokens: Any) -> Any:
     if callable(item):
         return list(weight[int(item())])
     return list(weight[int(tokens)])
+
+
+def _coerce_tokens_for_weight_index(weight: Any, tokens: Any) -> Any:
+    """Convert Python token containers into backend index arrays before advanced indexing."""
+    if isinstance(tokens, Integral):
+        return int(tokens)
+    item = getattr(tokens, "item", None)
+    shape = getattr(tokens, "shape", None)
+    if callable(item) and shape is not None and len(tuple(int(dim) for dim in shape)) == 0:
+        return int(item())
+    if not isinstance(tokens, Sequence) or isinstance(tokens, str | bytes):
+        return tokens
+    try:
+        import torch
+
+        if isinstance(weight, torch.Tensor):
+            return torch.as_tensor(tokens, dtype=torch.long, device=weight.device)
+    except Exception:
+        pass
+    try:
+        import numpy as np
+
+        if isinstance(weight, np.ndarray):
+            return np.asarray(tokens, dtype=np.int64)
+    except Exception:
+        pass
+    return tokens
 
 
 def _wrapper_looks_like_local_path(value: str) -> bool:

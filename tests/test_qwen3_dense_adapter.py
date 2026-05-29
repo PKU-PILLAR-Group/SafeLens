@@ -283,6 +283,32 @@ def test_qwen3_component_hooks_receive_transformerlens_hook_context() -> None:
     assert seen == [("blocks.0.hook_mlp_out", 0)]
 
 
+def test_qwen3_component_hooks_accept_positional_activation_with_extra_kwargs() -> None:
+    wrapper = _wrapper_with_fake_model()
+    layer = wrapper.model.model.layers[0]
+
+    def append_metadata(value: list[str], **kwargs: Any) -> list[str]:
+        return value + [kwargs["component"], kwargs["hook"].name]
+
+    wrapper.add_hook("layer_0.mlp_out", append_metadata)
+
+    assert layer.mlp.run_forward(["x"]) == ["x", "mlp_out", "blocks.0.hook_mlp_out"]
+
+
+def test_qwen3_component_hooks_propagate_internal_type_errors_with_alternate_names() -> None:
+    wrapper = _wrapper_with_fake_model()
+    layer = wrapper.model.model.layers[0]
+
+    def broken(value: list[str], point: Any) -> list[str]:
+        _ = value, point
+        raise TypeError("qwen3 hook inner bug")
+
+    wrapper.add_hook("layer_0.mlp_out", broken)
+
+    with pytest.raises(TypeError, match="qwen3 hook inner bug"):
+        layer.mlp.run_forward(["x"])
+
+
 def test_qwen3_component_hook_context_persists_across_calls() -> None:
     wrapper = _wrapper_with_fake_model()
 

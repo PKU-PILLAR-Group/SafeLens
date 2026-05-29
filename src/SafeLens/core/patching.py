@@ -7,6 +7,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from inspect import Parameter, signature
 from itertools import product
+from numbers import Integral
 from typing import Any, Literal
 
 from SafeLens.core.base import Batch, HookFn, LayerRef, ModelWrapper
@@ -533,13 +534,10 @@ def adapt_transformer_lens_patch_setter(
             return patch_setter(corrupted_activation, spec, clean_cache)
         if call_style == "transformer_lens":
             return patch_setter(corrupted_activation, index, clean_activation)
-        try:
-            return patch_setter(corrupted_activation, index, clean_activation)
-        except (AttributeError, TypeError, IndexError, KeyError, AssertionError) as tl_error:
-            try:
-                return patch_setter(corrupted_activation, spec, clean_cache)
-            except (AttributeError, TypeError, IndexError, KeyError, AssertionError):
-                raise tl_error
+        inferred_call_style = infer_patch_setter_bind_style(patch_setter)
+        if inferred_call_style == "safelens":
+            return patch_setter(corrupted_activation, spec, clean_cache)
+        return patch_setter(corrupted_activation, index, clean_activation)
 
     return setter
 
@@ -576,6 +574,36 @@ def infer_patch_setter_call_style(
     }:
         return "transformer_lens"
     return None
+
+
+def infer_patch_setter_bind_style(
+    patch_setter: PatchSetter | TransformerLensPatchSetter,
+) -> Literal["safelens", "transformer_lens"]:
+    """Infer an ambiguous patch setter style without executing user code."""
+    try:
+        setter_signature = signature(patch_setter)
+    except (TypeError, ValueError):
+        return "transformer_lens"
+
+    try:
+        setter_signature.bind(None, (), None)
+    except TypeError:
+        tl_binds = False
+    else:
+        tl_binds = True
+    try:
+        setter_signature.bind(None, _BIND_STYLE_PATCH_SPEC_SENTINEL, ActivationCache())
+    except TypeError:
+        safelens_binds = False
+    else:
+        safelens_binds = True
+
+    if not tl_binds and safelens_binds:
+        return "safelens"
+    return "transformer_lens"
+
+
+_BIND_STYLE_PATCH_SPEC_SENTINEL = PatchSpec(layer=0)
 
 
 def component_activation_patch(
@@ -1998,7 +2026,7 @@ def _normalize_patch_component(component: str) -> str:
 
 
 def infer_positions(
-    corrupted_batch: Batch,
+    corrupted_batch: Any,
     clean_cache: ActivationCache,
     component: str,
     layers: Sequence[LayerRef],
@@ -2017,13 +2045,70 @@ def infer_positions(
         if len(shape) >= (2 if has_batch_dim else 1):
             return int(shape[1 if has_batch_dim else 0])
 
-    for key in ("input_ids", "tokens"):
-        if key in corrupted_batch:
-            shape = shape_of(corrupted_batch[key])
-            if len(shape) >= 2:
-                return int(shape[-1])
+    batch_positions = infer_positions_from_batch(corrupted_batch)
+    if batch_positions is not None:
+        return batch_positions
 
     raise ValueError("Could not infer positions. Pass `positions=[...]` explicitly.")
+
+
+def infer_positions_from_batch(batch: Any) -> int | None:
+    """Infer token positions from tokenized or embedded batch inputs."""
+    if isinstance(batch, Mapping):
+        for key in ("input_ids", "tokens", "token_ids"):
+            if key in batch:
+                positions = token_positions_from_value(batch[key])
+                if positions is not None:
+                    return positions
+        for key in ("inputs_embeds", "input_embeds", "embeds"):
+            if key in batch:
+                positions = embed_positions_from_shape(shape_of(batch[key]))
+                if positions is not None:
+                    return positions
+        return None
+
+    if is_text_batch(batch):
+        return None
+    return token_positions_from_value(batch)
+
+
+def token_positions_from_value(value: Any) -> int | None:
+    """Return sequence length from token-id values, including scalar ids."""
+    if isinstance(value, Integral):
+        return 1
+    shape = shape_of(value)
+    if shape:
+        return token_positions_from_shape(shape)
+    if getattr(value, "shape", None) is not None:
+        return 1
+    return None
+
+
+def token_positions_from_shape(shape: Sequence[int]) -> int | None:
+    """Return sequence length from token-id shapes `[pos]` or `[batch, pos]`."""
+    if len(shape) == 1:
+        return int(shape[0])
+    if len(shape) >= 2:
+        return int(shape[-1])
+    return None
+
+
+def embed_positions_from_shape(shape: Sequence[int]) -> int | None:
+    """Return sequence length from embedding shapes `[pos, d_model]` or `[batch, pos, d_model]`."""
+    if len(shape) >= 2:
+        return int(shape[-2])
+    return None
+
+
+def is_text_batch(value: Any) -> bool:
+    """Return whether a value is raw text rather than token ids."""
+    if isinstance(value, str | bytes):
+        return True
+    if isinstance(value, Sequence) and not isinstance(value, str | bytes):
+        if not value:
+            return False
+        return isinstance(value[0], str | bytes)
+    return False
 
 
 def infer_heads(
@@ -2154,11 +2239,20 @@ def first_component_activation(
     layers: Sequence[LayerRef],
 ) -> Any:
     """Return the first activation matching a component and layer list."""
+    layer_set = {_coerce_int_layer(layer) for layer in layers}
+    layer_set.discard(None)
     if component in clean_cache:
-        return clean_cache[component]
+        explicit_ref = _explicit_activation_ref(component)
+        if explicit_ref is None or explicit_ref[0] in layer_set or not layer_set:
+            return clean_cache[component]
+        return None
+    explicit_layer: int | None = None
     explicit_ref = _explicit_activation_ref(component)
     if explicit_ref is not None:
+        explicit_layer = explicit_ref[0]
         component = explicit_ref[1]
+        if layer_set and explicit_layer not in layer_set:
+            return None
     candidate_names = [
         activation_name_for_component(component, layer, name_style="safelens") for layer in layers
     ]
@@ -2173,10 +2267,21 @@ def first_component_activation(
         parsed = _layer_and_component_from_cache_name(name)
         if parsed is None:
             continue
-        _layer, cache_component = parsed
+        layer, cache_component = parsed
+        if layer_set and layer not in layer_set:
+            continue
+        if explicit_layer is not None and layer != explicit_layer:
+            continue
         if _normalize_patch_component(cache_component) == _normalize_patch_component(component):
             return activation
     return None
+
+
+def _coerce_int_layer(layer: Any) -> int | None:
+    try:
+        return int(layer)
+    except (TypeError, ValueError):
+        return None
 
 
 def shape_of(value: Any) -> tuple[int, ...]:

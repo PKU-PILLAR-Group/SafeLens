@@ -190,6 +190,71 @@ def test_hooked_root_caching_helpers_mark_empty_remove_batch_dim_cache() -> None
     assert persistent_cache.to_dict() == {}
 
 
+def test_hooked_root_add_caching_hooks_rolls_back_external_cache_metadata() -> None:
+    root = HookedRoot()
+    resid = root.add_hook_point("blocks.0.hook_resid_pre")
+    original_model = object()
+    external_cache = ActivationCache({"existing": [1]}, model=original_model)
+
+    original_check_and_add = root.check_and_add_hook
+    calls = 0
+
+    def fail_after_first_add(*args: Any, **kwargs: Any) -> Any:
+        nonlocal calls
+        calls += 1
+        if calls > 1:
+            raise RuntimeError("boom")
+        return original_check_and_add(*args, **kwargs)
+
+    root.check_and_add_hook = fail_after_first_add  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError, match="boom"):
+        root.add_caching_hooks(
+            "blocks.0.hook_resid_pre",
+            incl_bwd=True,
+            remove_batch_dim=True,
+            cache=external_cache,
+        )
+
+    assert not resid.has_hooks()
+    assert external_cache.model is original_model
+    assert external_cache.has_batch_dim is True
+    assert external_cache.to_dict() == {"existing": [1]}
+
+
+def test_hooked_root_run_with_cache_rolls_back_external_cache_metadata_on_install_failure() -> None:
+    root = HookedRoot()
+    resid = root.add_hook_point("blocks.0.hook_resid_pre")
+    original_model = object()
+    external_cache = ActivationCache({"existing": [1]}, model=original_model)
+
+    original_check_and_add = root.check_and_add_hook
+    calls = 0
+
+    def fail_after_first_add(*args: Any, **kwargs: Any) -> Any:
+        nonlocal calls
+        calls += 1
+        if calls > 1:
+            raise RuntimeError("boom")
+        return original_check_and_add(*args, **kwargs)
+
+    root.check_and_add_hook = fail_after_first_add  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError, match="boom"):
+        root.run_with_cache(
+            lambda: resid([1]),
+            names_filter="blocks.0.hook_resid_pre",
+            incl_bwd=True,
+            remove_batch_dim=True,
+            cache=external_cache,
+        )
+
+    assert not resid.has_hooks()
+    assert external_cache.model is original_model
+    assert external_cache.has_batch_dim is True
+    assert external_cache.to_dict() == {"existing": [1]}
+
+
 def test_hooked_root_names_filters_match_equivalent_safelens_names() -> None:
     root = HookedRoot()
     q_hook = root.add_hook_point("blocks.0.attn.hook_q")

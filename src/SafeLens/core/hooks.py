@@ -7,10 +7,10 @@ from collections.abc import Callable, Iterable, Iterator, MutableMapping, Sequen
 from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass
-from inspect import Parameter, signature
 from typing import Any, Literal, Protocol
 
 from SafeLens.core.base import Batch, HookFn, LayerRef, ModelWrapper
+from SafeLens.core.hook_call import call_user_hook
 
 NamesFilter = str | Sequence[str] | Callable[[str], bool] | None
 ActivationKey = str | tuple[Any, ...]
@@ -630,9 +630,14 @@ class ActivationCache(MutableMapping[Any, Any]):
         component: str = "result",
     ) -> Any:
         """Stack per-head activations from `[batch, pos, head, d_model]` caches."""
+        if incl_remainder and component != "result":
+            raise ValueError(
+                "incl_remainder=True requires residual-space `result` head activations."
+            )
         target_layer = self._normalize_layer(layer)
-        if component == "result" and not any(
-            (component, current_layer) in self for current_layer in range(target_layer)
+        if component == "result" and any(
+            ("z", current_layer) in self and (component, current_layer) not in self
+            for current_layer in range(target_layer)
         ):
             try:
                 self.compute_head_results(target_layer, store=True)
@@ -769,6 +774,7 @@ class ActivationCache(MutableMapping[Any, Any]):
         project_output_onto: Any = None,
         *,
         component: str = "post",
+        require_output_weight: bool = False,
     ) -> Any:
         """Stack per-neuron MLP residual contributions when `W_out` is available."""
         target_layer = self._normalize_layer(layer)
@@ -796,7 +802,7 @@ class ActivationCache(MutableMapping[Any, Any]):
                     else -2
                 )
             except ValueError:
-                if project_output_onto is not None:
+                if project_output_onto is not None or require_output_weight or incl_remainder:
                     raise
                 layer_results = _select_indices_dim(activation, neuron_indices, dim=-1)
                 neuron_dim = -1
@@ -894,9 +900,10 @@ class ActivationCache(MutableMapping[Any, Any]):
                     target_layer,
                     pos_slice=pos_slice,
                     return_labels=True,
+                    require_output_weight=True,
                 )
                 add_stack(neuron_stack, neuron_labels)
-            except KeyError:
+            except (KeyError, ValueError):
                 try:
                     mlp_stack, mlp_labels = self.decompose_resid(
                         target_layer,
@@ -1260,36 +1267,11 @@ def stack_values(values: Sequence[Any]) -> Any:
 
 
 def _call_hookpoint_fn(hook_fn: HookFn, activation: Any, hook: HookPoint) -> Any:
-    hook_kwargs = {"activation": activation, "output": activation, "hook": hook}
-    try:
-        hook_signature = signature(hook_fn)
-    except (TypeError, ValueError):
-        return hook_fn(activation, hook)
-
-    parameters = hook_signature.parameters.values()
-    if any(param.kind == Parameter.VAR_KEYWORD for param in parameters):
-        return hook_fn(**hook_kwargs)
-
-    parameters = hook_signature.parameters.values()
-    accepted_names = {
-        param.name
-        for param in parameters
-        if param.kind in (Parameter.POSITIONAL_OR_KEYWORD, Parameter.KEYWORD_ONLY)
-    }
-    required_names = {
-        param.name
-        for param in hook_signature.parameters.values()
-        if param.default is Parameter.empty
-        and param.kind in (Parameter.POSITIONAL_OR_KEYWORD, Parameter.KEYWORD_ONLY)
-    }
-    filtered_kwargs = {name: value for name, value in hook_kwargs.items() if name in accepted_names}
-    if required_names.issubset(filtered_kwargs):
-        return hook_fn(**filtered_kwargs)
-
-    try:
-        return hook_fn(activation, hook)
-    except TypeError:
-        return hook_fn(**hook_kwargs)
+    return call_user_hook(
+        hook_fn,
+        {"activation": activation, "output": activation, "hook": hook},
+        positional_arg_options=((activation, hook), (activation,)),
+    )
 
 
 def _alias_hook_fn(
