@@ -8,6 +8,8 @@ from typing import Any
 import pytest
 
 from SafeLens.core.base import PipelineConfig
+from SafeLens.core.analysis import compute_head_results_from_z, direct_logit_attribution
+from SafeLens.core.hooks import ActivationCache
 from SafeLens.pipelines.runner import PipelineRunner
 from SafeLens.utils import HuggingFaceModelWrapper, build_model_wrapper
 
@@ -33,6 +35,7 @@ def _cache_dir() -> str:
 
 def test_huggingface_wrapper_real_model_forward_cache_and_generate() -> None:
     _skip_unless_enabled()
+    torch = pytest.importorskip("torch")
 
     config = PipelineConfig.model_validate(
         {
@@ -63,6 +66,21 @@ def test_huggingface_wrapper_real_model_forward_cache_and_generate() -> None:
             assert getattr(activation, "shape", None) is not None
             assert activation.shape[0] == 1
 
+        output, embed_cache = wrapper.run_with_cache(
+            {"id": "hf-embed", "text": "SafeLens checks real model hooks."},
+            layers=["hook_embed", "hook_pos_embed", "blocks.0.hook_resid_pre"],
+            return_cache_object=True,
+        )
+
+        assert isinstance(embed_cache, ActivationCache)
+        assert embed_cache.has_embed
+        assert embed_cache.has_pos_embed
+        assert embed_cache["hook_embed"].shape[:2] == output.logits.shape[:2]
+        assert torch.allclose(
+            embed_cache[("resid_pre", 0)],
+            embed_cache["hook_embed"] + embed_cache["hook_pos_embed"],
+        )
+
         generated = wrapper.generate(
             "SafeLens",
             max_new_tokens=2,
@@ -72,6 +90,69 @@ def test_huggingface_wrapper_real_model_forward_cache_and_generate() -> None:
 
         assert isinstance(generated, str)
         assert generated.startswith("SafeLens")
+    finally:
+        wrapper.remove_hooks()
+
+
+def test_huggingface_wrapper_real_direct_logit_attribution_workflow() -> None:
+    _skip_unless_enabled()
+    torch = pytest.importorskip("torch")
+    np = pytest.importorskip("numpy")
+
+    config = PipelineConfig.model_validate(
+        {
+            "model": {
+                "source": "huggingface",
+                "name": _MODEL_ID,
+                "device": "cpu",
+                "dtype": "float32",
+                "cache_dir": _cache_dir(),
+                "load_kwargs": {"low_cpu_mem_usage": False},
+            }
+        }
+    )
+    wrapper = build_model_wrapper(config.model)
+
+    assert isinstance(wrapper, HuggingFaceModelWrapper)
+    wrapper.load_model()
+    try:
+        output, cache_dict = wrapper.run_with_cache(
+            {"id": "hf-dla", "text": "SafeLens checks direct logit attribution."},
+            layers=("layer_0.z", "layer_0.result"),
+        )
+        cache = ActivationCache(cache_dict, model=wrapper)
+        z = cache["layer_0.z"]
+        result = cache["layer_0.result"]
+
+        assert output.logits.ndim == 3
+        assert torch.allclose(compute_head_results_from_z(z, wrapper.W_O[0]), result)
+
+        target_token = int(output.logits[0, -1].argmax())
+        direction = wrapper.tokens_to_residual_directions(target_token)
+        logit_attrs = cache.logit_attrs(result, target_token, directions=direction, apply_ln=False)
+        token_text = wrapper.to_single_str_token(target_token)
+
+        assert logit_attrs.shape == result.shape[:-1]
+        assert torch.allclose(logit_attrs, direct_logit_attribution(result, direction))
+        assert wrapper.to_str_tokens(torch.tensor(target_token)) == [token_text]
+        assert wrapper.to_str_tokens(np.array(target_token)) == [token_text]
+        previous_pad_token = getattr(wrapper.tokenizer, "pad_token", None)
+        previous_pad_token_id = getattr(wrapper.tokenizer, "pad_token_id", None)
+        batch_tokens = wrapper.to_tokens(
+            ["SafeLens", "SafeLens real tokenizer"],
+            prepend_bos=False,
+        )
+        assert batch_tokens.shape[0] == 2
+        assert getattr(wrapper.tokenizer, "pad_token", None) == previous_pad_token
+        assert getattr(wrapper.tokenizer, "pad_token_id", None) == previous_pad_token_id
+        assert isinstance(
+            wrapper.get_token_position(
+                target_token,
+                torch.tensor([target_token]),
+                padding_side="left",
+            ),
+            int,
+        )
     finally:
         wrapper.remove_hooks()
 

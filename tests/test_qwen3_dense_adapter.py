@@ -123,6 +123,38 @@ class _FakeQwen3CausalLM:
         return {"first": first, "second": second}
 
 
+class _FakeGatedMlp:
+    def __init__(self) -> None:
+        self.gate_proj = _FakeModule()
+        self.up_proj = _FakeModule()
+        self.down_proj = _FakeModule()
+
+
+class _FakeGatedLayer(_FakeLayer):
+    def __init__(self) -> None:
+        super().__init__()
+        self.mlp = _FakeGatedMlp()
+
+
+class _FakeGatedBackbone:
+    def __init__(self) -> None:
+        self.layers = [_FakeGatedLayer()]
+
+
+class _FakeGatedQwen3CausalLM(_FakeQwen3CausalLM):
+    def __init__(self) -> None:
+        self.model = _FakeGatedBackbone()
+        self.config = _FakeConfig()
+
+    def __call__(self, **kwargs: Any) -> dict[str, Any]:
+        _ = kwargs
+        mlp = self.model.layers[0].mlp
+        gate = mlp.gate_proj.run_forward(["gate"])
+        linear = mlp.up_proj.run_forward(["linear"])
+        post = mlp.down_proj.run_pre(["post"])
+        return {"gate": gate, "linear": linear, "post": post}
+
+
 def _wrapper_with_fake_model() -> Qwen3DenseModelWrapper:
     wrapper = Qwen3DenseModelWrapper(name="Qwen/Qwen3-8B")
     wrapper.model = _FakeQwen3CausalLM()
@@ -157,6 +189,9 @@ def test_qwen3_component_name_parser_supports_safe_and_transformerlens_styles() 
     assert parse_qwen3_component_ref("layer_1.q") == (1, "q")
     assert parse_qwen3_component_ref("blocks.2.attn.hook_q") == (2, "q")
     assert parse_qwen3_component_ref("blocks.3.hook_mlp_out") == (3, "mlp_out")
+    assert parse_qwen3_component_ref("blocks.4.mlp.hook_pre") == (4, "pre")
+    assert parse_qwen3_component_ref("blocks.5.mlp.hook_pre_linear") == (5, "pre_linear")
+    assert parse_qwen3_component_ref("blocks.6.mlp.hook_post") == (6, "post")
     assert parse_qwen3_component_ref("model.layers.0") is None
 
 
@@ -188,6 +223,39 @@ def test_qwen3_attention_and_mlp_component_hooks_patch_outputs() -> None:
     assert layer.self_attn.q_proj.run_forward(["x"]) == ["x", "q"]
     assert layer.self_attn.k_proj.run_forward(["x"]) == ["x", "k"]
     assert layer.self_attn.o_proj.run_pre(["x"]) == ["x", "z"]
+
+
+def test_qwen3_gated_mlp_internal_hooks_patch_pre_linear_and_post() -> None:
+    wrapper = Qwen3DenseModelWrapper(name="Qwen/Qwen3-8B")
+    wrapper.model = _FakeGatedQwen3CausalLM()
+
+    wrapper.add_hook("blocks.0.mlp.hook_pre", lambda **kwargs: kwargs["activation"] + ["pre"])
+    wrapper.add_hook(
+        "blocks.0.mlp.hook_pre_linear",
+        lambda **kwargs: kwargs["activation"] + ["pre_linear"],
+    )
+    wrapper.add_hook("blocks.0.mlp.hook_post", lambda **kwargs: kwargs["activation"] + ["post"])
+
+    output = wrapper.run_with_cache({"input_ids": [[1, 2]]})[0]
+
+    assert output == {
+        "gate": ["gate", "pre"],
+        "linear": ["linear", "pre_linear"],
+        "post": ["post", "post"],
+    }
+
+
+def test_qwen3_run_with_cache_captures_gated_mlp_pre_linear() -> None:
+    wrapper = Qwen3DenseModelWrapper(name="Qwen/Qwen3-8B")
+    wrapper.model = _FakeGatedQwen3CausalLM()
+
+    output, cache = wrapper.run_with_cache(
+        {"input_ids": [[1, 2]]},
+        layers=["blocks.0.mlp.hook_pre_linear"],
+    )
+
+    assert output == {"gate": ["gate"], "linear": ["linear"], "post": ["post"]}
+    assert cache == {"blocks.0.mlp.hook_pre_linear": ["linear"]}
 
 
 def test_qwen3_component_hooks_accept_standard_activation_hook_signature() -> None:
@@ -247,6 +315,25 @@ def test_qwen3_run_with_hooks_does_not_keep_temporary_handles() -> None:
     assert wrapper.model.model.layers[0].mlp.run_forward(["x"]) == ["x"]
 
 
+def test_qwen3_run_with_hooks_accepts_transformerlens_shorthand_name() -> None:
+    class _QProjectionQwen3CausalLM(_FakeQwen3CausalLM):
+        def __call__(self, **kwargs: Any) -> dict[str, Any]:
+            _ = kwargs
+            q_out = self.model.layers[0].self_attn.q_proj.run_forward(["q"])
+            return {"q": q_out}
+
+    wrapper = Qwen3DenseModelWrapper(name="Qwen/Qwen3-8B")
+    wrapper.model = _QProjectionQwen3CausalLM()
+
+    output = wrapper.run_with_hooks(
+        {"input_ids": [[1, 2]]},
+        fwd_hooks=[("q0", lambda **kwargs: kwargs["activation"] + ["patched"])],
+    )
+
+    assert output == {"q": ["q", "patched"]}
+    assert wrapper.model.model.layers[0].self_attn.q_proj.run_forward(["q"]) == ["q"]
+
+
 def test_qwen3_run_with_hooks_token_inputs_do_not_add_default_cache_hooks() -> None:
     torch = pytest.importorskip("torch")
 
@@ -289,6 +376,22 @@ def test_qwen3_run_with_cache_component_hooks_do_not_patch_outputs() -> None:
 
     assert output == {"first": ["first"], "second": ["second"]}
     assert cache == {"layer_0.mlp_out": ["second"]}
+
+
+def test_qwen3_run_with_cache_layers_accept_transformerlens_shorthand_name() -> None:
+    class _QProjectionQwen3CausalLM(_FakeQwen3CausalLM):
+        def __call__(self, **kwargs: Any) -> dict[str, Any]:
+            _ = kwargs
+            q_out = self.model.layers[0].self_attn.q_proj.run_forward(["q"])
+            return {"q": q_out}
+
+    wrapper = Qwen3DenseModelWrapper(name="Qwen/Qwen3-8B")
+    wrapper.model = _QProjectionQwen3CausalLM()
+
+    output, cache = wrapper.run_with_cache({"input_ids": [[1, 2]]}, layers=["q0"])
+
+    assert output == {"q": ["q"]}
+    assert cache == {"blocks.0.attn.hook_q": ["q"]}
 
 
 def test_qwen3_run_with_cache_accepts_names_filter_and_cache_object() -> None:
@@ -599,6 +702,17 @@ def test_qwen3_add_hook_patches_derived_attention_result() -> None:
     output, _cache = wrapper.run_with_cache({"z": z})
 
     assert torch.equal(output["attn_out"], z - original_result.sum(dim=-2))
+
+
+def test_qwen3_add_hook_accepts_transformerlens_shorthand_name() -> None:
+    wrapper = _wrapper_with_fake_model()
+
+    wrapper.add_hook("q0", lambda **kwargs: kwargs["activation"] + ["patched"])
+
+    assert wrapper.model.model.layers[0].self_attn.q_proj.run_forward(["q"]) == [
+        "q",
+        "patched",
+    ]
 
 
 def test_qwen3_run_with_cache_captures_attention_scores() -> None:

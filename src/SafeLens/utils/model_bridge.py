@@ -26,6 +26,9 @@ CANONICAL_TRANSFORMER_COMPONENTS: tuple[str, ...] = (
     "resid_post",
     "attn_out",
     "mlp_out",
+    "pre",
+    "pre_linear",
+    "post",
     "q",
     "k",
     "v",
@@ -293,6 +296,35 @@ class ArchitectureAdapter:
             ),
         )
 
+    def get_attention_bias(self, model: Any, component: str, layer: int) -> Any:
+        """Return a TransformerLens-shaped attention bias for one layer."""
+        component_ref = self._make_ref(layer, component, component)
+        if component_ref is None:
+            raise KeyError(f"Unknown attention component {component!r}.")
+        spec = self._spec_for_ref(component_ref, for_cache=True)
+        module = self.get_component(model, component_ref)
+        bias = getattr(module, "bias", None)
+        if bias is None:
+            return zeros_for_attention_bias(model, component)
+        if spec.activation == "split_qkv_heads":
+            return reshape_joint_qkv_attention_bias(
+                bias,
+                component=component,
+                q_heads=head_count_for_component(model, "q"),
+                kv_heads=head_count_for_component(model, "k"),
+                qkv_layout=spec.qkv_layout,
+            )
+        if spec.activation != "split_heads":
+            raise NotImplementedError(
+                f"{self.name} cannot expose b_{component.upper()} from "
+                f"{spec.activation!r} projections yet."
+            )
+        return reshape_attention_bias(
+            bias,
+            component=component,
+            n_heads=head_count_for_component(model, component),
+        )
+
     def get_embedding_weight(self, model: Any, *, positional: bool = False) -> Any:
         """Return token or positional embedding weights for common Transformers layouts."""
         paths = (
@@ -319,27 +351,56 @@ class ArchitectureAdapter:
     def get_mlp_weight(self, model: Any, component: str, layer: int) -> Any:
         """Return a TransformerLens-shaped MLP weight matrix for one layer."""
         if component == "in":
+            paths = self._mlp_weight_paths(
+                layer,
+                canonical_component="pre_linear",
+                fallback_component="pre",
+            )
+        elif component == "gate":
             paths = (
                 f"model.layers.{layer}.mlp.gate_proj",
-                f"model.layers.{layer}.mlp.up_proj",
-                f"transformer.h.{layer}.mlp.c_fc",
-                f"gpt_neox.layers.{layer}.mlp.dense_h_to_4h",
-                f"model.decoder.layers.{layer}.fc1",
+                f"model.layers.{layer}.mlp.gate",
+                f"model.layers.{layer}.mlp.w1",
             )
         elif component == "out":
-            paths = (
-                f"model.layers.{layer}.mlp.down_proj",
-                f"transformer.h.{layer}.mlp.c_proj",
-                f"gpt_neox.layers.{layer}.mlp.dense_4h_to_h",
-                f"model.decoder.layers.{layer}.fc2",
-            )
+            paths = self._mlp_weight_paths(layer, canonical_component="post")
         else:
             raise ValueError(f"Unsupported MLP weight component {component!r}.")
         weight = _weight_from_first_path(model, paths, kind=f"MLP {component} weight")
-        return weight.T if hasattr(weight, "T") and getattr(weight, "ndim", 0) == 2 else weight
+        return transpose_2d_weight(weight)
+
+    def get_mlp_bias(self, model: Any, component: str, layer: int) -> Any:
+        """Return a TransformerLens-shaped MLP bias vector for one layer."""
+        if component == "in":
+            paths = self._mlp_weight_paths(
+                layer,
+                canonical_component="pre_linear",
+                fallback_component="pre",
+            )
+        elif component == "out":
+            paths = self._mlp_weight_paths(layer, canonical_component="post")
+        else:
+            raise ValueError(f"Unsupported MLP bias component {component!r}.")
+        return _bias_from_first_path(model, paths, kind=f"MLP {component} bias")
+
+    def _mlp_weight_paths(
+        self,
+        layer: int,
+        *,
+        canonical_component: str,
+        fallback_component: str | None = None,
+    ) -> tuple[str, ...]:
+        spec = self._specs.get(canonical_component)
+        if spec is None and fallback_component is not None:
+            spec = self._specs.get(fallback_component)
+        if spec is None:
+            raise KeyError(
+                f"{self.name!r} does not declare MLP component {canonical_component!r}."
+            )
+        return tuple(template.format(layer=layer) for template in spec.module_paths)
 
     def _make_ref(self, layer: int, component: str, original: LayerRef) -> ComponentRef | None:
-        normalized = _normalize_component(component)
+        normalized = component if component in self._aliases else _normalize_component(component)
         if normalized not in self._aliases:
             return None
         return ComponentRef(layer=layer, component=self._aliases[normalized], original=original)
@@ -390,12 +451,63 @@ def _weight_from_first_path(model: Any, paths: Sequence[str], *, kind: str) -> A
     raise KeyError(f"Could not resolve {kind}. Tried module paths: {attempted_paths}.")
 
 
+def _bias_from_first_path(model: Any, paths: Sequence[str], *, kind: str) -> Any:
+    attempted: list[str] = []
+    for path in paths:
+        attempted.append(path)
+        try:
+            module = resolve_module_path(model, path)
+        except (AttributeError, IndexError, KeyError, TypeError):
+            continue
+        bias = getattr(module, "bias", None)
+        if bias is not None:
+            return bias
+        weight = getattr(module, "weight", None)
+        if weight is not None:
+            return zeros_like_last_dim(weight, axis=0)
+    attempted_paths = ", ".join(attempted)
+    raise KeyError(f"Could not resolve {kind}. Tried module paths: {attempted_paths}.")
+
+
+def transpose_2d_weight(weight: Any) -> Any:
+    """Return a rank-2 weight transposed without requiring tensor dependencies."""
+    if hasattr(weight, "T") and getattr(weight, "ndim", 0) == 2:
+        return weight.T
+    if isinstance(weight, list):
+        shape = _nested_shape(weight)
+        if len(shape) != 2:
+            return weight
+        return [list(column) for column in zip(*weight, strict=True)]
+    return weight
+
+
+def zeros_like_last_dim(value: Any, *, axis: int = -1) -> Any:
+    shape = getattr(value, "shape", None)
+    if shape is not None:
+        try:
+            import torch
+
+            return torch.zeros(
+                int(shape[axis]),
+                dtype=getattr(value, "dtype", None),
+                device=getattr(value, "device", None),
+            )
+        except ImportError:
+            pass
+    nested_shape = _nested_shape(value)
+    if not nested_shape:
+        return 0
+    if axis < 0:
+        axis = len(nested_shape) + axis
+    return [0 for _ in range(nested_shape[axis])]
+
+
 def transformer_lens_component_name(component: str, layer: int) -> str:
     """Return a TransformerLens-style hook name for a canonical component."""
     if component in {"q", "k", "v", "z", "pattern", "attn_scores", "result"}:
         hook_component = "attn_scores" if component == "attn_scores" else component
         return f"blocks.{layer}.attn.hook_{hook_component}"
-    if component in {"pre", "post"}:
+    if component in {"pre", "pre_linear", "post"}:
         return f"blocks.{layer}.mlp.hook_{component}"
     return f"blocks.{layer}.hook_{component}"
 
@@ -823,7 +935,15 @@ def split_heads(activation: Any, n_heads: int) -> Any:
     shape = getattr(activation, "shape", None)
     reshape = getattr(activation, "reshape", None)
     if shape is None or not callable(reshape):
-        return activation
+        if not isinstance(activation, list):
+            return activation
+        nested_shape = _nested_shape(activation)
+        if len(nested_shape) < 3:
+            return activation
+        hidden_size = nested_shape[-1]
+        if n_heads <= 0 or hidden_size % n_heads != 0:
+            return activation
+        return _split_nested_last_dim(activation, n_heads)
     if len(shape) < 3:
         return activation
     hidden_size = int(shape[-1])
@@ -839,7 +959,14 @@ def merge_heads(activation: Any, reference: Any) -> Any:
     shape = getattr(activation, "shape", None)
     reshape = getattr(activation, "reshape", None)
     reference_shape = getattr(reference, "shape", None)
-    if shape is None or not callable(reshape) or len(shape) < 4:
+    if shape is None or not callable(reshape):
+        if not isinstance(activation, list):
+            return activation
+        nested_shape = _nested_shape(activation)
+        if len(nested_shape) < 4:
+            return activation
+        return _merge_nested_last_two_dims(activation)
+    if len(shape) < 4:
         return activation
     hidden_size = int(shape[-2]) * int(shape[-1])
     if reference_shape is not None:
@@ -888,12 +1015,16 @@ def merge_qkv_heads(
     patched = clone_tensor_like(reference)
     target = {"q": 0, "k": 1, "v": 2}[component]
     start, stop = split_qkv_slice_bounds(reference, q_heads=q_heads, kv_heads=kv_heads)[target]
+    if getattr(patched, "shape", None) is None:
+        return _replace_nested_last_dim_slice(patched, start, stop, merged_component)
     patched[..., start:stop] = merged_component
     return patched
 
 
 def split_qkv_slices(activation: Any, *, q_heads: int, kv_heads: int) -> tuple[Any, Any, Any]:
     bounds = split_qkv_slice_bounds(activation, q_heads=q_heads, kv_heads=kv_heads)
+    if getattr(activation, "shape", None) is None:
+        return tuple(_slice_nested_last_dim(activation, start, stop) for start, stop in bounds)
     return tuple(activation[..., start:stop] for start, stop in bounds)
 
 
@@ -904,10 +1035,16 @@ def split_qkv_slice_bounds(
     kv_heads: int,
 ) -> tuple[tuple[int, int], tuple[int, int], tuple[int, int]]:
     shape = getattr(activation, "shape", None)
-    if shape is None:
-        raise ValueError("Cannot split a joint QKV activation without a shape.")
     total_heads = q_heads + 2 * kv_heads
-    hidden_size = int(shape[-1])
+    if shape is None:
+        if not isinstance(activation, list):
+            raise ValueError("Cannot split a joint QKV activation without a shape.")
+        nested_shape = _nested_shape(activation)
+        if not nested_shape:
+            raise ValueError("Cannot split a joint QKV activation without a shape.")
+        hidden_size = nested_shape[-1]
+    else:
+        hidden_size = int(shape[-1])
     if total_heads <= 0 or hidden_size % total_heads != 0:
         raise ValueError(
             "Cannot split joint QKV activation with final dimension "
@@ -929,6 +1066,14 @@ def split_interleaved_qkv_heads(
 ) -> Any:
     qkv = interleaved_qkv_view(activation, q_heads=q_heads, kv_heads=kv_heads)
     component_index = {"q": 0, "k": 1, "v": 2}[component]
+    if isinstance(qkv, list):
+        if q_heads != kv_heads and component_index in {1, 2}:
+            offset = -2 if component == "k" else -1
+            return _select_nested_penultimate_dim(qkv, offset)
+        if q_heads != kv_heads:
+            q_per_group = qkv_group_size(q_heads=q_heads, kv_heads=kv_heads)
+            return _merge_nested_grouped_query_heads(qkv, q_per_group)
+        return _select_nested_penultimate_dim(qkv, component_index)
     if q_heads != kv_heads and component_index in {1, 2}:
         offset = -2 if component == "k" else -1
         return qkv[..., offset, :]
@@ -948,6 +1093,25 @@ def merge_interleaved_qkv_heads(
 ) -> Any:
     qkv = clone_tensor_like(interleaved_qkv_view(reference, q_heads=q_heads, kv_heads=kv_heads))
     component_index = {"q": 0, "k": 1, "v": 2}[component]
+    if isinstance(qkv, list):
+        if q_heads != kv_heads and component_index in {1, 2}:
+            offset = -2 if component == "k" else -1
+            return _flatten_nested_interleaved_qkv(
+                _replace_nested_penultimate_dim(qkv, offset, activation)
+            )
+        if q_heads != kv_heads:
+            q_per_group = qkv_group_size(q_heads=q_heads, kv_heads=kv_heads)
+            grouped_activation = _split_nested_grouped_query_heads(
+                activation,
+                kv_heads,
+                q_per_group,
+            )
+            return _flatten_nested_interleaved_qkv(
+                _replace_nested_grouped_query_heads(qkv, grouped_activation, q_per_group)
+            )
+        return _flatten_nested_interleaved_qkv(
+            _replace_nested_penultimate_dim(qkv, component_index, activation)
+        )
     if q_heads != kv_heads and component_index in {1, 2}:
         offset = -2 if component == "k" else -1
         qkv[..., offset, :] = activation
@@ -963,7 +1127,31 @@ def interleaved_qkv_view(activation: Any, *, q_heads: int, kv_heads: int) -> Any
     shape = getattr(activation, "shape", None)
     reshape = getattr(activation, "reshape", None)
     if shape is None or not callable(reshape):
-        return activation
+        if not isinstance(activation, list):
+            return activation
+        nested_shape = _nested_shape(activation)
+        if not nested_shape:
+            return activation
+        hidden_size = nested_shape[-1]
+        if q_heads == kv_heads:
+            total_heads = q_heads
+            if total_heads <= 0 or hidden_size % (3 * total_heads) != 0:
+                raise ValueError(
+                    "Cannot split interleaved QKV activation with final dimension "
+                    f"{hidden_size} into {total_heads} heads."
+                )
+            head_dim = hidden_size // (3 * total_heads)
+            return _reshape_nested_last_dim(activation, total_heads, 3, head_dim)
+
+        total_groups = q_heads + 2 * kv_heads
+        if total_groups <= 0 or hidden_size % total_groups != 0:
+            raise ValueError(
+                "Cannot split grouped interleaved QKV activation with final dimension "
+                f"{hidden_size}, q_heads={q_heads}, kv_heads={kv_heads}."
+            )
+        q_per_group = qkv_group_size(q_heads=q_heads, kv_heads=kv_heads)
+        head_dim = hidden_size // total_groups
+        return _reshape_nested_last_dim(activation, kv_heads, q_per_group + 2, head_dim)
     hidden_size = int(shape[-1])
     if q_heads == kv_heads:
         total_heads = q_heads
@@ -981,8 +1169,9 @@ def interleaved_qkv_view(activation: Any, *, q_heads: int, kv_heads: int) -> Any
             "Cannot split grouped interleaved QKV activation with final dimension "
             f"{hidden_size}, q_heads={q_heads}, kv_heads={kv_heads}."
         )
+    q_per_group = qkv_group_size(q_heads=q_heads, kv_heads=kv_heads)
     head_dim = hidden_size // total_groups
-    return activation.reshape(*shape[:-1], kv_heads, (q_heads // kv_heads) + 2, head_dim)
+    return activation.reshape(*shape[:-1], kv_heads, q_per_group + 2, head_dim)
 
 
 def clone_tensor_like(value: Any) -> Any:
@@ -995,22 +1184,367 @@ def clone_tensor_like(value: Any) -> Any:
     return value
 
 
+def _split_nested_last_dim(value: Any, n_heads: int) -> Any:
+    shape = _nested_shape(value)
+    if len(shape) == 1:
+        head_dim = shape[0] // n_heads
+        return [
+            list(value[head_index * head_dim : (head_index + 1) * head_dim])
+            for head_index in range(n_heads)
+        ]
+    return [_split_nested_last_dim(item, n_heads) for item in value]
+
+
+def _merge_nested_last_two_dims(value: Any) -> Any:
+    shape = _nested_shape(value)
+    if len(shape) == 2:
+        merged: list[Any] = []
+        for item in value:
+            merged.extend(item)
+        return merged
+    return [_merge_nested_last_two_dims(item) for item in value]
+
+
+def _slice_nested_last_dim(value: Any, start: int, stop: int) -> Any:
+    shape = _nested_shape(value)
+    if len(shape) == 1:
+        return list(value[start:stop])
+    return [_slice_nested_last_dim(item, start, stop) for item in value]
+
+
+def _replace_nested_last_dim_slice(value: Any, start: int, stop: int, replacement: Any) -> Any:
+    shape = _nested_shape(value)
+    if len(shape) == 1:
+        return [*value[:start], *replacement, *value[stop:]]
+    return [
+        _replace_nested_last_dim_slice(item, start, stop, replacement_item)
+        for item, replacement_item in zip(value, replacement, strict=True)
+    ]
+
+
+def _reshape_nested_last_dim(value: Any, *dims: int) -> Any:
+    shape = _nested_shape(value)
+    if len(shape) == 1:
+        values = list(value)
+        return _reshape_flat_list(values, dims)
+    return [_reshape_nested_last_dim(item, *dims) for item in value]
+
+
+def _reshape_flat_list(values: list[Any], dims: tuple[int, ...]) -> Any:
+    if not dims:
+        if len(values) != 1:
+            raise ValueError("Cannot reshape list: scalar target has multiple values.")
+        return values[0]
+    dim = dims[0]
+    if dim <= 0:
+        raise ValueError(f"Cannot reshape list with non-positive dimension {dim}.")
+    if len(dims) == 1:
+        if len(values) != dim:
+            raise ValueError(f"Cannot reshape {len(values)} values into shape {dims}.")
+        return list(values)
+    stride = _product(dims[1:])
+    if len(values) != dim * stride:
+        raise ValueError(f"Cannot reshape {len(values)} values into shape {dims}.")
+    return [
+        _reshape_flat_list(values[index * stride : (index + 1) * stride], dims[1:])
+        for index in range(dim)
+    ]
+
+
+def _select_nested_penultimate_dim(value: Any, index: int) -> Any:
+    shape = _nested_shape(value)
+    if len(shape) == 2:
+        return list(value[index])
+    return [_select_nested_penultimate_dim(item, index) for item in value]
+
+
+def _replace_nested_penultimate_dim(value: Any, index: int, replacement: Any) -> Any:
+    shape = _nested_shape(value)
+    if len(shape) == 2:
+        replaced = [list(item) for item in value]
+        replaced[index] = list(replacement)
+        return replaced
+    return [
+        _replace_nested_penultimate_dim(item, index, replacement_item)
+        for item, replacement_item in zip(value, replacement, strict=True)
+    ]
+
+
+def _merge_nested_grouped_query_heads(value: Any, q_per_group: int) -> Any:
+    shape = _nested_shape(value)
+    if len(shape) == 3:
+        merged: list[Any] = []
+        for group in value:
+            for head in group[:q_per_group]:
+                merged.append(list(head))
+        return merged
+    return [_merge_nested_grouped_query_heads(item, q_per_group) for item in value]
+
+
+def _split_nested_grouped_query_heads(value: Any, kv_heads: int, q_per_group: int) -> Any:
+    shape = _nested_shape(value)
+    if len(shape) == 2:
+        expected_heads = kv_heads * q_per_group
+        if len(value) != expected_heads:
+            raise ValueError(
+                f"Expected {expected_heads} query heads, got {len(value)}."
+            )
+        return [
+            [list(head) for head in value[group * q_per_group : (group + 1) * q_per_group]]
+            for group in range(kv_heads)
+        ]
+    return [
+        _split_nested_grouped_query_heads(item, kv_heads, q_per_group) for item in value
+    ]
+
+
+def _replace_nested_grouped_query_heads(value: Any, replacement: Any, q_per_group: int) -> Any:
+    shape = _nested_shape(value)
+    if len(shape) == 3:
+        return [
+            [*replacement_group, *group[q_per_group:]]
+            for group, replacement_group in zip(value, replacement, strict=True)
+        ]
+    return [
+        _replace_nested_grouped_query_heads(item, replacement_item, q_per_group)
+        for item, replacement_item in zip(value, replacement, strict=True)
+    ]
+
+
+def _flatten_nested_interleaved_qkv(value: Any) -> Any:
+    shape = _nested_shape(value)
+    if len(shape) == 3:
+        flattened: list[Any] = []
+        for group in value:
+            for component in group:
+                flattened.extend(component)
+        return flattened
+    return [_flatten_nested_interleaved_qkv(item) for item in value]
+
+
+def _product(values: tuple[int, ...]) -> int:
+    result = 1
+    for value in values:
+        result *= value
+    return result
+
+
+def _reshape_attention_weight_list(
+    weight: list[Any],
+    *,
+    component: str,
+    n_heads: int,
+    packed_axis: int | None,
+) -> Any:
+    shape = _nested_shape(weight)
+    if len(shape) != 2:
+        raise ValueError(f"Cannot reshape attention weight for component {component!r}.")
+    axis = packed_axis
+    if axis is None:
+        axis = infer_attention_weight_packed_axis(weight, n_heads=n_heads)
+    if axis not in {0, 1}:
+        raise ValueError(f"packed_axis must be 0, 1, or None, got {packed_axis!r}.")
+    packed_dim = shape[axis]
+    other_dim = shape[1 - axis]
+    if n_heads <= 0 or packed_dim % n_heads != 0:
+        raise ValueError(
+            f"Cannot split packed dimension {packed_dim} into {n_heads} heads for {component!r}."
+        )
+    head_dim = packed_dim // n_heads
+    if component in {"q", "k", "v"}:
+        if axis == 0:
+            return _permute_nested(
+                _reshape_flat_list(_flatten_nested(weight), (n_heads, head_dim, other_dim)),
+                (0, 2, 1),
+            )
+        return _permute_nested(
+            _reshape_flat_list(_flatten_nested(weight), (other_dim, n_heads, head_dim)),
+            (1, 0, 2),
+        )
+    if component == "z":
+        if axis == 0:
+            return _reshape_flat_list(_flatten_nested(weight), (n_heads, head_dim, other_dim))
+        return _permute_nested(
+            _reshape_flat_list(_flatten_nested(weight), (other_dim, n_heads, head_dim)),
+            (1, 2, 0),
+        )
+    raise ValueError(f"Unsupported attention weight component {component!r}.")
+
+
+def _reshape_joint_qkv_attention_weight_list(
+    weight: list[Any],
+    *,
+    component: str,
+    q_heads: int,
+    kv_heads: int,
+    qkv_layout: QKVLayout,
+    packed_axis: int | None,
+) -> Any:
+    shape = _nested_shape(weight)
+    if len(shape) != 2:
+        raise ValueError(f"Cannot reshape joint QKV weight for component {component!r}.")
+    if component not in {"q", "k", "v"}:
+        raise ValueError(f"Joint QKV weights only expose q/k/v, got {component!r}.")
+    axis = packed_axis
+    if axis is None:
+        axis = infer_qkv_weight_packed_axis(weight, q_heads=q_heads, kv_heads=kv_heads)
+    if axis == 0:
+        component_weight, n_heads = extract_qkv_weight_rows(
+            weight,
+            component=component,
+            q_heads=q_heads,
+            kv_heads=kv_heads,
+            qkv_layout=qkv_layout,
+        )
+        return _reshape_attention_weight_list(
+            component_weight,
+            component=component,
+            n_heads=n_heads,
+            packed_axis=0,
+        )
+    if axis == 1:
+        component_weight, n_heads = extract_qkv_weight_columns(
+            weight,
+            component=component,
+            q_heads=q_heads,
+            kv_heads=kv_heads,
+            qkv_layout=qkv_layout,
+        )
+        return _reshape_attention_weight_list(
+            component_weight,
+            component=component,
+            n_heads=n_heads,
+            packed_axis=1,
+        )
+    raise ValueError(f"packed_axis must be 0, 1, or None, got {packed_axis!r}.")
+
+
+def _flatten_nested(value: Any) -> list[Any]:
+    if isinstance(value, list):
+        flattened: list[Any] = []
+        for item in value:
+            flattened.extend(_flatten_nested(item))
+        return flattened
+    return [value]
+
+
+def _permute_nested(value: Any, order: tuple[int, ...]) -> Any:
+    shape = _nested_shape(value)
+    if len(shape) != len(order):
+        raise ValueError(f"Cannot permute shape {shape} with order {order}.")
+    output_shape = tuple(shape[axis] for axis in order)
+    inverse_order = tuple(order.index(axis) for axis in range(len(order)))
+    return _build_nested_from_shape(
+        output_shape,
+        lambda output_index: _get_nested_index(
+            value,
+            tuple(output_index[inverse_order[axis]] for axis in range(len(order))),
+        ),
+    )
+
+
+def _build_nested_from_shape(shape: tuple[int, ...], value_fn: Callable[[tuple[int, ...]], Any]) -> Any:
+    def build(prefix: tuple[int, ...], remaining: tuple[int, ...]) -> Any:
+        if not remaining:
+            return value_fn(prefix)
+        return [build((*prefix, index), remaining[1:]) for index in range(remaining[0])]
+
+    return build((), shape)
+
+
+def _get_nested_index(value: Any, index: tuple[int, ...]) -> Any:
+    current = value
+    for axis_index in index:
+        current = current[axis_index]
+    return current
+
+
+def _weight_shape(weight: Any) -> tuple[int, int]:
+    shape = getattr(weight, "shape", None)
+    if shape is not None:
+        return int(shape[0]), int(shape[1])
+    nested_shape = _nested_shape(weight)
+    if len(nested_shape) != 2:
+        raise ValueError(f"Expected a rank-2 weight matrix, got shape {nested_shape}.")
+    return nested_shape
+
+
+def _select_nested_axis(value: Any, axis: int, index: int) -> Any:
+    if axis == 0:
+        return value[index]
+    return [_select_nested_axis(item, axis - 1, index) for item in value]
+
+
+def _select_nested_axis_slice(value: Any, axis: int, index: slice) -> Any:
+    if axis == 0:
+        return value[index]
+    return [_select_nested_axis_slice(item, axis - 1, index) for item in value]
+
+
+def _flatten_nested_interleaved_qkv_weight_rows(value: Any) -> list[Any]:
+    shape = _nested_shape(value)
+    if len(shape) == 3:
+        rows: list[Any] = []
+        for head_group in value:
+            rows.extend([list(row) for row in head_group])
+        return rows
+    return [list(row) for row in value]
+
+
+def _flatten_nested_last_dims(value: Any) -> list[Any]:
+    shape = _nested_shape(value)
+    if len(shape) == 3:
+        return [_flatten_nested(item) for item in value]
+    if len(shape) == 4:
+        return [_flatten_nested(item) for item in value]
+    return value
+
+
 def head_count_for_component(model: Any, component: str) -> int:
     """Read the configured attention head count for one component."""
-    config = getattr(model, "config", None)
     if component in {"k", "v"}:
-        for name in ("num_key_value_heads", "num_kv_heads", "n_head_kv"):
-            value = getattr(config, name, None)
-            if value is not None:
-                return int(value)
-    for name in ("num_attention_heads", "n_head", "n_heads", "num_heads"):
-        value = getattr(config, name, None)
-        if value is not None:
-            return int(value)
+        n_key_value_heads = key_value_head_count(model)
+        if n_key_value_heads is not None:
+            return n_key_value_heads
+    n_heads = attention_head_count(model)
+    if n_heads is not None:
+        return n_heads
+    config = getattr(model, "config", None)
     raise ValueError(
         f"Could not infer attention head count for component {component!r} "
         f"from {type(config).__name__}."
     )
+
+
+def attention_head_count(model: Any) -> int | None:
+    """Read the configured query/output attention head count."""
+    config = getattr(model, "config", None)
+    for name in ("num_attention_heads", "n_head", "n_heads", "num_heads"):
+        value = getattr(config, name, None)
+        if value is not None:
+            return int(value)
+    return None
+
+
+def key_value_head_count(model: Any) -> int | None:
+    """Read the configured key/value head count when it differs from query heads."""
+    config = getattr(model, "config", None)
+    if _is_falcon_multi_query_config(config):
+        return 1
+    for name in ("num_key_value_heads", "num_kv_heads", "n_head_kv"):
+        value = getattr(config, name, None)
+        if value is not None:
+            return int(value)
+    return None
+
+
+def _is_falcon_multi_query_config(config: Any) -> bool:
+    """Falcon MQA packs one shared K/V head even when num_kv_heads defaults to n_heads."""
+    if str(getattr(config, "model_type", "")).lower() != "falcon":
+        return False
+    if bool(getattr(config, "new_decoder_architecture", False)):
+        return False
+    return bool(getattr(config, "multi_query", False))
 
 
 def reshape_attention_weight(
@@ -1024,7 +1558,14 @@ def reshape_attention_weight(
     shape = getattr(weight, "shape", None)
     reshape = getattr(weight, "reshape", None)
     if shape is None or not callable(reshape) or len(shape) != 2:
-        raise ValueError(f"Cannot reshape attention weight for component {component!r}.")
+        if not isinstance(weight, list):
+            raise ValueError(f"Cannot reshape attention weight for component {component!r}.")
+        return _reshape_attention_weight_list(
+            weight,
+            component=component,
+            n_heads=n_heads,
+            packed_axis=packed_axis,
+        )
     axis = packed_axis
     if axis is None:
         axis = infer_attention_weight_packed_axis(weight, n_heads=n_heads)
@@ -1046,6 +1587,170 @@ def reshape_attention_weight(
             return weight.reshape(n_heads, head_dim, other_dim)
         return weight.reshape(other_dim, n_heads, head_dim).permute(1, 2, 0)
     raise ValueError(f"Unsupported attention weight component {component!r}.")
+
+
+def reshape_attention_bias(
+    bias: Any,
+    *,
+    component: str,
+    n_heads: int,
+) -> Any:
+    """Convert a packed projection bias to TransformerLens attention bias shape."""
+    if component == "z":
+        return bias
+    shape = getattr(bias, "shape", None)
+    reshape = getattr(bias, "reshape", None)
+    if shape is None or not callable(reshape):
+        if not isinstance(bias, list):
+            return bias
+        if n_heads <= 0 or len(bias) % n_heads != 0:
+            raise ValueError(
+                f"Cannot split attention bias of length {len(bias)} into {n_heads} heads."
+            )
+        head_dim = len(bias) // n_heads
+        return [
+            list(bias[head_index * head_dim : (head_index + 1) * head_dim])
+            for head_index in range(n_heads)
+        ]
+    if len(shape) == 2:
+        return bias
+    if len(shape) != 1:
+        raise ValueError(f"Cannot reshape attention bias for component {component!r}.")
+    if n_heads <= 0 or int(shape[0]) % n_heads != 0:
+        raise ValueError(
+            f"Cannot split attention bias of length {int(shape[0])} into {n_heads} heads."
+        )
+    return bias.reshape(n_heads, int(shape[0]) // n_heads)
+
+
+def reshape_joint_qkv_attention_bias(
+    bias: Any,
+    *,
+    component: str,
+    q_heads: int,
+    kv_heads: int,
+    qkv_layout: QKVLayout,
+) -> Any:
+    """Convert a joint QKV projection bias to TransformerLens attention bias shape."""
+    component_bias, n_heads = extract_qkv_bias(
+        bias,
+        component=component,
+        q_heads=q_heads,
+        kv_heads=kv_heads,
+        qkv_layout=qkv_layout,
+    )
+    return reshape_attention_bias(component_bias, component=component, n_heads=n_heads)
+
+
+def extract_qkv_bias(
+    bias: Any,
+    *,
+    component: str,
+    q_heads: int,
+    kv_heads: int,
+    qkv_layout: QKVLayout,
+) -> tuple[Any, int]:
+    shape = getattr(bias, "shape", None)
+    length = int(shape[0]) if shape is not None else len(bias)
+    total_heads = q_heads + 2 * kv_heads
+    if total_heads <= 0 or length % total_heads != 0:
+        raise ValueError(
+            "Cannot split joint QKV bias with length "
+            f"{length}, q_heads={q_heads}, kv_heads={kv_heads}."
+        )
+    head_dim = length // total_heads
+    if qkv_layout == "split":
+        bounds = qkv_weight_bounds(head_dim, q_heads=q_heads, kv_heads=kv_heads)
+        start, stop = bounds[component]
+        n_heads = q_heads if component == "q" else kv_heads
+        return bias[start:stop], n_heads
+    if qkv_layout == "interleaved":
+        return extract_interleaved_qkv_bias(
+            bias,
+            component=component,
+            head_dim=head_dim,
+            q_heads=q_heads,
+            kv_heads=kv_heads,
+        )
+    raise ValueError(f"Unsupported QKV layout {qkv_layout!r}.")
+
+
+def extract_interleaved_qkv_bias(
+    bias: Any,
+    *,
+    component: str,
+    head_dim: int,
+    q_heads: int,
+    kv_heads: int,
+) -> tuple[Any, int]:
+    if isinstance(bias, list):
+        if q_heads == kv_heads:
+            component_index = {"q": 0, "k": 1, "v": 2}[component]
+            view = _reshape_flat_list(list(bias), (q_heads, 3, head_dim))
+            return _flatten_nested(_select_nested_axis(view, 1, component_index)), q_heads
+
+        q_per_group = qkv_group_size(q_heads=q_heads, kv_heads=kv_heads)
+        view = _reshape_flat_list(list(bias), (kv_heads, q_per_group + 2, head_dim))
+        if component == "q":
+            return _flatten_nested(_select_nested_axis_slice(view, 1, slice(0, q_per_group))), q_heads
+        offset = -2 if component == "k" else -1
+        return _flatten_nested(_select_nested_axis(view, 1, offset)), kv_heads
+    if q_heads == kv_heads:
+        component_index = {"q": 0, "k": 1, "v": 2}[component]
+        view = bias.reshape(q_heads, 3, head_dim)
+        return view[:, component_index, :].reshape(q_heads * head_dim), q_heads
+
+    q_per_group = qkv_group_size(q_heads=q_heads, kv_heads=kv_heads)
+    view = bias.reshape(kv_heads, q_per_group + 2, head_dim)
+    if component == "q":
+        return view[:, :q_per_group, :].reshape(q_heads * head_dim), q_heads
+    offset = -2 if component == "k" else -1
+    return view[:, offset, :].reshape(kv_heads * head_dim), kv_heads
+
+
+def zeros_for_attention_bias(model: Any, component: str) -> Any:
+    """Return a zero attention bias with the TransformerLens shape for one component."""
+    n_heads = head_count_for_component(model, component) if component != "z" else None
+    d_model = _model_hidden_size(model)
+    if d_model is None:
+        raise ValueError(f"Could not infer hidden size for b_{component.upper()}.")
+    if component == "z":
+        return _zeros_vector(d_model, model)
+    if n_heads is None or n_heads <= 0 or d_model % n_heads != 0:
+        raise ValueError(
+            f"Could not infer head dimension for b_{component.upper()} with "
+            f"d_model={d_model}, n_heads={n_heads}."
+        )
+    return _zeros_matrix(n_heads, d_model // n_heads, model)
+
+
+def _model_hidden_size(model: Any) -> int | None:
+    config = getattr(model, "config", None)
+    for name in ("hidden_size", "n_embd", "d_model", "dim"):
+        value = getattr(config, name, None)
+        if value is not None:
+            return int(value)
+    return None
+
+
+def _zeros_vector(length: int, model: Any) -> Any:
+    try:
+        import torch
+
+        return torch.zeros(length)
+    except ImportError:
+        _ = model
+        return [0 for _ in range(length)]
+
+
+def _zeros_matrix(rows: int, cols: int, model: Any) -> Any:
+    try:
+        import torch
+
+        return torch.zeros(rows, cols)
+    except ImportError:
+        _ = model
+        return [[0 for _ in range(cols)] for _ in range(rows)]
 
 
 def preferred_attention_weight_packed_axis(
@@ -1095,7 +1800,16 @@ def reshape_joint_qkv_attention_weight(
     shape = getattr(weight, "shape", None)
     reshape = getattr(weight, "reshape", None)
     if shape is None or not callable(reshape) or len(shape) != 2:
-        raise ValueError(f"Cannot reshape joint QKV weight for component {component!r}.")
+        if not isinstance(weight, list):
+            raise ValueError(f"Cannot reshape joint QKV weight for component {component!r}.")
+        return _reshape_joint_qkv_attention_weight_list(
+            weight,
+            component=component,
+            q_heads=q_heads,
+            kv_heads=kv_heads,
+            qkv_layout=qkv_layout,
+            packed_axis=packed_axis,
+        )
     if component not in {"q", "k", "v"}:
         raise ValueError(f"Joint QKV weights only expose q/k/v, got {component!r}.")
 
@@ -1203,7 +1917,8 @@ def extract_qkv_weight_rows(
     qkv_layout: QKVLayout,
 ) -> tuple[Any, int]:
     total_heads = q_heads + 2 * kv_heads
-    packed_dim = int(weight.shape[0])
+    weight_shape = _weight_shape(weight)
+    packed_dim = int(weight_shape[0])
     if total_heads <= 0 or packed_dim % total_heads != 0:
         raise ValueError(
             "Cannot split joint QKV weight rows with output dimension "
@@ -1214,6 +1929,8 @@ def extract_qkv_weight_rows(
         bounds = qkv_weight_bounds(head_dim, q_heads=q_heads, kv_heads=kv_heads)
         start, stop = bounds[component]
         n_heads = q_heads if component == "q" else kv_heads
+        if isinstance(weight, list):
+            return [list(row) for row in weight[start:stop]], n_heads
         return weight[start:stop, :], n_heads
     if qkv_layout == "interleaved":
         return extract_interleaved_qkv_weight_rows(
@@ -1235,7 +1952,8 @@ def extract_qkv_weight_columns(
     qkv_layout: QKVLayout,
 ) -> tuple[Any, int]:
     total_heads = q_heads + 2 * kv_heads
-    packed_dim = int(weight.shape[1])
+    weight_shape = _weight_shape(weight)
+    packed_dim = int(weight_shape[1])
     if total_heads <= 0 or packed_dim % total_heads != 0:
         raise ValueError(
             "Cannot split joint QKV weight columns with output dimension "
@@ -1246,6 +1964,8 @@ def extract_qkv_weight_columns(
         bounds = qkv_weight_bounds(head_dim, q_heads=q_heads, kv_heads=kv_heads)
         start, stop = bounds[component]
         n_heads = q_heads if component == "q" else kv_heads
+        if isinstance(weight, list):
+            return [list(row[start:stop]) for row in weight], n_heads
         return weight[:, start:stop], n_heads
     if qkv_layout == "interleaved":
         return extract_interleaved_qkv_weight_columns(
@@ -1278,7 +1998,28 @@ def extract_interleaved_qkv_weight_rows(
     q_heads: int,
     kv_heads: int,
 ) -> tuple[Any, int]:
-    d_model = int(weight.shape[1])
+    d_model = int(_weight_shape(weight)[1])
+    if isinstance(weight, list):
+        if q_heads == kv_heads:
+            component_index = {"q": 0, "k": 1, "v": 2}[component]
+            view = _reshape_flat_list(_flatten_nested(weight), (q_heads, 3, head_dim, d_model))
+            return _flatten_nested_interleaved_qkv_weight_rows(
+                _select_nested_axis(view, 1, component_index)
+            ), q_heads
+
+        q_per_group = qkv_group_size(q_heads=q_heads, kv_heads=kv_heads)
+        view = _reshape_flat_list(
+            _flatten_nested(weight),
+            (kv_heads, q_per_group + 2, head_dim, d_model),
+        )
+        if component == "q":
+            return _flatten_nested_interleaved_qkv_weight_rows(
+                _select_nested_axis_slice(view, 1, slice(0, q_per_group))
+            ), q_heads
+        offset = -2 if component == "k" else -1
+        return _flatten_nested_interleaved_qkv_weight_rows(
+            _select_nested_axis(view, 1, offset)
+        ), kv_heads
     if q_heads == kv_heads:
         component_index = {"q": 0, "k": 1, "v": 2}[component]
         view = weight.reshape(q_heads, 3, head_dim, d_model)
@@ -1300,7 +2041,26 @@ def extract_interleaved_qkv_weight_columns(
     q_heads: int,
     kv_heads: int,
 ) -> tuple[Any, int]:
-    d_model = int(weight.shape[0])
+    d_model = int(_weight_shape(weight)[0])
+    if isinstance(weight, list):
+        if q_heads == kv_heads:
+            component_index = {"q": 0, "k": 1, "v": 2}[component]
+            view = _reshape_flat_list(_flatten_nested(weight), (d_model, q_heads, 3, head_dim))
+            return _flatten_nested_last_dims(
+                _select_nested_axis(view, 2, component_index)
+            ), q_heads
+
+        q_per_group = qkv_group_size(q_heads=q_heads, kv_heads=kv_heads)
+        view = _reshape_flat_list(
+            _flatten_nested(weight),
+            (d_model, kv_heads, q_per_group + 2, head_dim),
+        )
+        if component == "q":
+            return _flatten_nested_last_dims(
+                _select_nested_axis_slice(view, 2, slice(0, q_per_group))
+            ), q_heads
+        offset = -2 if component == "k" else -1
+        return _flatten_nested_last_dims(_select_nested_axis(view, 2, offset)), kv_heads
     if q_heads == kv_heads:
         component_index = {"q": 0, "k": 1, "v": 2}[component]
         view = weight.reshape(d_model, q_heads, 3, head_dim)
@@ -1570,7 +2330,7 @@ def _normalize_component(component: str, *, layer_type: str | None = None) -> st
         return "attn_out"
     if layer_type == "mlp" and normalized == "out":
         return "mlp_out"
-    if layer_type == "mlp" and normalized in {"pre", "post"}:
+    if layer_type == "mlp" and normalized in {"pre", "pre_linear", "post"}:
         return normalized
     aliases = {
         "attn_scores": "attn_scores",
@@ -1653,6 +2413,18 @@ def _result_spec(*module_paths: str) -> ComponentHookSpec:
     )
 
 
+def _mlp_pre_spec(*module_paths: str) -> ComponentHookSpec:
+    return _spec("pre", "forward_output", *module_paths)
+
+
+def _mlp_pre_linear_spec(*module_paths: str) -> ComponentHookSpec:
+    return _spec("pre_linear", "forward_output", *module_paths)
+
+
+def _mlp_post_spec(*module_paths: str) -> ComponentHookSpec:
+    return _spec("post", "forward_input", *module_paths)
+
+
 LLAMA_LIKE_ADAPTER = ArchitectureAdapter(
     name="llama_like_decoder",
     model_types=(
@@ -1689,6 +2461,9 @@ LLAMA_LIKE_ADAPTER = ArchitectureAdapter(
         _spec("resid_post", "forward_output", "model.layers.{layer}"),
         _spec("attn_out", "forward_output", "model.layers.{layer}.self_attn.o_proj"),
         _spec("mlp_out", "forward_output", "model.layers.{layer}.mlp"),
+        _mlp_pre_spec("model.layers.{layer}.mlp.gate_proj", "model.layers.{layer}.mlp.up_proj"),
+        _mlp_pre_linear_spec("model.layers.{layer}.mlp.up_proj"),
+        _mlp_post_spec("model.layers.{layer}.mlp.down_proj"),
         _spec(
             "q", "forward_output", "model.layers.{layer}.self_attn.q_proj", activation="split_heads"
         ),
@@ -1718,6 +2493,8 @@ GPT2_ADAPTER = ArchitectureAdapter(
         _spec("resid_post", "forward_output", "transformer.h.{layer}"),
         _spec("attn_out", "forward_output", "transformer.h.{layer}.attn.c_proj"),
         _spec("mlp_out", "forward_output", "transformer.h.{layer}.mlp"),
+        _mlp_pre_spec("transformer.h.{layer}.mlp.c_fc"),
+        _mlp_post_spec("transformer.h.{layer}.mlp.c_proj"),
         _spec(
             "q",
             "forward_output",
@@ -1754,6 +2531,8 @@ GPT_NEOX_ADAPTER = ArchitectureAdapter(
         _spec("resid_post", "forward_output", "gpt_neox.layers.{layer}"),
         _spec("attn_out", "forward_output", "gpt_neox.layers.{layer}.attention.dense"),
         _spec("mlp_out", "forward_output", "gpt_neox.layers.{layer}.mlp"),
+        _mlp_pre_spec("gpt_neox.layers.{layer}.mlp.dense_h_to_4h"),
+        _mlp_post_spec("gpt_neox.layers.{layer}.mlp.dense_4h_to_h"),
         _spec(
             "q",
             "forward_output",
@@ -1797,6 +2576,8 @@ GPTJ_ADAPTER = ArchitectureAdapter(
         _spec("resid_post", "forward_output", "transformer.h.{layer}"),
         _spec("attn_out", "forward_output", "transformer.h.{layer}.attn.out_proj"),
         _spec("mlp_out", "forward_output", "transformer.h.{layer}.mlp"),
+        _mlp_pre_spec("transformer.h.{layer}.mlp.fc_in"),
+        _mlp_post_spec("transformer.h.{layer}.mlp.fc_out"),
         _spec("q", "forward_output", "transformer.h.{layer}.attn.q_proj", activation="split_heads"),
         _spec("k", "forward_output", "transformer.h.{layer}.attn.k_proj", activation="split_heads"),
         _spec("v", "forward_output", "transformer.h.{layer}.attn.v_proj", activation="split_heads"),
@@ -1820,6 +2601,8 @@ GPT_NEO_ADAPTER = ArchitectureAdapter(
         _spec("resid_post", "forward_output", "transformer.h.{layer}"),
         _spec("attn_out", "forward_output", "transformer.h.{layer}.attn.attention.out_proj"),
         _spec("mlp_out", "forward_output", "transformer.h.{layer}.mlp"),
+        _mlp_pre_spec("transformer.h.{layer}.mlp.c_fc"),
+        _mlp_post_spec("transformer.h.{layer}.mlp.c_proj"),
         _spec(
             "q",
             "forward_output",
@@ -1869,6 +2652,12 @@ JOINT_QKV_DECODER_ADAPTER = ArchitectureAdapter(
             "transformer.h.{layer}.self_attention.dense",
         ),
         _spec("mlp_out", "forward_output", "transformer.h.{layer}.mlp"),
+        _mlp_pre_spec(
+            "transformer.h.{layer}.mlp.dense_h_to_4h",
+        ),
+        _mlp_post_spec(
+            "transformer.h.{layer}.mlp.dense_4h_to_h",
+        ),
         _spec(
             "q",
             "forward_output",
@@ -1913,6 +2702,8 @@ MPT_ADAPTER = ArchitectureAdapter(
         _spec("resid_post", "forward_output", "transformer.blocks.{layer}"),
         _spec("attn_out", "forward_output", "transformer.blocks.{layer}.attn.out_proj"),
         _spec("mlp_out", "forward_output", "transformer.blocks.{layer}.ffn"),
+        _mlp_pre_spec("transformer.blocks.{layer}.ffn.up_proj"),
+        _mlp_post_spec("transformer.blocks.{layer}.ffn.down_proj"),
         _spec(
             "q",
             "forward_output",
@@ -1958,6 +2749,8 @@ PHI_ADAPTER = ArchitectureAdapter(
             "model.layers.{layer}.self_attn.o_proj",
         ),
         _spec("mlp_out", "forward_output", "model.layers.{layer}.mlp"),
+        _mlp_pre_spec("model.layers.{layer}.mlp.fc1", "model.layers.{layer}.mlp.gate_up_proj"),
+        _mlp_post_spec("model.layers.{layer}.mlp.fc2", "model.layers.{layer}.mlp.down_proj"),
         _spec(
             "q", "forward_output", "model.layers.{layer}.self_attn.q_proj", activation="split_heads"
         ),
@@ -1991,6 +2784,8 @@ OPT_ADAPTER = ArchitectureAdapter(
         _spec("resid_post", "forward_output", "model.decoder.layers.{layer}"),
         _spec("attn_out", "forward_output", "model.decoder.layers.{layer}.self_attn.out_proj"),
         _spec("mlp_out", "forward_output", "model.decoder.layers.{layer}.fc2"),
+        _mlp_pre_spec("model.decoder.layers.{layer}.fc1"),
+        _mlp_post_spec("model.decoder.layers.{layer}.fc2"),
         _spec(
             "q",
             "forward_output",

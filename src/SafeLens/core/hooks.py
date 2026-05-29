@@ -26,6 +26,7 @@ _ACT_NAME_ALIASES = {
     "query": "q",
     "value": "v",
     "mlp_pre": "pre",
+    "mlp_pre_linear": "pre_linear",
     "mlp_mid": "mid",
     "mlp_post": "post",
 }
@@ -464,11 +465,21 @@ class ActivationCache(MutableMapping[Any, Any]):
 
     def apply_slice_to_batch_dim(self, batch_slice: Any) -> ActivationCache:
         """Return a cache sliced along the batch dimension."""
+        normalized_slice = _normalize_slice_index(batch_slice)
         if not self.has_batch_dim:
+            if normalized_slice == _FULL_SLICE:
+                return ActivationCache(
+                    dict(self._cache),
+                    model=self.model,
+                    has_batch_dim=False,
+                )
             raise ValueError("Cannot slice batch dimension on a cache without batch dim.")
-        has_batch_dim = not isinstance(batch_slice, int)
+        has_batch_dim = not isinstance(normalized_slice, int)
         return ActivationCache(
-            {name: _slice_dim(value, batch_slice, dim=0) for name, value in self._cache.items()},
+            {
+                name: _slice_dim(value, normalized_slice, dim=0)
+                for name, value in self._cache.items()
+            },
             model=self.model,
             has_batch_dim=has_batch_dim,
         )
@@ -578,6 +589,7 @@ class ActivationCache(MutableMapping[Any, Any]):
             residual_stack = self.apply_ln_to_stack(
                 residual_stack,
                 layer=target_layer,
+                mlp_input=mlp_input,
                 pos_slice=pos_slice,
                 has_batch_dim=self.has_batch_dim,
             )
@@ -629,6 +641,22 @@ class ActivationCache(MutableMapping[Any, Any]):
             values.append(remainder)
             labels.append("remainder")
         if not values:
+            if target_layer == 0:
+                head_stack = _empty_component_stack_like_cache(
+                    self,
+                    pos_slice=pos_slice,
+                    has_batch_dim=self.has_batch_dim,
+                )
+                if apply_ln:
+                    head_stack = self.apply_ln_to_stack(
+                        head_stack,
+                        layer=target_layer,
+                        pos_slice=pos_slice,
+                        has_batch_dim=self.has_batch_dim,
+                    )
+                if return_labels:
+                    return head_stack, labels
+                return head_stack
             raise KeyError(f"No {component!r} head activations found in cache.")
         head_stack = stack_values(values)
         if apply_ln:
@@ -758,6 +786,23 @@ class ActivationCache(MutableMapping[Any, Any]):
             values.append(remainder)
             labels.append("remainder")
         if not values:
+            if target_layer == 0:
+                neuron_stack = _empty_component_stack_like_cache(
+                    self,
+                    pos_slice=pos_slice,
+                    has_batch_dim=self.has_batch_dim,
+                    project_output_onto=project_output_onto,
+                )
+                if apply_ln:
+                    neuron_stack = self.apply_ln_to_stack(
+                        neuron_stack,
+                        layer=target_layer,
+                        pos_slice=pos_slice,
+                        has_batch_dim=self.has_batch_dim,
+                    )
+                if return_labels:
+                    return neuron_stack, labels
+                return neuron_stack
             raise KeyError(f"No {component!r} neuron activations found in cache.")
         neuron_stack = stack_values(values)
         if apply_ln:
@@ -875,6 +920,7 @@ class ActivationCache(MutableMapping[Any, Any]):
             full_stack = self.apply_ln_to_stack(
                 full_stack,
                 layer=target_layer,
+                mlp_input=mlp_input,
                 pos_slice=pos_slice,
                 has_batch_dim=self.has_batch_dim,
             )
@@ -968,10 +1014,21 @@ class ActivationCache(MutableMapping[Any, Any]):
                     f"{_shape_of(incorrect_directions)!r}."
                 )
             directions = _subtract_values(directions, incorrect_directions)
-        if batch_slice is not None and _direction_has_batch_axis(directions, resolved_has_batch_dim):
-            directions = _slice_dim(directions, batch_slice, dim=0)
-        if pos_slice is not None and _direction_has_pos_axis(directions, resolved_has_batch_dim):
-            pos_dim = 1 if resolved_has_batch_dim else 0
+        batch_dim = _direction_batch_dim(
+            directions,
+            residual_stack,
+            has_batch_dim=resolved_has_batch_dim,
+            prefer_pos_axis=pos_slice is not None,
+        )
+        if batch_slice is not None and batch_dim is not None:
+            directions = _slice_dim(directions, batch_slice, dim=batch_dim)
+        pos_dim = _direction_pos_dim(
+            directions,
+            residual_stack,
+            has_batch_dim=resolved_has_batch_dim,
+            prefer_pos_axis=pos_slice is not None,
+        )
+        if pos_slice is not None and pos_dim is not None:
             directions = _slice_dim(directions, pos_slice, dim=pos_dim)
         if apply_ln:
             residual_stack = self.apply_ln_to_stack(
@@ -981,6 +1038,8 @@ class ActivationCache(MutableMapping[Any, Any]):
                 batch_slice=batch_slice,
                 has_batch_dim=resolved_has_batch_dim,
             )
+        elif batch_slice is not None and resolved_has_batch_dim:
+            residual_stack = _slice_dim(residual_stack, batch_slice, dim=1)
         return _dot_last_dim(residual_stack, directions)
 
     def _infer_n_layers(self) -> int:
@@ -1058,7 +1117,9 @@ def activation_name_candidates(key: ActivationKey, *, n_layers: int = 0) -> list
         candidates = [key]
         candidates.extend(_safelens_names_from_transformer_lens_name(key))
         candidates.extend(_transformer_lens_names_from_safelens_name(key))
-        candidates.append(get_act_name(key))
+        tl_name = get_act_name(key)
+        candidates.append(tl_name)
+        candidates.extend(_safelens_names_from_transformer_lens_name(tl_name))
         if "." not in key:
             candidates.append(safelens_act_name(key))
         return _unique(candidates)
@@ -1260,7 +1321,7 @@ def _has_leading_dim(value: Any, size: int) -> bool:
 
 
 def _maybe_slice_pos(value: Any, pos_slice: Any, *, dim: int = -2) -> Any:
-    if pos_slice is None:
+    if pos_slice is None or _is_identity_slice_like(pos_slice):
         return value
     return _slice_dim(value, pos_slice, dim=dim)
 
@@ -1270,6 +1331,12 @@ def _head_vector_pos_dim(component: str) -> int:
 
 
 def _slice_dim(value: Any, index: Any, *, dim: int) -> Any:
+    apply = getattr(index, "apply", None)
+    if callable(apply):
+        try:
+            return apply(value, dim=dim)
+        except Exception:
+            pass
     index = _normalize_slice_index(index)
     shape = _shape_of(value)
     rank = len(shape)
@@ -1319,9 +1386,21 @@ def _explicit_indices(index: Any, size: int | None = None) -> list[int] | None:
 def _normalize_slice_index(index: Any) -> Any:
     if index is None:
         return _FULL_SLICE
+    slice_value = getattr(index, "slice", _MISSING)
+    mode = getattr(index, "mode", None)
+    if slice_value is not _MISSING:
+        if mode == "identity" or slice_value is None:
+            return _FULL_SLICE
+        return slice_value
     if isinstance(index, tuple):
         return slice(*index)
     return index
+
+
+def _is_identity_slice_like(index: Any) -> bool:
+    if index is None:
+        return True
+    return getattr(index, "mode", None) == "identity"
 
 
 def _shape_of(value: Any) -> tuple[int, ...]:
@@ -1345,6 +1424,52 @@ def _direction_has_pos_axis(direction: Any, has_batch_dim: bool) -> bool:
     if not shape:
         return False
     return len(shape) >= (3 if has_batch_dim else 2)
+
+
+def _direction_batch_dim(
+    direction: Any,
+    residual_stack: Any,
+    *,
+    has_batch_dim: bool,
+    prefer_pos_axis: bool = False,
+) -> int | None:
+    shape = _shape_of(direction)
+    if not has_batch_dim or len(shape) < 2:
+        return None
+    if len(shape) >= 3:
+        return 0
+    if prefer_pos_axis:
+        return None
+    residual_shape = _shape_of(residual_stack)
+    if len(residual_shape) >= 3 and shape[0] == residual_shape[1]:
+        if len(residual_shape) < 4 or shape[0] != residual_shape[2]:
+            return 0
+    return None
+
+
+def _direction_pos_dim(
+    direction: Any,
+    residual_stack: Any,
+    *,
+    has_batch_dim: bool,
+    prefer_pos_axis: bool = False,
+) -> int | None:
+    shape = _shape_of(direction)
+    if len(shape) < 2:
+        return None
+    if not has_batch_dim:
+        return 0
+    if len(shape) >= 3:
+        return 1
+    if prefer_pos_axis:
+        return 0
+    residual_shape = _shape_of(residual_stack)
+    if len(residual_shape) >= 4:
+        batch_size = residual_shape[1]
+        if shape[0] != batch_size or batch_size == 1:
+            return 0
+        return None
+    return 0
 
 
 def _head_axis_after_pos_slice(activation: Any, pos_slice: Any) -> int:
@@ -1376,6 +1501,52 @@ def _unstack_first_dim(value: Any) -> list[Any]:
     if not shape:
         return [value]
     return [_slice_dim(value, index, dim=0) for index in range(shape[0])]
+
+
+def _empty_component_stack_like_cache(
+    cache: ActivationCache,
+    *,
+    pos_slice: Any = None,
+    has_batch_dim: bool = True,
+    project_output_onto: Any = None,
+) -> Any:
+    source = _first_available_activation(cache, ("hook_embed", "resid_pre", "resid_post"))
+    if source is _MISSING:
+        return []
+    source = _maybe_slice_pos(source, pos_slice)
+    if project_output_onto is not None:
+        source = _project_last_dim(source, project_output_onto)
+    shape = _shape_of(source)
+    if not shape:
+        return []
+    try:
+        import torch
+
+        if isinstance(source, torch.Tensor):
+            return torch.zeros((0, *shape), dtype=source.dtype, device=source.device)
+    except Exception:
+        pass
+    try:
+        import numpy as np
+
+        if isinstance(source, np.ndarray):
+            return np.zeros((0, *shape), dtype=source.dtype)
+    except Exception:
+        pass
+    _ = has_batch_dim
+    return []
+
+
+def _first_available_activation(
+    cache: ActivationCache,
+    names: Sequence[str],
+) -> Any:
+    for name in names:
+        if name in cache:
+            return cache[name]
+    if len(cache) > 0:
+        return next(iter(cache.values()))
+    return _MISSING
 
 
 def _divide_values(left: Any, right: Any) -> Any:

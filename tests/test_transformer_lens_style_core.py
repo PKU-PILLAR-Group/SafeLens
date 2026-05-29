@@ -662,6 +662,22 @@ def test_factored_matrix_dense_ops_and_composition() -> None:
     assert matmul([[[1, 2], [3, 4]]], [[1], [2]]) == [[[5.0], [11.0]]]
 
 
+def test_factored_matrix_list_backend_batched_matrix_vector_products() -> None:
+    batched = [
+        [[1, 2], [3, 4]],
+        [[5, 6], [7, 8]],
+    ]
+    identity = [
+        [[1, 0], [0, 1]],
+        [[1, 0], [0, 1]],
+    ]
+
+    assert matmul(batched, [10, 1]) == [[12.0, 34.0], [56.0, 78.0]]
+    assert matmul([10, 1], batched) == [[13.0, 24.0], [57.0, 68.0]]
+    assert FactoredMatrix(batched, identity) @ [10, 1] == [[12.0, 34.0], [56.0, 78.0]]
+    assert [10, 1] @ FactoredMatrix(identity, batched) == [[13.0, 24.0], [57.0, 68.0]]
+
+
 def test_factored_matrix_composes_nontrivial_factors_once() -> None:
     left = FactoredMatrix([[1, 2]], [[3, 4], [5, 6]])
     right = FactoredMatrix([[7, 8], [9, 10]], [[11], [12]])
@@ -746,10 +762,36 @@ def test_factored_matrix_indexes_rows_and_columns_like_transformerlens() -> None
     matrix = FactoredMatrix([[1, 2], [3, 4]], [[5, 6, 7], [8, 9, 10]])
 
     assert matrix[1].AB == [matrix.AB[1]]
+    assert matrix[-1].AB == [matrix.AB[-1]]
     assert matrix[:, 2].AB == [[27.0], [61.0]]
+    assert matrix[:, -1].AB == [[27.0], [61.0]]
     assert matrix[1, 2].AB == [[61.0]]
+    assert matrix[1, -1].AB == [[61.0]]
+    assert matrix[...].AB == matrix.AB
+    assert matrix[..., -1].AB == [[27.0], [61.0]]
     with pytest.raises(ValueError, match="too long"):
         _ = matrix[0, 0, 0]
+
+
+def test_factored_matrix_indexes_batched_rows_and_columns_like_transformerlens() -> None:
+    matrix = FactoredMatrix(
+        [
+            [[1, 0], [0, 1]],
+            [[2, 0], [0, 2]],
+        ],
+        [
+            [[3, 4, 5], [6, 7, 8]],
+            [[1, 2, 3], [4, 5, 6]],
+        ],
+    )
+
+    assert matrix[-1].AB == matrix.AB[-1]
+    assert matrix[..., -1].AB == [
+        [[5.0], [8.0]],
+        [[6.0], [12.0]],
+    ]
+    assert matrix[-1, :, -1].AB == [[6.0], [12.0]]
+    assert matrix[...].AB == matrix.AB
 
 
 def test_factored_matrix_norm_preserves_leading_dimensions() -> None:
@@ -854,6 +896,24 @@ def test_factored_matrix_batched_svd_helpers_reconstruct_dense_product() -> None
     assert_nested_close(matrix.make_even().AB, matrix.AB)
 
 
+def test_factored_matrix_get_corner_preserves_batched_leading_dimensions() -> None:
+    matrix = FactoredMatrix(
+        [
+            [[1, 0], [0, 1]],
+            [[2, 0], [0, 2]],
+        ],
+        [
+            [[3, 4, 5], [6, 7, 8]],
+            [[1, 2, 3], [4, 5, 6]],
+        ],
+    )
+
+    assert matrix.get_corner(2) == [
+        [[3.0, 4.0], [6.0, 7.0]],
+        [[2.0, 4.0], [8.0, 10.0]],
+    ]
+
+
 def test_factored_matrix_torch_transpose_swaps_only_matrix_axes_for_batched_factors() -> None:
     torch = pytest.importorskip("torch")
     matrix = FactoredMatrix(
@@ -872,6 +932,34 @@ def test_factored_matrix_torch_transpose_swaps_only_matrix_axes_for_batched_fact
     )
 
     assert torch.equal(matrix.T.AB, matrix.AB.transpose(-1, -2))
+
+
+def test_factored_matrix_torch_get_corner_preserves_batched_leading_dimensions() -> None:
+    torch = pytest.importorskip("torch")
+    matrix = FactoredMatrix(
+        torch.tensor(
+            [
+                [[1.0, 0.0], [0.0, 1.0]],
+                [[2.0, 0.0], [0.0, 2.0]],
+            ]
+        ),
+        torch.tensor(
+            [
+                [[3.0, 4.0, 5.0], [6.0, 7.0, 8.0]],
+                [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]],
+            ]
+        ),
+    )
+
+    assert torch.equal(
+        matrix.get_corner(2),
+        torch.tensor(
+            [
+                [[3.0, 4.0], [6.0, 7.0]],
+                [[2.0, 4.0], [8.0, 10.0]],
+            ]
+        ),
+    )
 
 
 def test_factored_matrix_torch_batched_svd_helpers_reconstruct_dense_product() -> None:
@@ -994,9 +1082,19 @@ def test_kv_cache_appends_sequence_axis() -> None:
 def test_logit_loss_and_token_helpers() -> None:
     probs = softmax([0.0, 0.0])
     log_probs = logits_to_log_probs([[0.0, 0.0]], [1])
+    same_token_log_probs = logits_to_log_probs([[0.0, 2.0, 0.0], [0.0, 0.0, 3.0]], 1)
 
     assert probs == [0.5, 0.5]
     assert math.isclose(log_probs[0], -math.log(2.0))
+    assert len(same_token_log_probs) == 2
+    assert math.isclose(
+        same_token_log_probs[0],
+        2.0 - math.log(math.exp(0.0) + math.exp(2.0) + math.exp(0.0)),
+    )
+    assert math.isclose(
+        same_token_log_probs[1],
+        0.0 - math.log(math.exp(0.0) + math.exp(0.0) + math.exp(3.0)),
+    )
     assert math.isclose(cross_entropy_loss([[0.0, 0.0]], [1]), math.log(2.0))
     assert topk_tokens([0.1, 0.9, 0.3], k=2) == ([1, 2], [0.9, 0.3])
     assert topk_tokens([[0.1, 0.9, 0.3], [0.4, 0.2, 0.8]], k=1) == [
@@ -1157,13 +1255,29 @@ def test_numpy_logit_helpers_gather_token_log_probs_on_last_dim() -> None:
     tokens = np.array([1, 2])
 
     log_probs = logits_to_log_probs(logits, tokens)
+    same_token_log_probs = logits_to_log_probs(logits, 1)
 
     expected = np.array([
         2.0 - math.log(math.exp(0.0) + math.exp(2.0) + math.exp(0.0)),
         3.0 - math.log(math.exp(0.0) + math.exp(0.0) + math.exp(3.0)),
     ])
+    same_token_expected = np.array([
+        2.0 - math.log(math.exp(0.0) + math.exp(2.0) + math.exp(0.0)),
+        0.0 - math.log(math.exp(0.0) + math.exp(0.0) + math.exp(3.0)),
+    ])
     assert np.allclose(log_probs, expected)
+    assert np.allclose(same_token_log_probs, same_token_expected)
     assert math.isclose(cross_entropy_loss(logits, tokens), float(-expected.mean()))
+
+
+def test_torch_logit_helpers_gather_scalar_token_on_last_dim() -> None:
+    torch = pytest.importorskip("torch")
+    logits = torch.tensor([[0.0, 2.0, 0.0], [0.0, 0.0, 3.0]])
+
+    log_probs = logits_to_log_probs(logits, 1)
+    expected = torch.log_softmax(logits, dim=-1)[..., 1]
+
+    assert torch.allclose(log_probs, expected)
 
 
 def test_causal_lm_metrics_accept_numpy_logits_and_masks() -> None:
@@ -1354,12 +1468,84 @@ def test_head_results_from_z_aligns_explicit_layer_axis() -> None:
     ]
 
 
+def test_head_results_from_z_aligns_batchless_explicit_layer_axis() -> None:
+    z = [
+        [[[1, 2], [3, 4]]],
+        [[[5, 6], [7, 8]]],
+    ]
+    W_O = [
+        [[[1, 0], [0, 1]], [[2, 0], [0, 2]]],
+        [[[0, 1], [1, 0]], [[3, 0], [0, 3]]],
+    ]
+
+    assert compute_head_results_from_z(z, W_O) == [
+        [[[1.0, 2.0], [6.0, 8.0]]],
+        [[[6.0, 5.0], [21.0, 24.0]]],
+    ]
+
+
+def test_head_results_from_z_aligns_batchless_single_position_layer_axis() -> None:
+    z = [
+        [[1, 2], [3, 4]],
+        [[5, 6], [7, 8]],
+    ]
+    W_O = [
+        [[[1, 0], [0, 1]], [[2, 0], [0, 2]]],
+        [[[0, 1], [1, 0]], [[3, 0], [0, 3]]],
+    ]
+
+    assert compute_head_results_from_z(z, W_O) == [
+        [[1.0, 2.0], [6.0, 8.0]],
+        [[6.0, 5.0], [21.0, 24.0]],
+    ]
+
+
 def test_head_results_from_z_torch_aligns_explicit_layer_axis() -> None:
     torch = pytest.importorskip("torch")
     z = torch.tensor(
         [
             [[[[1.0, 2.0], [3.0, 4.0]]]],
             [[[[5.0, 6.0], [7.0, 8.0]]]],
+        ]
+    )
+    W_O = torch.tensor(
+        [
+            [[[1.0, 0.0], [0.0, 1.0]], [[2.0, 0.0], [0.0, 2.0]]],
+            [[[0.0, 1.0], [1.0, 0.0]], [[3.0, 0.0], [0.0, 3.0]]],
+        ]
+    )
+
+    expected = torch.einsum("l...hd,lhdm->l...hm", z, W_O)
+
+    assert torch.equal(compute_head_results_from_z(z, W_O), expected)
+
+
+def test_head_results_from_z_torch_aligns_batchless_explicit_layer_axis() -> None:
+    torch = pytest.importorskip("torch")
+    z = torch.tensor(
+        [
+            [[[1.0, 2.0], [3.0, 4.0]]],
+            [[[5.0, 6.0], [7.0, 8.0]]],
+        ]
+    )
+    W_O = torch.tensor(
+        [
+            [[[1.0, 0.0], [0.0, 1.0]], [[2.0, 0.0], [0.0, 2.0]]],
+            [[[0.0, 1.0], [1.0, 0.0]], [[3.0, 0.0], [0.0, 3.0]]],
+        ]
+    )
+
+    expected = torch.einsum("l...hd,lhdm->l...hm", z, W_O)
+
+    assert torch.equal(compute_head_results_from_z(z, W_O), expected)
+
+
+def test_head_results_from_z_torch_aligns_batchless_single_position_layer_axis() -> None:
+    torch = pytest.importorskip("torch")
+    z = torch.tensor(
+        [
+            [[1.0, 2.0], [3.0, 4.0]],
+            [[5.0, 6.0], [7.0, 8.0]],
         ]
     )
     W_O = torch.tensor(

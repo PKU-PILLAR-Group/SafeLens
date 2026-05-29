@@ -133,7 +133,7 @@ class FactoredMatrix:
 
     def __getitem__(self, index: Any) -> FactoredMatrix:
         """Index leading, row, and column dimensions while preserving factored rank."""
-        normalized = normalize_index(index)
+        normalized = expand_ellipsis(normalize_index(index), len(self.shape))
         indexed_dims = len([item for item in normalized if item is not None])
         leading_dims = max(0, len(self.shape) - 2)
         if indexed_dims <= leading_dims:
@@ -194,8 +194,7 @@ class FactoredMatrix:
 
     def get_corner(self, k: int = 3) -> Any:
         """Return the top-left dense corner."""
-        dense = as_2d(self.AB)
-        return [row[:k] for row in dense[:k]]
+        return matrix_corner(self.AB, k)
 
     def unsqueeze(self, dim: int) -> FactoredMatrix:
         """Add a leading dimension to both factors."""
@@ -222,6 +221,10 @@ def matmul(left: Any, right: Any) -> Any:
             matmul(left_item, right_item)
             for left_item, right_item in zip(left_b, right_b, strict=True)
         ]
+    if len(left_shape) > 2 and len(right_shape) == 1:
+        return [matmul(item, right) for item in left]
+    if len(left_shape) == 1 and len(right_shape) > 2:
+        return [matmul(left, item) for item in right]
     if len(left_shape) > 2 and len(right_shape) == 2:
         return [matmul(item, right) for item in left]
     if len(left_shape) == 2 and len(right_shape) > 2:
@@ -420,6 +423,21 @@ def transpose(matrix: Any) -> Any:
         return [transpose(item) for item in matrix]
     rows = as_2d(matrix)
     return [list(col) for col in zip(*rows, strict=True)]
+
+
+def matrix_corner(matrix: Any, k: int = 3) -> Any:
+    """Return a top-left corner over the final two matrix dimensions."""
+    shape = shape_of(matrix)
+    if len(shape) < 2:
+        return matrix
+    try:
+        return matrix[..., :k, :k]
+    except Exception:
+        pass
+    if len(shape) > 2:
+        return [matrix_corner(item, k) for item in matrix]
+    rows = as_2d(matrix)
+    return [row[:k] for row in rows[:k]]
 
 
 def _make_even_factors(u: Any, s: Any, v: Any) -> tuple[Any, Any]:
@@ -632,12 +650,29 @@ def normalize_index(index: Any) -> tuple[Any, ...]:
     return (index,)
 
 
+def expand_ellipsis(index: tuple[Any, ...], rank: int) -> tuple[Any, ...]:
+    if Ellipsis not in index:
+        return index
+    if index.count(Ellipsis) > 1:
+        raise IndexError("an index can only have a single ellipsis")
+    consumed_dims = len([item for item in index if item is not None and item is not Ellipsis])
+    fill = max(0, rank - consumed_dims)
+    expanded: list[Any] = []
+    for item in index:
+        if item is Ellipsis:
+            expanded.extend([FULL_SLICE] * fill)
+        else:
+            expanded.append(item)
+    return tuple(expanded)
+
+
 def convert_int_to_slice(index: tuple[Any, ...], axis: int) -> tuple[Any, ...]:
     values = list(index)
     if axis < 0:
         axis = len(values) + axis
     if 0 <= axis < len(values) and isinstance(values[axis], int):
-        values[axis] = slice(values[axis], values[axis] + 1)
+        item = values[axis]
+        values[axis] = slice(item, None if item == -1 else item + 1)
     return tuple(values)
 
 

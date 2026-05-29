@@ -9,6 +9,7 @@ import pytest
 
 from SafeLens.core.base import ModelLoadConfig
 from SafeLens.core.hooks import ActivationCache
+from SafeLens.core.analysis import induction_attention_score, previous_token_attention_score
 from SafeLens.core.patching import (
     PatchResult,
     get_act_patch_attn_head_out_by_pos,
@@ -44,6 +45,7 @@ _COMMON_COMPONENTS = (
     "v",
     "z",
 )
+_ATTENTION_COMPONENTS = ("pattern", "attn_scores", "result")
 
 
 def _skip_unless_enabled() -> None:
@@ -106,6 +108,39 @@ def test_transformer_lens_real_model_caches_common_components(
             assert getattr(activation, "shape", None) is not None, (family, layer_name)
             assert activation.shape[0] == 1
             assert activation.ndim >= 2
+    finally:
+        wrapper.remove_hooks()
+
+
+@pytest.mark.parametrize(("family", "model_id"), _CAUSAL_MODEL_CASES)  # type: ignore[misc]
+def test_transformer_lens_real_causal_models_cache_attention_and_result_components(
+    family: str,
+    model_id: str,
+) -> None:
+    _skip_unless_enabled()
+    wrapper = _load_wrapper(model_id)
+    try:
+        cache_layers = tuple(f"layer_0.{component}" for component in _ATTENTION_COMPONENTS)
+        output, cache = wrapper.run_with_cache({"text": _TEXT}, layers=cache_layers)
+
+        assert output.logits.ndim == 3
+        assert set(cache_layers) <= set(cache)
+        pattern = cache["layer_0.pattern"]
+        scores = cache["layer_0.attn_scores"]
+        result = cache["layer_0.result"]
+
+        assert pattern.ndim == 4, family
+        assert scores.shape == pattern.shape, family
+        assert result.ndim == 4, family
+        assert result.shape[0] == 1, family
+        assert result.shape[1] == output.logits.shape[1], family
+        assert result.shape[-1] == wrapper.cfg.d_model, family
+        assert scores.shape == pattern.shape, family
+        assert pattern.shape[-1] == pattern.shape[-2] == output.logits.shape[1], family
+        assert pattern.sum(dim=-1).allclose(pattern.new_ones(pattern.shape[:-1])), family
+        assert previous_token_attention_score(pattern).shape == pattern.shape[:2], family
+        assert induction_attention_score(pattern).shape == pattern.shape[:2], family
+        assert pattern.allclose(scores.softmax(dim=-1), atol=1e-5, rtol=1e-5), family
     finally:
         wrapper.remove_hooks()
 

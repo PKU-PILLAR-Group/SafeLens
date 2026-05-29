@@ -4,6 +4,7 @@ from typing import Any
 
 import pytest
 
+from SafeLens.core.factored_matrix import FactoredMatrix, matmul, transpose
 from SafeLens.core.hooks import ActivationCache
 from SafeLens.core.patching import PatchSpec, run_activation_patch
 from SafeLens.utils import (
@@ -17,6 +18,8 @@ from SafeLens.utils.model_bridge import (
     ComponentHookSpec,
     extract_component_activation,
     merge_component_activation,
+    reshape_attention_weight,
+    reshape_joint_qkv_attention_weight,
 )
 
 
@@ -29,10 +32,11 @@ class _Handle:
 
 
 class _FakeModule:
-    def __init__(self, weight: Any | None = None) -> None:
+    def __init__(self, weight: Any | None = None, bias: Any | None = None) -> None:
         self.forward_hooks: list[Any] = []
         self.pre_hooks: list[Any] = []
         self.weight = weight
+        self.bias = bias
 
     def register_forward_hook(self, hook_fn: Any) -> _Handle:
         self.forward_hooks.append(hook_fn)
@@ -134,10 +138,22 @@ class _FakeWeightedAttention(_FakeAttention):
     def __init__(self) -> None:
         torch = pytest.importorskip("torch")
         super().__init__()
-        self.q_proj = _FakeModule(torch.arange(16, dtype=torch.float32).reshape(4, 4))
-        self.k_proj = _FakeModule(torch.arange(16, 32, dtype=torch.float32).reshape(4, 4))
-        self.v_proj = _FakeModule(torch.arange(32, 48, dtype=torch.float32).reshape(4, 4))
-        self.o_proj = _FakeModule(torch.arange(48, 64, dtype=torch.float32).reshape(4, 4))
+        self.q_proj = _FakeModule(
+            torch.arange(16, dtype=torch.float32).reshape(4, 4),
+            torch.arange(4, dtype=torch.float32),
+        )
+        self.k_proj = _FakeModule(
+            torch.arange(16, 32, dtype=torch.float32).reshape(4, 4),
+            torch.arange(4, 8, dtype=torch.float32),
+        )
+        self.v_proj = _FakeModule(
+            torch.arange(32, 48, dtype=torch.float32).reshape(4, 4),
+            torch.arange(8, 12, dtype=torch.float32),
+        )
+        self.o_proj = _FakeModule(
+            torch.arange(48, 64, dtype=torch.float32).reshape(4, 4),
+            torch.arange(12, 16, dtype=torch.float32),
+        )
 
 
 class _FakeWeightedLayer(_FakeLayer):
@@ -150,7 +166,14 @@ class _FakeWeightedLayer(_FakeLayer):
             (),
             {
                 "gate_proj": _FakeModule(torch.arange(12, dtype=torch.float32).reshape(3, 4)),
-                "down_proj": _FakeModule(torch.arange(12, 24, dtype=torch.float32).reshape(4, 3)),
+                "up_proj": _FakeModule(
+                    torch.arange(24, 36, dtype=torch.float32).reshape(3, 4),
+                    torch.arange(3, dtype=torch.float32),
+                ),
+                "down_proj": _FakeModule(
+                    torch.arange(12, 24, dtype=torch.float32).reshape(4, 3),
+                    torch.arange(4, dtype=torch.float32),
+                ),
             },
         )()
 
@@ -170,6 +193,84 @@ class _FakeWeightedQwenModel(_FakeQwenModel):
         self.model = _FakeWeightedBackbone()
 
 
+class _FakeWeightedNeuronQwenModel(_FakeWeightedQwenModel):
+    def __call__(self, **kwargs: Any) -> dict[str, Any]:
+        _ = kwargs
+        layer = self.model.layers[0]
+        post = layer.mlp.down_proj.run_pre([[[3.0, 4.0, 5.0]]])
+        return {"post": post}
+
+
+class _FakeWeightedGatedNeuronQwenModel(_FakeWeightedQwenModel):
+    def __call__(self, **kwargs: Any) -> dict[str, Any]:
+        _ = kwargs
+        layer = self.model.layers[0]
+        gate = layer.mlp.gate_proj.run_forward([[[1.0, 2.0, 3.0]]])
+        linear = layer.mlp.up_proj.run_forward([[[4.0, 5.0, 6.0]]])
+        post = layer.mlp.down_proj.run_pre([[[7.0, 8.0, 9.0]]])
+        return {"gate": gate, "linear": linear, "post": post}
+
+
+class _FakeWeightedGatedPreLinearOnlyQwenModel(_FakeWeightedQwenModel):
+    def __call__(self, **kwargs: Any) -> dict[str, Any]:
+        _ = kwargs
+        layer = self.model.layers[0]
+        linear = layer.mlp.up_proj.run_forward([[[4.0, 5.0, 6.0]]])
+        return {"linear": linear}
+
+
+class _FakeListWeightedLayer(_FakeLayer):
+    def __init__(self) -> None:
+        super().__init__()
+        self.self_attn.q_proj = _FakeModule(
+            [[0, 1, 2, 3], [10, 11, 12, 13], [20, 21, 22, 23], [30, 31, 32, 33]],
+            [0, 1, 2, 3],
+        )
+        self.self_attn.k_proj = _FakeModule(
+            [[40, 41, 42, 43], [50, 51, 52, 53], [60, 61, 62, 63], [70, 71, 72, 73]],
+            [4, 5, 6, 7],
+        )
+        self.self_attn.v_proj = _FakeModule(
+            [[80, 81, 82, 83], [90, 91, 92, 93], [100, 101, 102, 103], [110, 111, 112, 113]],
+            [8, 9, 10, 11],
+        )
+        self.self_attn.o_proj = _FakeModule(
+            [[120, 121, 122, 123], [130, 131, 132, 133], [140, 141, 142, 143], [150, 151, 152, 153]],
+            [12, 13, 14, 15],
+        )
+        self.mlp = type(
+            "_ListWeightedMlp",
+            (),
+            {
+                "gate_proj": _FakeModule([[0, 1, 2, 3], [10, 11, 12, 13], [20, 21, 22, 23]]),
+                "up_proj": _FakeModule(
+                    [[100, 101, 102, 103], [110, 111, 112, 113], [120, 121, 122, 123]],
+                    [1, 2, 3],
+                ),
+                "down_proj": _FakeModule(
+                    [[30, 31, 32], [40, 41, 42], [50, 51, 52], [60, 61, 62]],
+                    [4, 5, 6, 7],
+                ),
+            },
+        )()
+
+
+class _FakeListWeightedBackbone:
+    def __init__(self) -> None:
+        self.embed_tokens = _FakeModule(
+            [[0, 1, 2, 3], [10, 11, 12, 13], [20, 21, 22, 23]]
+        )
+        self.wte = self.embed_tokens
+        self.wpe = _FakeModule([[30, 31, 32, 33], [40, 41, 42, 43]])
+        self.layers = [_FakeListWeightedLayer()]
+
+
+class _FakeListWeightedQwenModel(_FakeQwenModel):
+    def __init__(self) -> None:
+        self.config = _FakeConfig()
+        self.model = _FakeListWeightedBackbone()
+
+
 class _FakeGpt2Config:
     model_type = "gpt2"
     n_head = 2
@@ -183,13 +284,34 @@ class _FakeGpt2Config:
 class _FakeGpt2Attention:
     def __init__(self) -> None:
         torch = pytest.importorskip("torch")
-        self.c_attn = _FakeModule(torch.arange(90, dtype=torch.float32).reshape(5, 18))
-        self.c_proj = _FakeModule(torch.arange(30, dtype=torch.float32).reshape(6, 5))
+        self.c_attn = _FakeModule(
+            torch.arange(90, dtype=torch.float32).reshape(5, 18),
+            torch.arange(18, dtype=torch.float32),
+        )
+        self.c_proj = _FakeModule(
+            torch.arange(30, dtype=torch.float32).reshape(6, 5),
+            torch.arange(6, dtype=torch.float32),
+        )
 
 
-class _FakeGpt2Block:
+class _FakeGpt2Mlp:
     def __init__(self) -> None:
+        torch = pytest.importorskip("torch")
+        self.c_fc = _FakeModule(
+            torch.arange(12, dtype=torch.float32).reshape(4, 3),
+            torch.arange(3, dtype=torch.float32),
+        )
+        self.c_proj = _FakeModule(
+            torch.arange(12, 24, dtype=torch.float32).reshape(3, 4),
+            torch.arange(4, dtype=torch.float32),
+        )
+
+
+class _FakeGpt2Block(_FakeModule):
+    def __init__(self) -> None:
+        super().__init__()
         self.attn = _FakeGpt2Attention()
+        self.mlp = _FakeGpt2Mlp()
 
 
 class _FakeGpt2Transformer:
@@ -203,6 +325,45 @@ class _FakeGpt2Model:
         self.transformer = _FakeGpt2Transformer()
 
 
+class _FakeHookableEmbedding(_FakeModule):
+    def __init__(self, weight: Any) -> None:
+        super().__init__(weight)
+
+    def __call__(self, input_ids: Any) -> Any:
+        torch = pytest.importorskip("torch")
+        ids = input_ids if hasattr(input_ids, "shape") else torch.tensor(input_ids)
+        embedded = self.weight[ids]
+        return self.run_forward(embedded, inputs=(input_ids,))
+
+
+class _FakeGpt2EmbeddingTransformer(_FakeGpt2Transformer):
+    def __init__(self) -> None:
+        torch = pytest.importorskip("torch")
+        super().__init__()
+        self.wte = _FakeHookableEmbedding(torch.arange(60, dtype=torch.float32).reshape(10, 6))
+        self.wpe = _FakeHookableEmbedding(torch.arange(600, 660, dtype=torch.float32).reshape(10, 6))
+
+
+class _FakeGpt2EmbeddingModel:
+    def __init__(self) -> None:
+        self.config = _FakeGpt2Config()
+        self.transformer = _FakeGpt2EmbeddingTransformer()
+
+    def get_input_embeddings(self) -> _FakeHookableEmbedding:
+        return self.transformer.wte
+
+    def __call__(self, **kwargs: Any) -> dict[str, Any]:
+        torch = pytest.importorskip("torch")
+        input_ids = kwargs["input_ids"]
+        if not hasattr(input_ids, "shape"):
+            input_ids = torch.tensor(input_ids)
+        position_ids = torch.arange(input_ids.shape[-1]).unsqueeze(0).expand_as(input_ids)
+        embed = self.transformer.wte(input_ids)
+        pos_embed = self.transformer.wpe(position_ids)
+        resid_pre = self.transformer.h[0].run_pre(embed + pos_embed)
+        return {"logits": resid_pre, "resid_pre": resid_pre}
+
+
 class _FakeGptNeoxConfig:
     model_type = "gpt_neox"
     num_attention_heads = 2
@@ -211,12 +372,29 @@ class _FakeGptNeoxConfig:
 class _FakeGptNeoxAttention:
     def __init__(self) -> None:
         torch = pytest.importorskip("torch")
-        self.query_key_value = _FakeModule(torch.arange(48, dtype=torch.float32).reshape(12, 4))
+        self.query_key_value = _FakeModule(
+            torch.arange(48, dtype=torch.float32).reshape(12, 4),
+            torch.arange(12, dtype=torch.float32),
+        )
+
+
+class _FakeGptNeoxMlp:
+    def __init__(self) -> None:
+        torch = pytest.importorskip("torch")
+        self.dense_h_to_4h = _FakeModule(
+            torch.arange(12, dtype=torch.float32).reshape(3, 4),
+            torch.arange(3, dtype=torch.float32),
+        )
+        self.dense_4h_to_h = _FakeModule(
+            torch.arange(12, 24, dtype=torch.float32).reshape(4, 3),
+            torch.arange(4, dtype=torch.float32),
+        )
 
 
 class _FakeGptNeoxLayer:
     def __init__(self) -> None:
         self.attention = _FakeGptNeoxAttention()
+        self.mlp = _FakeGptNeoxMlp()
 
 
 class _FakeGptNeoxBackbone:
@@ -228,6 +406,61 @@ class _FakeGptNeoxModel:
     def __init__(self) -> None:
         self.config = _FakeGptNeoxConfig()
         self.gpt_neox = _FakeGptNeoxBackbone()
+
+
+class _FakeFalconMQAConfig:
+    model_type = "falcon"
+    num_attention_heads = 4
+    num_kv_heads = 4
+    hidden_size = 8
+    num_hidden_layers = 1
+    vocab_size = 65024
+    max_position_embeddings = 2048
+    multi_query = True
+    new_decoder_architecture = False
+
+
+class _FakeFalconMQAAttention:
+    def __init__(self) -> None:
+        torch = pytest.importorskip("torch")
+        self.query_key_value = _FakeModule(
+            torch.arange(96, dtype=torch.float32).reshape(12, 8),
+            torch.arange(12, dtype=torch.float32),
+        )
+        self.dense = _FakeModule(
+            torch.arange(64, dtype=torch.float32).reshape(8, 8),
+            torch.arange(8, dtype=torch.float32),
+        )
+
+
+class _FakeFalconMlp:
+    def __init__(self) -> None:
+        torch = pytest.importorskip("torch")
+        self.dense_h_to_4h = _FakeModule(
+            torch.arange(16, dtype=torch.float32).reshape(4, 4),
+            torch.arange(4, dtype=torch.float32),
+        )
+        self.dense_4h_to_h = _FakeModule(
+            torch.arange(16, 32, dtype=torch.float32).reshape(4, 4),
+            torch.arange(4, 8, dtype=torch.float32),
+        )
+
+
+class _FakeFalconMQABlock:
+    def __init__(self) -> None:
+        self.self_attention = _FakeFalconMQAAttention()
+        self.mlp = _FakeFalconMlp()
+
+
+class _FakeFalconMQATransformer:
+    def __init__(self) -> None:
+        self.h = [_FakeFalconMQABlock()]
+
+
+class _FakeFalconMQAModel:
+    def __init__(self) -> None:
+        self.config = _FakeFalconMQAConfig()
+        self.transformer = _FakeFalconMQATransformer()
 
 
 class _FakeHeadConfig:
@@ -245,6 +478,14 @@ class _FakeGroupedHeadConfig:
 
 class _FakeGroupedHeadModel:
     config = _FakeGroupedHeadConfig()
+
+
+class _TinyContextConfig:
+    n_ctx = 4
+
+
+class _TinyContextModel:
+    config = _TinyContextConfig()
 
 
 class _FakeTupleOutputModel(_FakeQwenModel):
@@ -375,16 +616,18 @@ class _FakeT5Model:
 
 
 class _FakeEmbedding:
-    def __init__(self, weight: Any) -> None:
+    def __init__(self, weight: Any, bias: Any | None = None) -> None:
         self.weight = weight
+        self.bias = bias
 
 
 class _FakeUnembeddingModel:
-    def __init__(self, weight: Any) -> None:
+    def __init__(self, weight: Any, bias: Any | None = None) -> None:
         self._weight = weight
+        self._bias = bias
 
     def get_output_embeddings(self) -> _FakeEmbedding:
-        return _FakeEmbedding(self._weight)
+        return _FakeEmbedding(self._weight, self._bias)
 
 
 class _FakeTokenizerOutput(dict[str, Any]):
@@ -405,6 +648,7 @@ class _FakeT5Tokenizer:
 class _FakeTextTokenizer:
     bos_token_id = 0
     eos_token_id = 999
+    padding_side = "right"
 
     def __call__(
         self,
@@ -412,6 +656,8 @@ class _FakeTextTokenizer:
         return_tensors: str,
         add_special_tokens: bool = True,
         padding: bool = False,
+        truncation: bool = False,
+        max_length: int | None = None,
     ) -> Any:
         _ = return_tensors
         torch = pytest.importorskip("torch")
@@ -421,13 +667,27 @@ class _FakeTextTokenizer:
             token_ids = [ord(char) for char in item]
             if add_special_tokens:
                 token_ids = [self.bos_token_id, *token_ids]
+            if truncation and max_length is not None:
+                token_ids = token_ids[:max_length]
             rows.append(token_ids)
         if padding:
             max_length = max((len(row) for row in rows), default=0)
-            rows = [row + [self.eos_token_id] * (max_length - len(row)) for row in rows]
+            if self.padding_side == "left":
+                rows = [
+                    [self.eos_token_id] * (max_length - len(row)) + row
+                    for row in rows
+                ]
+            else:
+                rows = [row + [self.eos_token_id] * (max_length - len(row)) for row in rows]
         return _FakeTokenizerOutput({"input_ids": torch.tensor(rows)})
 
-    def decode(self, tokens: Any, skip_special_tokens: bool = False) -> str:
+    def decode(
+        self,
+        tokens: Any,
+        skip_special_tokens: bool = False,
+        clean_up_tokenization_spaces: bool = False,
+    ) -> str:
+        _ = clean_up_tokenization_spaces
         token_list = tokens.tolist() if hasattr(tokens, "tolist") else list(tokens)
         if not isinstance(token_list, list):
             token_list = [token_list]
@@ -445,7 +705,13 @@ class _FakeTextTokenizer:
                 pieces.append(chr(int(token)))
         return "".join(pieces)
 
-    def batch_decode(self, tokens: Any, skip_special_tokens: bool = False) -> list[str]:
+    def batch_decode(
+        self,
+        tokens: Any,
+        skip_special_tokens: bool = False,
+        clean_up_tokenization_spaces: bool = False,
+    ) -> list[str]:
+        _ = clean_up_tokenization_spaces
         rows = tokens.tolist() if hasattr(tokens, "tolist") else tokens
         return [self.decode(row, skip_special_tokens=skip_special_tokens) for row in rows]
 
@@ -475,6 +741,17 @@ class _FakeTokenizerAddsMultipleSpecialTokens(_FakeTextTokenizer):
             raw_ids = output["input_ids"][0].tolist()
             output["input_ids"] = torch.tensor([[self.bos_token_id, *raw_ids, self.eos_token_id]])
         return output
+
+
+class _FakeTokenizerWithoutPadToken(_FakeTextTokenizer):
+    pad_token = None
+    pad_token_id = None
+    eos_token = "<eos>"
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        if kwargs.get("padding") and self.pad_token is None and self.pad_token_id is None:
+            raise ValueError("Asking to pad but the tokenizer does not have a padding token.")
+        return super().__call__(*args, **kwargs)
 
 
 class _FailingTokenizer:
@@ -681,6 +958,71 @@ def test_transformer_lens_compatible_wrapper_caches_component_hooks() -> None:
     assert cache == {"blocks.0.attn.hook_q": ["q"]}
 
 
+def test_transformer_lens_compatible_wrapper_caches_top_level_embedding_hooks() -> None:
+    torch = pytest.importorskip("torch")
+    wrapper = TransformerLensCompatibleModelWrapper(name="gpt2")
+    wrapper.model = _FakeGpt2EmbeddingModel()
+
+    output, cache = wrapper.run_with_cache(
+        {"input_ids": [[1, 2]]},
+        layers=["hook_embed", "hook_pos_embed", "blocks.0.hook_resid_pre"],
+        return_cache_object=True,
+    )
+
+    assert isinstance(cache, ActivationCache)
+    assert cache.has_embed
+    assert cache.has_pos_embed
+    expected_embed = wrapper.model.transformer.wte.weight[torch.tensor([[1, 2]])]
+    expected_pos = wrapper.model.transformer.wpe.weight[torch.tensor([[0, 1]])]
+    assert torch.equal(cache["hook_embed"], expected_embed)
+    assert torch.equal(cache["embed"], expected_embed)
+    assert torch.equal(cache["hook_pos_embed"], expected_pos)
+    assert torch.equal(cache["pos_embed"], expected_pos)
+    assert torch.equal(cache[("resid_pre", 0)], expected_embed + expected_pos)
+    assert torch.equal(output["logits"], expected_embed + expected_pos)
+
+
+def test_transformer_lens_compatible_wrapper_patches_top_level_embedding_hook() -> None:
+    torch = pytest.importorskip("torch")
+    wrapper = TransformerLensCompatibleModelWrapper(name="gpt2")
+    wrapper.model = _FakeGpt2EmbeddingModel()
+    seen: list[tuple[str, int | str]] = []
+
+    def patch_embed(activation: Any, hook: Any) -> Any:
+        seen.append((hook.name, hook.ctx.get("count", 0)))
+        hook.ctx["count"] = hook.ctx.get("count", 0) + 1
+        return activation + 10
+
+    output = wrapper.run_with_hooks(
+        {"input_ids": [[1, 2]]},
+        fwd_hooks=[("embed", patch_embed)],
+        return_type="model_output",
+    )
+
+    expected_embed = wrapper.model.transformer.wte.weight[torch.tensor([[1, 2]])] + 10
+    expected_pos = wrapper.model.transformer.wpe.weight[torch.tensor([[0, 1]])]
+    assert torch.equal(output["logits"], expected_embed + expected_pos)
+    assert seen == [("hook_embed", 0)]
+    assert wrapper.model.transformer.wte.forward_hooks == []
+    assert wrapper._hooks == []
+
+
+def test_transformer_lens_compatible_wrapper_filters_top_level_embedding_aliases() -> None:
+    torch = pytest.importorskip("torch")
+    wrapper = TransformerLensCompatibleModelWrapper(name="gpt2")
+    wrapper.model = _FakeGpt2EmbeddingModel()
+
+    _output, cache = wrapper.run_with_cache(
+        torch.tensor([1, 2]),
+        names_filter=["embed", "hook_embed"],
+        return_cache_object=True,
+    )
+
+    assert isinstance(cache, ActivationCache)
+    assert set(cache.to_dict()) == {"hook_embed"}
+    assert torch.equal(cache["embed"], wrapper.model.transformer.wte.weight[torch.tensor([[1, 2]])])
+
+
 def test_transformer_lens_compatible_wrapper_accepts_token_inputs_directly() -> None:
     torch = pytest.importorskip("torch")
 
@@ -848,6 +1190,28 @@ def test_transformer_lens_compatible_wrapper_add_caching_hooks_defaults_to_cache
     assert empty_cache.to_dict() == {}
 
 
+def test_transformer_lens_compatible_wrapper_add_caching_hooks_rolls_back_on_invalid_layer() -> None:
+    wrapper = TransformerLensCompatibleModelWrapper(name="Qwen/Qwen3-8B")
+    wrapper.model = _FakeQwenModel()
+    q_proj = wrapper.model.model.layers[0].self_attn.q_proj
+    original_model = object()
+    external_cache = ActivationCache({"existing": ["value"]}, model=original_model)
+
+    with pytest.raises(KeyError):
+        wrapper.add_caching_hooks(
+            layers=["blocks.0.attn.hook_q", "blocks.99.attn.hook_q"],
+            remove_batch_dim=True,
+            cache=external_cache,
+        )
+
+    assert wrapper._hooks == []
+    assert q_proj.forward_hooks == []
+    assert q_proj.run_forward(["q"]) == ["q"]
+    assert external_cache.model is original_model
+    assert external_cache.has_batch_dim is True
+    assert external_cache.to_dict() == {"existing": ["value"]}
+
+
 def test_transformer_lens_compatible_wrapper_caching_hooks_remove_batch_dim() -> None:
     wrapper = TransformerLensCompatibleModelWrapper(name="Qwen/Qwen3-8B")
     wrapper.model = _FakeQwenModel()
@@ -970,6 +1334,32 @@ def test_transformer_lens_compatible_wrapper_string_names_filter_matches_aliases
     output, cache = wrapper.run_with_cache(
         {"input_ids": [[1, 2]]},
         names_filter="layer_0.q",
+    )
+
+    assert output == {"q": ["q"]}
+    assert cache == {"blocks.0.attn.hook_q": ["q"]}
+
+
+def test_transformer_lens_compatible_wrapper_string_names_filter_matches_shorthands() -> None:
+    wrapper = TransformerLensCompatibleModelWrapper(name="Qwen/Qwen3-8B")
+    wrapper.model = _FakeQwenModel()
+
+    output, cache = wrapper.run_with_cache(
+        {"input_ids": [[1, 2]]},
+        names_filter="q0",
+    )
+
+    assert output == {"q": ["q"]}
+    assert cache == {"blocks.0.attn.hook_q": ["q"]}
+
+
+def test_transformer_lens_compatible_wrapper_cache_layers_accept_shorthand_name() -> None:
+    wrapper = TransformerLensCompatibleModelWrapper(name="Qwen/Qwen3-8B")
+    wrapper.model = _FakeQwenModel()
+
+    output, cache = wrapper.run_with_cache(
+        {"input_ids": [[1, 2]]},
+        layers=["q0"],
     )
 
     assert output == {"q": ["q"]}
@@ -1279,6 +1669,27 @@ def test_transformer_lens_compatible_wrapper_run_with_hooks_accepts_name_filter(
     assert output == {"q": ["filtered"]}
 
 
+def test_transformer_lens_compatible_wrapper_run_with_hooks_accepts_shorthand_name() -> None:
+    wrapper = TransformerLensCompatibleModelWrapper(name="Qwen/Qwen3-8B")
+    wrapper.model = _FakeQwenModel()
+
+    output = wrapper.run_with_hooks(
+        {"input_ids": [[1, 2]]},
+        fwd_hooks=[("q0", lambda **kwargs: kwargs["activation"] + ["patched"])],
+    )
+
+    assert output == {"q": ["q", "patched"]}
+
+
+def test_transformer_lens_compatible_wrapper_add_hook_accepts_shorthand_name() -> None:
+    wrapper = TransformerLensCompatibleModelWrapper(name="Qwen/Qwen3-8B")
+    wrapper.model = _FakeQwenModel()
+
+    wrapper.add_hook("q0", lambda **kwargs: kwargs["activation"] + ["patched"])
+
+    assert wrapper.run_with_cache({"input_ids": [[1, 2]]})[0] == {"q": ["q", "patched"]}
+
+
 def test_transformer_lens_compatible_wrapper_run_with_hooks_filter_dedupes_aliases() -> None:
     wrapper = TransformerLensCompatibleModelWrapper(name="Qwen/Qwen3-8B")
     wrapper.model = _FakeQwenModel()
@@ -1434,6 +1845,7 @@ def test_transformer_lens_compatible_wrapper_tokenization_helpers() -> None:
     with pytest.raises(ValueError, match="Invalid token shape"):
         wrapper.to_string([[[0, 97]]], skip_special_tokens=True)
     assert wrapper.to_str_tokens("ab") == ["<bos>", "a", "b"]
+    assert wrapper.to_str_tokens(torch.tensor(ord("a"))) == ["a"]
     assert wrapper.to_str_tokens([0, 97]) == ["<bos>", "a"]
     assert wrapper.to_str_tokens([[0, 97], [0, 98]]) == [["<bos>", "a"], ["<bos>", "b"]]
     with pytest.raises(ValueError, match="Invalid token shape"):
@@ -1444,12 +1856,49 @@ def test_transformer_lens_compatible_wrapper_tokenization_helpers() -> None:
         wrapper.to_single_token("zz")
     assert wrapper.get_token_position("a", "abca", mode="first") == 1
     assert wrapper.get_token_position("a", "abca", mode="last") == 4
+    assert wrapper.get_token_position("a", "abca", padding_side="left") == 1
+    assert wrapper.tokenizer.padding_side == "right"
     assert wrapper.get_token_position(ord("b"), torch.tensor([[0, 97, 98]])) == 2
     assert wrapper.get_token_position(ord("b"), [0, 97, 98]) == 2
     with pytest.raises(ValueError, match="does not occur"):
         wrapper.get_token_position("z", "abc")
     with pytest.raises(ValueError, match="mode"):
         wrapper.get_token_position("a", "abc", mode="middle")
+
+
+def test_transformer_lens_compatible_wrapper_to_tokens_accepts_transformerlens_kwargs() -> None:
+    torch = pytest.importorskip("torch")
+    wrapper = TransformerLensCompatibleModelWrapper(name="gpt2")
+    wrapper.tokenizer = _FakeTextTokenizer()
+    wrapper.model = _TinyContextModel()
+    wrapper.device = "cpu"
+
+    tokens = wrapper.to_tokens(
+        "abcd",
+        prepend_bos=True,
+        truncate=True,
+        move_to_device=False,
+    )
+
+    assert torch.equal(tokens, torch.tensor([[0, 97, 98, 99]]))
+
+    batch = wrapper.to_tokens(
+        ["a", "bc"],
+        padding_side="left",
+        prepend_bos=False,
+    )
+
+    assert torch.equal(batch, torch.tensor([[999, 97], [98, 99]]))
+    assert wrapper.tokenizer.padding_side == "right"
+    assert wrapper.to_str_tokens("ab", padding_side="left") == ["<bos>", "a", "b"]
+
+
+def test_transformer_lens_compatible_wrapper_to_str_tokens_accepts_numpy_scalar() -> None:
+    np = pytest.importorskip("numpy")
+    wrapper = TransformerLensCompatibleModelWrapper(name="gpt2")
+    wrapper.tokenizer = _FakeTextTokenizer()
+
+    assert wrapper.to_str_tokens(np.array(ord("a"))) == ["a"]
 
 
 def test_transformer_lens_compatible_wrapper_tokenizes_text_batches() -> None:
@@ -1472,6 +1921,18 @@ def test_transformer_lens_compatible_wrapper_pads_uneven_text_batches() -> None:
 
     assert torch.equal(tokens, torch.tensor([[0, 97, 999], [0, 98, 99]]))
     assert wrapper.to_string(tokens, skip_special_tokens=True) == ["a", "bc"]
+
+
+def test_transformer_lens_compatible_wrapper_temporarily_uses_eos_as_pad_token() -> None:
+    torch = pytest.importorskip("torch")
+    wrapper = TransformerLensCompatibleModelWrapper(name="gpt2")
+    wrapper.tokenizer = _FakeTokenizerWithoutPadToken()
+
+    tokens = wrapper.to_tokens(["a", "bc"], prepend_bos=False)
+
+    assert torch.equal(tokens, torch.tensor([[97, 999], [98, 99]]))
+    assert wrapper.tokenizer.pad_token is None
+    assert wrapper.tokenizer.pad_token_id is None
 
 
 def test_transformer_lens_compatible_wrapper_to_tokens_prepends_only_bos() -> None:
@@ -1501,6 +1962,32 @@ def test_transformer_lens_compatible_wrapper_residual_directions() -> None:
     assert torch.equal(directions, torch.tensor([[[1.0, 10.0], [3.0, 30.0]]]))
 
 
+def test_transformer_lens_compatible_wrapper_residual_directions_for_list_tokens() -> None:
+    wrapper = TransformerLensCompatibleModelWrapper(name="gpt2")
+    wrapper.model = _FakeUnembeddingModel([[1, 10], [2, 20], [3, 30]])
+
+    directions = wrapper.tokens_to_residual_directions([[0, 2], [1, 0]])
+
+    assert directions == [
+        [[1, 10], [3, 30]],
+        [[2, 20], [1, 10]],
+    ]
+
+
+def test_transformer_lens_compatible_wrapper_logit_attrs_uses_list_token_directions() -> None:
+    wrapper = TransformerLensCompatibleModelWrapper(name="gpt2")
+    wrapper.model = _FakeUnembeddingModel([[1, 10], [2, 20], [3, 30]])
+    cache = ActivationCache({}, model=wrapper)
+
+    attrs = cache.logit_attrs(
+        [[[[1, 1], [10, 1]], [[2, 2], [3, 1]]]],
+        [[0, 2]],
+        apply_ln=False,
+    )
+
+    assert attrs == [[[11.0, 60.0], [22.0, 39.0]]]
+
+
 def test_transformer_lens_compatible_wrapper_residual_directions_accept_scalar_tokens() -> None:
     torch = pytest.importorskip("torch")
     wrapper = TransformerLensCompatibleModelWrapper(name="gpt2")
@@ -1528,9 +2015,19 @@ def test_transformer_lens_compatible_wrapper_exposes_unembed_matrix() -> None:
             [3.0, 30.0],
         ]
     )
-    wrapper.model = _FakeUnembeddingModel(weight)
+    bias = torch.tensor([0.1, 0.2, 0.3])
+    wrapper.model = _FakeUnembeddingModel(weight, bias)
 
     assert torch.equal(wrapper.W_U, weight.T)
+    assert torch.equal(wrapper.b_U, bias)
+
+
+def test_transformer_lens_compatible_wrapper_exposes_list_unembed_matrix() -> None:
+    wrapper = TransformerLensCompatibleModelWrapper(name="gpt2")
+    wrapper.model = _FakeUnembeddingModel([[1, 10], [2, 20], [3, 30]])
+
+    assert wrapper.W_U == [[1, 2, 3], [10, 20, 30]]
+    assert wrapper.b_U == [0, 0, 0]
 
 
 def test_transformer_lens_compatible_wrapper_exposes_attention_weight_matrices() -> None:
@@ -1548,6 +2045,74 @@ def test_transformer_lens_compatible_wrapper_exposes_attention_weight_matrices()
     assert torch.equal(wrapper.W_K, expected_k)
     assert torch.equal(wrapper.W_V, expected_v)
     assert torch.equal(wrapper.W_O, expected_o)
+    assert torch.equal(wrapper.b_Q, attention.q_proj.bias.reshape(2, 2).unsqueeze(0))
+    assert torch.equal(wrapper.b_K, attention.k_proj.bias.reshape(2, 2).unsqueeze(0))
+    assert torch.equal(wrapper.b_V, attention.v_proj.bias.reshape(2, 2).unsqueeze(0))
+    assert torch.equal(wrapper.b_O, attention.o_proj.bias.unsqueeze(0))
+
+    qk = wrapper.QK
+    assert isinstance(qk, FactoredMatrix)
+    assert torch.equal(qk.A, expected_q)
+    assert torch.equal(qk.B, expected_k.transpose(-2, -1))
+    assert torch.equal(qk.AB, torch.matmul(expected_q, expected_k.transpose(-2, -1)))
+
+    ov = wrapper.OV
+    assert isinstance(ov, FactoredMatrix)
+    assert torch.equal(ov.A, expected_v)
+    assert torch.equal(ov.B, expected_o)
+    assert torch.equal(ov.AB, torch.matmul(expected_v, expected_o))
+
+
+def test_transformer_lens_compatible_wrapper_accumulated_bias_matches_transformerlens_semantics() -> None:
+    torch = pytest.importorskip("torch")
+    wrapper = TransformerLensCompatibleModelWrapper(name="Qwen/Qwen3-8B")
+    wrapper.model = _FakeWeightedQwenModel()
+
+    assert torch.equal(wrapper.accumulated_bias(0), torch.zeros(4))
+    assert torch.equal(wrapper.accumulated_bias(0, mlp_input=True), wrapper.b_O[0])
+    assert torch.equal(wrapper.accumulated_bias(1), wrapper.b_O[0] + wrapper.b_out[0])
+    assert torch.equal(
+        wrapper.accumulated_bias(1, include_mlp_biases=False),
+        wrapper.b_O[0],
+    )
+    with pytest.raises(AssertionError, match="beyond the final layer"):
+        wrapper.accumulated_bias(1, mlp_input=True)
+    with pytest.raises(ValueError, match="between 0 and 1"):
+        wrapper.accumulated_bias(2)
+
+
+def test_transformer_lens_compatible_wrapper_all_composition_scores_match_transformerlens_mask() -> None:
+    torch = pytest.importorskip("torch")
+    wrapper = TransformerLensCompatibleModelWrapper(name="Qwen/Qwen3-8B")
+    wrapper.model = _FakeWeightedQwenModel()
+    wrapper.model.model.layers.append(_FakeWeightedLayer())
+
+    assert wrapper.all_head_labels() == ["L0H0", "L0H1", "L1H0", "L1H1"]
+
+    for mode in ("Q", "K", "V"):
+        scores = wrapper.all_composition_scores(mode)
+
+        assert tuple(scores.shape) == (2, 2, 2, 2)
+        assert torch.all(scores[0, :, 0, :] == 0)
+        assert torch.all(scores[1, :, 0, :] == 0)
+        assert torch.all(scores[1, :, 1, :] == 0)
+        assert torch.any(scores[0, :, 1, :] > 0)
+
+    with pytest.raises(ValueError, match=r"Q.*K.*V"):
+        wrapper.all_composition_scores("Z")
+
+
+def test_component_bridge_reshapes_attention_weights_for_list_backend() -> None:
+    weight = [[row * 10 + col for col in range(4)] for row in range(4)]
+
+    assert reshape_attention_weight(weight, component="q", n_heads=2, packed_axis=0) == [
+        [[0, 10], [1, 11], [2, 12], [3, 13]],
+        [[20, 30], [21, 31], [22, 32], [23, 33]],
+    ]
+    assert reshape_attention_weight(weight, component="z", n_heads=2, packed_axis=1) == [
+        [[0, 10, 20, 30], [1, 11, 21, 31]],
+        [[2, 12, 22, 32], [3, 13, 23, 33]],
+    ]
 
 
 def test_transformer_lens_compatible_wrapper_exposes_transformerlens_cfg_view() -> None:
@@ -1600,6 +2165,45 @@ def test_transformer_lens_compatible_wrapper_exposes_gpt2_joint_qkv_weights() ->
     assert cfg.normalization_type == "LN"
 
 
+def test_component_bridge_reshapes_joint_qkv_weights_for_list_backend() -> None:
+    rows_weight = [[row * 10 + col for col in range(4)] for row in range(12)]
+    cols_weight = [[row * 100 + col for col in range(12)] for row in range(4)]
+
+    assert reshape_joint_qkv_attention_weight(
+        rows_weight,
+        component="q",
+        q_heads=2,
+        kv_heads=2,
+        qkv_layout="interleaved",
+        packed_axis=0,
+    ) == [
+        [[0, 10], [1, 11], [2, 12], [3, 13]],
+        [[60, 70], [61, 71], [62, 72], [63, 73]],
+    ]
+    assert reshape_joint_qkv_attention_weight(
+        rows_weight,
+        component="v",
+        q_heads=2,
+        kv_heads=2,
+        qkv_layout="interleaved",
+        packed_axis=0,
+    ) == [
+        [[40, 50], [41, 51], [42, 52], [43, 53]],
+        [[100, 110], [101, 111], [102, 112], [103, 113]],
+    ]
+    assert reshape_joint_qkv_attention_weight(
+        cols_weight,
+        component="k",
+        q_heads=2,
+        kv_heads=2,
+        qkv_layout="split",
+        packed_axis=1,
+    ) == [
+        [[4, 5], [104, 105], [204, 205], [304, 305]],
+        [[6, 7], [106, 107], [206, 207], [306, 307]],
+    ]
+
+
 def test_transformer_lens_compatible_wrapper_exposes_neox_joint_qkv_weights() -> None:
     torch = pytest.importorskip("torch")
     wrapper = TransformerLensCompatibleModelWrapper(name="EleutherAI/pythia-70m")
@@ -1610,10 +2214,79 @@ def test_transformer_lens_compatible_wrapper_exposes_neox_joint_qkv_weights() ->
     expected_q = interleaved[:, 0].reshape(2, 2, 4).permute(0, 2, 1).unsqueeze(0)
     expected_k = interleaved[:, 1].reshape(2, 2, 4).permute(0, 2, 1).unsqueeze(0)
     expected_v = interleaved[:, 2].reshape(2, 2, 4).permute(0, 2, 1).unsqueeze(0)
+    bias = wrapper.model.gpt_neox.layers[0].attention.query_key_value.bias.reshape(2, 3, 2)
 
     assert torch.equal(wrapper.W_Q, expected_q)
     assert torch.equal(wrapper.W_K, expected_k)
     assert torch.equal(wrapper.W_V, expected_v)
+    assert torch.equal(wrapper.b_Q, bias[:, 0].unsqueeze(0))
+    assert torch.equal(wrapper.b_K, bias[:, 1].unsqueeze(0))
+    assert torch.equal(wrapper.b_V, bias[:, 2].unsqueeze(0))
+
+
+def test_transformer_lens_compatible_wrapper_exposes_mlp_weights_from_adapter_specs() -> None:
+    torch = pytest.importorskip("torch")
+
+    gpt2_wrapper = TransformerLensCompatibleModelWrapper(name="gpt2")
+    gpt2_wrapper.model = _FakeGpt2Model()
+    gpt2_mlp = gpt2_wrapper.model.transformer.h[0].mlp
+    assert torch.equal(gpt2_wrapper.W_in, gpt2_mlp.c_fc.weight.T.unsqueeze(0))
+    assert torch.equal(gpt2_wrapper.W_out, gpt2_mlp.c_proj.weight.T.unsqueeze(0))
+    assert torch.equal(gpt2_wrapper.b_in, gpt2_mlp.c_fc.bias.unsqueeze(0))
+    assert torch.equal(gpt2_wrapper.b_out, gpt2_mlp.c_proj.bias.unsqueeze(0))
+
+    neox_wrapper = TransformerLensCompatibleModelWrapper(name="EleutherAI/pythia-70m")
+    neox_wrapper.model = _FakeGptNeoxModel()
+    neox_mlp = neox_wrapper.model.gpt_neox.layers[0].mlp
+    assert torch.equal(neox_wrapper.W_in, neox_mlp.dense_h_to_4h.weight.T.unsqueeze(0))
+    assert torch.equal(neox_wrapper.W_out, neox_mlp.dense_4h_to_h.weight.T.unsqueeze(0))
+    assert torch.equal(neox_wrapper.b_in, neox_mlp.dense_h_to_4h.bias.unsqueeze(0))
+    assert torch.equal(neox_wrapper.b_out, neox_mlp.dense_4h_to_h.bias.unsqueeze(0))
+
+    falcon_wrapper = TransformerLensCompatibleModelWrapper(name="tiiuae/falcon-7b")
+    falcon_wrapper.model = _FakeFalconMQAModel()
+    falcon_mlp = falcon_wrapper.model.transformer.h[0].mlp
+    assert torch.equal(falcon_wrapper.W_in, falcon_mlp.dense_h_to_4h.weight.T.unsqueeze(0))
+    assert torch.equal(falcon_wrapper.W_out, falcon_mlp.dense_4h_to_h.weight.T.unsqueeze(0))
+    assert torch.equal(falcon_wrapper.b_in, falcon_mlp.dense_h_to_4h.bias.unsqueeze(0))
+    assert torch.equal(falcon_wrapper.b_out, falcon_mlp.dense_4h_to_h.bias.unsqueeze(0))
+
+
+def test_transformer_lens_compatible_wrapper_exposes_falcon_multi_query_weights() -> None:
+    torch = pytest.importorskip("torch")
+    wrapper = TransformerLensCompatibleModelWrapper(name="tiiuae/falcon-7b")
+    wrapper.model = _FakeFalconMQAModel()
+    attention = wrapper.model.transformer.h[0].self_attention
+    weight = attention.query_key_value.weight
+    grouped = weight.reshape(1, 6, 2, 8)
+
+    expected_q = grouped[:, :4].reshape(8, 8).reshape(4, 2, 8).permute(0, 2, 1).unsqueeze(0)
+    expected_k = grouped[:, -2].reshape(1, 2, 8).permute(0, 2, 1).unsqueeze(0)
+    expected_v = grouped[:, -1].reshape(1, 2, 8).permute(0, 2, 1).unsqueeze(0)
+    expected_o = attention.dense.weight.reshape(8, 4, 2).permute(1, 2, 0).unsqueeze(0)
+    bias = attention.query_key_value.bias.reshape(1, 6, 2)
+
+    assert wrapper.cfg.n_key_value_heads == 1
+    assert torch.equal(wrapper.W_Q, expected_q)
+    assert torch.equal(wrapper.W_K, expected_k)
+    assert torch.equal(wrapper.W_V, expected_v)
+    assert torch.equal(wrapper.W_O, expected_o)
+    assert torch.equal(wrapper.b_Q, bias[:, :4].reshape(1, 4, 2))
+    assert torch.equal(wrapper.b_K, bias[:, -2].reshape(1, 1, 2))
+    assert torch.equal(wrapper.b_V, bias[:, -1].reshape(1, 1, 2))
+    assert torch.equal(wrapper.b_O, attention.dense.bias.unsqueeze(0))
+
+    repeated_k = expected_k.repeat_interleave(4, dim=1)
+    qk = wrapper.QK
+    assert torch.equal(qk.A, expected_q)
+    assert torch.equal(qk.B, repeated_k.transpose(-2, -1))
+    assert tuple(qk.shape) == (1, 4, 8, 8)
+
+    repeated_v = expected_v.repeat_interleave(4, dim=1)
+    ov = wrapper.OV
+    assert torch.equal(ov.A, repeated_v)
+    assert torch.equal(ov.B, expected_o)
+    assert tuple(ov.shape) == (1, 4, 8, 8)
 
 
 def test_transformer_lens_compatible_wrapper_exposes_embedding_and_mlp_weights() -> None:
@@ -1625,8 +2298,70 @@ def test_transformer_lens_compatible_wrapper_exposes_embedding_and_mlp_weights()
 
     assert torch.equal(wrapper.W_E, model.embed_tokens.weight)
     assert torch.equal(wrapper.W_pos, model.wpe.weight)
-    assert torch.equal(wrapper.W_in, mlp.gate_proj.weight.T.unsqueeze(0))
+    assert torch.equal(wrapper.W_E_pos, torch.cat([model.embed_tokens.weight, model.wpe.weight], dim=0))
+    assert torch.equal(wrapper.W_in, mlp.up_proj.weight.T.unsqueeze(0))
+    assert torch.equal(wrapper.W_gate, mlp.gate_proj.weight.T.unsqueeze(0))
     assert torch.equal(wrapper.W_out, mlp.down_proj.weight.T.unsqueeze(0))
+    assert torch.equal(wrapper.b_in, mlp.up_proj.bias.unsqueeze(0))
+    assert torch.equal(wrapper.b_out, mlp.down_proj.bias.unsqueeze(0))
+
+
+def test_transformer_lens_compatible_wrapper_exposes_list_embedding_and_mlp_weights() -> None:
+    wrapper = TransformerLensCompatibleModelWrapper(name="Qwen/Qwen3-8B")
+    wrapper.model = _FakeListWeightedQwenModel()
+    attention = wrapper.model.model.layers[0].self_attn
+
+    assert wrapper.W_E == [[0, 1, 2, 3], [10, 11, 12, 13], [20, 21, 22, 23]]
+    assert wrapper.W_pos == [[30, 31, 32, 33], [40, 41, 42, 43]]
+    assert wrapper.W_E_pos == [
+        [0, 1, 2, 3],
+        [10, 11, 12, 13],
+        [20, 21, 22, 23],
+        [30, 31, 32, 33],
+        [40, 41, 42, 43],
+    ]
+    assert wrapper.W_in == [
+        [[100, 110, 120], [101, 111, 121], [102, 112, 122], [103, 113, 123]]
+    ]
+    assert wrapper.W_gate == [
+        [[0, 10, 20], [1, 11, 21], [2, 12, 22], [3, 13, 23]]
+    ]
+    assert wrapper.W_out == [
+        [[30, 40, 50, 60], [31, 41, 51, 61], [32, 42, 52, 62]]
+    ]
+    assert wrapper.W_Q == [
+        reshape_attention_weight(attention.q_proj.weight, component="q", n_heads=2)
+    ]
+    assert wrapper.W_K == [
+        reshape_attention_weight(attention.k_proj.weight, component="k", n_heads=2)
+    ]
+    assert wrapper.W_V == [
+        reshape_attention_weight(attention.v_proj.weight, component="v", n_heads=2)
+    ]
+    assert wrapper.W_O == [
+        reshape_attention_weight(attention.o_proj.weight, component="z", n_heads=2, packed_axis=1)
+    ]
+    assert wrapper.b_Q == [[[0, 1], [2, 3]]]
+    assert wrapper.b_K == [[[4, 5], [6, 7]]]
+    assert wrapper.b_V == [[[8, 9], [10, 11]]]
+    assert wrapper.b_O == [[12, 13, 14, 15]]
+    assert wrapper.b_in == [[1, 2, 3]]
+    assert wrapper.b_out == [[4, 5, 6, 7]]
+    assert wrapper.accumulated_bias(0) == [0, 0, 0, 0]
+    assert wrapper.accumulated_bias(0, mlp_input=True) == [12, 13, 14, 15]
+    assert wrapper.accumulated_bias(1) == [16, 18, 20, 22]
+
+    qk = wrapper.QK
+    assert isinstance(qk, FactoredMatrix)
+    assert qk.A == wrapper.W_Q
+    assert qk.B == transpose(wrapper.W_K)
+    assert qk.AB == matmul(wrapper.W_Q, transpose(wrapper.W_K))
+
+    ov = wrapper.OV
+    assert isinstance(ov, FactoredMatrix)
+    assert ov.A == wrapper.W_V
+    assert ov.B == wrapper.W_O
+    assert ov.AB == matmul(wrapper.W_V, wrapper.W_O)
 
 
 def test_transformer_lens_compatible_wrapper_caches_attention_pattern() -> None:
@@ -1640,6 +2375,92 @@ def test_transformer_lens_compatible_wrapper_caches_attention_pattern() -> None:
 
     assert output["output_attentions"] is True
     assert getattr(cache["blocks.0.attn.hook_pattern"], "ndim", None) == 4
+
+
+def test_transformer_lens_compatible_wrapper_caches_mlp_post_for_neuron_decomposition() -> None:
+    wrapper = TransformerLensCompatibleModelWrapper(name="Qwen/Qwen3-8B")
+    wrapper.model = _FakeWeightedNeuronQwenModel()
+
+    output, cache = wrapper.run_with_cache(
+        {"input_ids": [[1, 2]]},
+        layers=["blocks.0.mlp.hook_post"],
+        return_cache_object=True,
+    )
+
+    assert output == {"post": [[[3.0, 4.0, 5.0]]]}
+    assert cache["layer_0.post"] == [[[3.0, 4.0, 5.0]]]
+    torch = pytest.importorskip("torch")
+    expected = torch.tensor(
+        [[[[36.0, 45.0, 54.0, 63.0], [70.0, 85.0, 100.0, 115.0]]]]
+    )
+    assert torch.equal(cache.get_neuron_results(0, neuron_slice=[0, 2]), expected)
+
+
+def test_transformer_lens_compatible_wrapper_cache_object_resolves_mlp_pre_linear() -> None:
+    wrapper = TransformerLensCompatibleModelWrapper(name="Qwen/Qwen3-8B")
+    wrapper.model = _FakeWeightedGatedPreLinearOnlyQwenModel()
+
+    output, cache = wrapper.run_with_cache(
+        {"input_ids": [[1, 2]]},
+        layers=["blocks.0.mlp.hook_pre_linear"],
+        return_cache_object=True,
+    )
+
+    assert output == {"linear": [[[4.0, 5.0, 6.0]]]}
+    assert cache["layer_0.pre_linear"] == [[[4.0, 5.0, 6.0]]]
+
+
+def test_transformer_lens_compatible_wrapper_caches_gated_mlp_pre_linear() -> None:
+    wrapper = TransformerLensCompatibleModelWrapper(name="Qwen/Qwen3-8B")
+    wrapper.model = _FakeWeightedGatedNeuronQwenModel()
+
+    output, cache = wrapper.run_with_cache(
+        {"input_ids": [[1, 2]]},
+        layers=[
+            "blocks.0.mlp.hook_pre",
+            "blocks.0.mlp.hook_pre_linear",
+            "blocks.0.mlp.hook_post",
+        ],
+    )
+
+    assert output == {
+        "gate": [[[1.0, 2.0, 3.0]]],
+        "linear": [[[4.0, 5.0, 6.0]]],
+        "post": [[[7.0, 8.0, 9.0]]],
+    }
+    assert cache["blocks.0.mlp.hook_pre"] == [[[1.0, 2.0, 3.0]]]
+    assert cache["blocks.0.mlp.hook_pre_linear"] == [[[4.0, 5.0, 6.0]]]
+    assert cache["blocks.0.mlp.hook_post"] == [[[7.0, 8.0, 9.0]]]
+
+
+def test_transformer_lens_compatible_wrapper_patches_gated_mlp_pre_linear() -> None:
+    wrapper = TransformerLensCompatibleModelWrapper(name="Qwen/Qwen3-8B")
+    wrapper.model = _FakeWeightedGatedNeuronQwenModel()
+
+    output = wrapper.run_with_hooks(
+        {"input_ids": [[1, 2]]},
+        fwd_hooks=[
+            ("blocks.0.mlp.hook_pre_linear", lambda **_kwargs: [[[40.0, 50.0, 60.0]]])
+        ],
+    )
+
+    assert output["gate"] == [[[1.0, 2.0, 3.0]]]
+    assert output["linear"] == [[[40.0, 50.0, 60.0]]]
+    assert output["post"] == [[[7.0, 8.0, 9.0]]]
+
+
+def test_transformer_lens_compatible_wrapper_attention_cache_failure_does_not_set_flag() -> None:
+    wrapper = TransformerLensCompatibleModelWrapper(name="Qwen/Qwen3-8B")
+    wrapper.model = _FakeQwenModel()
+
+    with pytest.raises(KeyError):
+        wrapper.add_caching_hooks(
+            layers=["blocks.99.attn.hook_pattern"],
+        )
+
+    assert wrapper._attention_hook_count == 0
+    assert wrapper._hooks == []
+    assert wrapper.run_with_cache({"input_ids": [[1, 2]]})[0] == {"q": ["q"]}
 
 
 def test_transformer_lens_compatible_wrapper_caches_derived_attention_result() -> None:
@@ -1854,6 +2675,24 @@ def test_component_bridge_splits_and_merges_head_projections() -> None:
     assert torch.all(merged[:, :, 4:] == -1)
 
 
+def test_component_bridge_splits_and_merges_head_projections_for_list_backend() -> None:
+    spec = ComponentHookSpec(
+        component="q",
+        mode="forward_output",
+        module_paths=("unused",),
+        activation="split_heads",
+    )
+    raw = [[[0, 1, 2, 3, 4, 5, 6, 7]]]
+
+    activation = extract_component_activation(raw, spec, _FakeHeadModel())
+
+    assert activation == [[[[0, 1, 2, 3], [4, 5, 6, 7]]]]
+    patched = [[[[0, 1, 2, 3], [-1, -1, -1, -1]]]]
+    merged = merge_component_activation(patched, raw, spec, _FakeHeadModel())
+
+    assert merged == [[[0, 1, 2, 3, -1, -1, -1, -1]]]
+
+
 def test_component_bridge_splits_and_merges_split_qkv_projection() -> None:
     torch = pytest.importorskip("torch")
     spec = ComponentHookSpec(
@@ -1873,6 +2712,24 @@ def test_component_bridge_splits_and_merges_split_qkv_projection() -> None:
     assert torch.equal(merged[..., :8], raw[..., :8])
     assert torch.all(merged[..., 8:16] == -7)
     assert torch.equal(merged[..., 16:], raw[..., 16:])
+
+
+def test_component_bridge_splits_and_merges_split_qkv_projection_for_list_backend() -> None:
+    spec = ComponentHookSpec(
+        component="k",
+        mode="forward_output",
+        module_paths=("unused",),
+        activation="split_qkv_heads",
+    )
+    raw = [[[index for index in range(24)]]]
+
+    activation = extract_component_activation(raw, spec, _FakeHeadModel())
+
+    assert activation == [[[[8, 9, 10, 11], [12, 13, 14, 15]]]]
+    patched = [[[[-7, -7, -7, -7], [-8, -8, -8, -8]]]]
+    merged = merge_component_activation(patched, raw, spec, _FakeHeadModel())
+
+    assert merged == [[[0, 1, 2, 3, 4, 5, 6, 7, -7, -7, -7, -7, -8, -8, -8, -8, 16, 17, 18, 19, 20, 21, 22, 23]]]
 
 
 def test_component_bridge_splits_and_merges_interleaved_qkv_projection() -> None:
@@ -1897,10 +2754,41 @@ def test_component_bridge_splits_and_merges_interleaved_qkv_projection() -> None
     assert torch.equal(merged, expected.reshape_as(raw))
 
 
-def test_component_bridge_splits_and_merges_grouped_interleaved_qkv_projection() -> None:
+def test_component_bridge_splits_and_merges_interleaved_qkv_projection_for_list_backend() -> None:
+    spec = ComponentHookSpec(
+        component="v",
+        mode="forward_output",
+        module_paths=("unused",),
+        activation="split_qkv_heads",
+        qkv_layout="interleaved",
+    )
+    raw = [[[index for index in range(24)]]]
+
+    activation = extract_component_activation(raw, spec, _FakeHeadModel())
+
+    assert activation == [[[[8, 9, 10, 11], [20, 21, 22, 23]]]]
+    patched = [[[[-3, -3, -3, -3], [-4, -4, -4, -4]]]]
+    merged = merge_component_activation(patched, raw, spec, _FakeHeadModel())
+
+    assert merged == [[[0, 1, 2, 3, 4, 5, 6, 7, -3, -3, -3, -3, 12, 13, 14, 15, 16, 17, 18, 19, -4, -4, -4, -4]]]
+
+
+@pytest.mark.parametrize(
+    ("component", "selector", "patch_value"),
+    (
+        ("q", (slice(None), slice(None), slice(None), slice(0, 2), slice(None)), -4),
+        ("k", (slice(None), slice(None), slice(None), -2, slice(None)), -5),
+        ("v", (slice(None), slice(None), slice(None), -1, slice(None)), -6),
+    ),
+)
+def test_component_bridge_splits_and_merges_grouped_interleaved_qkv_projection(
+    component: str,
+    selector: tuple[Any, ...],
+    patch_value: int,
+) -> None:
     torch = pytest.importorskip("torch")
     spec = ComponentHookSpec(
-        component="k",
+        component=component,
         mode="forward_output",
         module_paths=("unused",),
         activation="split_qkv_heads",
@@ -1910,11 +2798,59 @@ def test_component_bridge_splits_and_merges_grouped_interleaved_qkv_projection()
 
     activation = extract_component_activation(raw, spec, _FakeGroupedHeadModel())
 
-    assert activation.shape == (1, 2, 2, 4)
     grouped = raw.reshape(1, 2, 2, 4, 4)
-    assert torch.equal(activation, grouped[..., -2, :])
-    patched = torch.full_like(activation, -5)
+    expected_activation = grouped[selector]
+    if component == "q":
+        expected_activation = expected_activation.reshape(1, 2, 4, 4)
+    assert activation.shape == expected_activation.shape
+    assert torch.equal(activation, expected_activation)
+    patched = torch.full_like(activation, patch_value)
     merged = merge_component_activation(patched, raw, spec, _FakeGroupedHeadModel())
     expected = grouped.clone()
-    expected[..., -2, :] = -5
+    expected[selector] = patch_value
     assert torch.equal(merged, expected.reshape_as(raw))
+
+
+@pytest.mark.parametrize(
+    ("component", "expected_activation", "patched", "expected_merged"),
+    (
+        (
+            "q",
+            [[[[0, 1, 2, 3], [4, 5, 6, 7], [16, 17, 18, 19], [20, 21, 22, 23]]]],
+            [[[[-4, -4, -4, -4], [-5, -5, -5, -5], [-6, -6, -6, -6], [-7, -7, -7, -7]]]],
+            [[[-4, -4, -4, -4, -5, -5, -5, -5, 8, 9, 10, 11, 12, 13, 14, 15, -6, -6, -6, -6, -7, -7, -7, -7, 24, 25, 26, 27, 28, 29, 30, 31]]],
+        ),
+        (
+            "k",
+            [[[[8, 9, 10, 11], [24, 25, 26, 27]]]],
+            [[[[-8, -8, -8, -8], [-9, -9, -9, -9]]]],
+            [[[0, 1, 2, 3, 4, 5, 6, 7, -8, -8, -8, -8, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, -9, -9, -9, -9, 28, 29, 30, 31]]],
+        ),
+        (
+            "v",
+            [[[[12, 13, 14, 15], [28, 29, 30, 31]]]],
+            [[[[-10, -10, -10, -10], [-11, -11, -11, -11]]]],
+            [[[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, -10, -10, -10, -10, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, -11, -11, -11, -11]]],
+        ),
+    ),
+)
+def test_component_bridge_splits_and_merges_grouped_interleaved_qkv_projection_for_list_backend(
+    component: str,
+    expected_activation: list[Any],
+    patched: list[Any],
+    expected_merged: list[Any],
+) -> None:
+    spec = ComponentHookSpec(
+        component=component,
+        mode="forward_output",
+        module_paths=("unused",),
+        activation="split_qkv_heads",
+        qkv_layout="interleaved",
+    )
+    raw = [[[index for index in range(32)]]]
+
+    activation = extract_component_activation(raw, spec, _FakeGroupedHeadModel())
+    merged = merge_component_activation(patched, raw, spec, _FakeGroupedHeadModel())
+
+    assert activation == expected_activation
+    assert merged == expected_merged

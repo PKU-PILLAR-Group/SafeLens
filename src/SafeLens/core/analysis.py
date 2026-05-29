@@ -379,11 +379,17 @@ def gather_last_dim(values: Any, indices: Any) -> Any:
                 indices = torch.as_tensor(indices, dtype=torch.long, device=values.device)
             else:
                 indices = indices.to(device=values.device, dtype=torch.long)
+            if indices.ndim == 0:
+                return values[..., int(indices.item())]
             return values.gather(-1, indices.unsqueeze(-1)).squeeze(-1)
     except Exception:
         pass
     try:
         if hasattr(values, "shape") and hasattr(indices, "shape"):
+            if len(getattr(indices, "shape", ())) == 0:
+                item = getattr(indices, "item", None)
+                index = int(item() if callable(item) else indices)
+                return values[..., index]
             return values.gather(-1, indices.unsqueeze(-1)).squeeze(-1)
     except Exception:
         pass
@@ -393,6 +399,8 @@ def gather_last_dim(values: Any, indices: Any) -> Any:
         if hasattr(values, "shape") or hasattr(indices, "shape"):
             values_array = np.asarray(values)
             index_array = np.asarray(indices)
+            if index_array.ndim == 0:
+                return values_array[..., int(index_array.item())]
             return np.take_along_axis(values_array, np.expand_dims(index_array, -1), axis=-1).squeeze(-1)
     except Exception:
         pass
@@ -403,6 +411,8 @@ def gather_last_dim(values: Any, indices: Any) -> Any:
                 for value_row, index_row in zip(values, indices, strict=True)
             ]
         return [row[index] for row, index in zip(values, indices, strict=True)]
+    if isinstance(values, list) and values and isinstance(values[0], list):
+        return [gather_last_dim(value_row, indices) for value_row in values]
     return values[indices]
 
 
@@ -723,9 +733,17 @@ def _normalize_w_o_for_z(z: Any, W_O: Any) -> Any:
 def _has_aligned_layer_axis(z: Any, W_O: Any) -> bool:
     z_shape = _shape_of(z)
     w_o_shape = _shape_of(W_O)
+    if (
+        len(w_o_shape) == 4
+        and len(z_shape) == 3
+        and w_o_shape[0] > 1
+        and z_shape[0] == w_o_shape[0]
+        and z_shape[-2:] == w_o_shape[1:3]
+    ):
+        return True
     return (
         len(w_o_shape) == 4
-        and len(z_shape) >= 5
+        and len(z_shape) >= 4
         and z_shape[0] == w_o_shape[0]
         and z_shape[-2:] == w_o_shape[1:3]
     )

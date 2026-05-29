@@ -165,6 +165,7 @@ def test_real_decoder_adapter_matrix_allows_token_id_batches_without_tokenizer(
     wrapper = _load_wrapper(model_id)
     batch = _token_id_batch()
     try:
+        wrapper.tokenizer = None
         assert wrapper.tokenizer is None
         cache_layers = tuple(f"layer_0.{component}" for component in _COMMON_COMPONENTS)
         output, cache = wrapper.run_with_cache(batch, layers=cache_layers)

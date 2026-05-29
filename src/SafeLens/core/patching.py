@@ -45,6 +45,31 @@ TRANSFORMER_LENS_ACTIVATION_TEMPLATES = {
 }
 
 
+def make_df_from_ranges(
+    column_max_ranges: Sequence[int],
+    column_names: Sequence[str],
+) -> Any:
+    """Create a TransformerLens-style patch index table from axis ranges."""
+    if len(column_max_ranges) != len(column_names):
+        raise ValueError(
+            "column_max_ranges and column_names must have the same length, got "
+            f"{len(column_max_ranges)} and {len(column_names)}."
+        )
+    if any(int(size) < 0 for size in column_max_ranges):
+        raise ValueError(f"column_max_ranges must be non-negative, got {column_max_ranges!r}.")
+
+    rows = [
+        dict(zip(column_names, values, strict=True))
+        for values in product(*(range(int(size)) for size in column_max_ranges))
+    ]
+    try:
+        import pandas as pd
+
+        return pd.DataFrame(rows, columns=list(column_names))
+    except ImportError:
+        return rows
+
+
 @dataclass(frozen=True)
 class PatchSpec:
     """Specification for one activation patch operation."""
@@ -88,6 +113,10 @@ def activation_name_for_component(
     name_template: str | None = None,
 ) -> str:
     """Return a cache/hook name for a Transformer component at one layer."""
+    explicit_ref = _explicit_activation_ref(component)
+    if explicit_ref is not None and _same_layer_ref(layer, explicit_ref[0]):
+        return component
+    component = explicit_ref[1] if explicit_ref is not None else component
     if name_template is not None:
         return name_template.format(layer=layer, component=component)
     if name_style == "transformer_lens":
@@ -1689,7 +1718,7 @@ def normalize_index(index: Any) -> tuple[Any, ...]:
 
 def get_indexed(value: Any, index: Any) -> Any:
     """Index tensor-like or nested-list values."""
-    normalized = normalize_index(index)
+    normalized = expand_ellipsis_index(normalize_index(index), len(shape_of(value)))
     if len(normalized) == 1:
         try:
             return value[normalized[0]]
@@ -1703,7 +1732,7 @@ def get_indexed(value: Any, index: Any) -> Any:
 
 def set_indexed(value: Any, index: Any, replacement: Any) -> None:
     """Assign into tensor-like or nested-list values."""
-    normalized = normalize_index(index)
+    normalized = expand_ellipsis_index(normalize_index(index), len(shape_of(value)))
     replacement = coerce_value_like(value, replacement)
     if len(normalized) == 1:
         try:
@@ -1715,6 +1744,23 @@ def set_indexed(value: Any, index: Any, replacement: Any) -> None:
         value[normalized] = replacement
     except (TypeError, IndexError, KeyError):
         set_nested(value, normalized, replacement)
+
+
+def expand_ellipsis_index(index: tuple[Any, ...], rank: int) -> tuple[Any, ...]:
+    """Expand a single ellipsis into full slices for dependency-free indexing."""
+    if Ellipsis not in index:
+        return index
+    if index.count(Ellipsis) > 1:
+        raise IndexError("an index can only have a single ellipsis")
+    consumed_dims = len([item for item in index if item is not None and item is not Ellipsis])
+    fill = max(0, rank - consumed_dims)
+    expanded: list[Any] = []
+    for item in index:
+        if item is Ellipsis:
+            expanded.extend([FULL_SLICE] * fill)
+        else:
+            expanded.append(item)
+    return tuple(expanded)
 
 
 def get_nested(value: Any, index: tuple[Any, ...]) -> Any:
@@ -1877,6 +1923,12 @@ def infer_layers_from_cache(
 ) -> list[LayerRef]:
     """Infer layer indices from SafeLens or TransformerLens-style activation names."""
     _ = name_style
+    explicit_ref = _explicit_activation_ref(component)
+    if explicit_ref is not None:
+        explicit_layer, explicit_component = explicit_ref
+        if component in clean_cache:
+            return [explicit_layer]
+        component = explicit_component
     layers: set[int] = set()
     for name in clean_cache:
         parsed = _layer_and_component_from_cache_name(name)
@@ -1904,6 +1956,21 @@ def _layer_and_component_from_cache_name(name: str) -> tuple[int, str] | None:
         return int(block_match.group(1)), block_match.group(3)
 
     return None
+
+
+def _explicit_activation_ref(name: str) -> tuple[int, str] | None:
+    parsed = _layer_and_component_from_cache_name(name)
+    if parsed is None:
+        return None
+    layer, component = parsed
+    return layer, _normalize_patch_component(component)
+
+
+def _same_layer_ref(layer: LayerRef, explicit_layer: int) -> bool:
+    try:
+        return int(layer) == explicit_layer
+    except (TypeError, ValueError):
+        return False
 
 
 def _normalize_patch_component(component: str) -> str:
@@ -1956,15 +2023,6 @@ def infer_heads(
     layers: Sequence[LayerRef],
 ) -> int:
     """Infer number of heads from model config or cached activations."""
-    if component in {"k", "v"}:
-        n_key_value_heads = get_config_int(model, ("n_key_value_heads", "num_key_value_heads"))
-        if n_key_value_heads is not None:
-            return n_key_value_heads
-
-    n_heads = get_config_int(model, ("n_heads", "num_attention_heads"))
-    if n_heads is not None:
-        return n_heads
-
     activation = first_component_activation(clean_cache, component, layers)
     if activation is not None:
         shape = shape_of(activation)
@@ -1973,6 +2031,15 @@ def infer_heads(
             return shape[1 if has_batch_dim else 0]
         if len(shape) >= (3 if has_batch_dim else 2):
             return shape[2 if has_batch_dim else 1]
+
+    if component in {"k", "v"}:
+        n_key_value_heads = get_model_key_value_heads(model)
+        if n_key_value_heads is not None:
+            return n_key_value_heads
+
+    n_heads = get_config_int(model, ("n_heads", "num_attention_heads"))
+    if n_heads is not None:
+        return n_heads
 
     raise ValueError("Could not infer heads. Pass `heads=[...]` explicitly.")
 
@@ -2077,6 +2144,11 @@ def first_component_activation(
     layers: Sequence[LayerRef],
 ) -> Any:
     """Return the first activation matching a component and layer list."""
+    if component in clean_cache:
+        return clean_cache[component]
+    explicit_ref = _explicit_activation_ref(component)
+    if explicit_ref is not None:
+        component = explicit_ref[1]
     candidate_names = [
         activation_name_for_component(component, layer, name_style="safelens") for layer in layers
     ]
@@ -2088,7 +2160,11 @@ def first_component_activation(
         if name in clean_cache:
             return clean_cache[name]
     for name, activation in clean_cache.items():
-        if component in name:
+        parsed = _layer_and_component_from_cache_name(name)
+        if parsed is None:
+            continue
+        _layer, cache_component = parsed
+        if _normalize_patch_component(cache_component) == _normalize_patch_component(component):
             return activation
     return None
 
@@ -2125,6 +2201,27 @@ def get_config_int(model: Any, names: Sequence[str]) -> int | None:
             if value is not None:
                 return int(value)
     return None
+
+
+def get_model_key_value_heads(model: Any) -> int | None:
+    """Read K/V head count from SafeLens wrappers or raw Transformers models."""
+    cfg = getattr(model, "cfg", None)
+    cfg_n_kv_heads = getattr(cfg, "n_key_value_heads", None)
+    if cfg_n_kv_heads is not None:
+        return int(cfg_n_kv_heads)
+    try:
+        from SafeLens.utils.model_bridge import key_value_head_count
+
+        wrapped_model = getattr(model, "model", None)
+        for candidate in (wrapped_model, model):
+            if candidate is None:
+                continue
+            n_key_value_heads = key_value_head_count(candidate)
+            if n_key_value_heads is not None:
+                return n_key_value_heads
+    except ImportError:
+        pass
+    return get_config_int(model, ("n_key_value_heads", "num_key_value_heads", "num_kv_heads"))
 
 
 def _values_or_range(values: Iterable[int] | None, inferred_size: int, name: str) -> Iterable[int]:
