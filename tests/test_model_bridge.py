@@ -8,6 +8,7 @@ from SafeLens.core.factored_matrix import FactoredMatrix, matmul, transpose
 from SafeLens.core.hooks import ActivationCache
 from SafeLens.core.patching import PatchSpec, run_activation_patch
 from SafeLens.utils import (
+    HuggingFaceModelWrapper,
     TransformerLensCompatibleModelWrapper,
     architecture_adapter_for_model,
     architecture_adapter_for_name,
@@ -630,6 +631,64 @@ class _FakeUnembeddingModel:
         return _FakeEmbedding(self._weight, self._bias)
 
 
+class _FakeGenerateModel:
+    def __init__(self) -> None:
+        torch = pytest.importorskip("torch")
+        self.calls: list[dict[str, Any]] = []
+        self.embed = _FakeHookableEmbedding(
+            torch.arange(256 * 3, dtype=torch.float32).reshape(256, 3)
+        )
+
+    def generate(self, **kwargs: Any) -> Any:
+        self.calls.append(kwargs)
+        input_ids = kwargs.get("input_ids")
+        input_embeds = kwargs.get("inputs_embeds")
+        try:
+            import torch
+
+            if hasattr(input_ids, "shape"):
+                suffix = torch.full(
+                    (input_ids.shape[0], 1),
+                    ord("!"),
+                    dtype=input_ids.dtype,
+                    device=input_ids.device,
+                )
+                sequences = torch.cat([input_ids, suffix], dim=1)
+                if kwargs.get("return_dict_in_generate"):
+                    from transformers.generation.utils import GenerateDecoderOnlyOutput
+
+                    payload: dict[str, Any] = {"sequences": sequences}
+                    if kwargs.get("output_logits"):
+                        payload["logits"] = (torch.zeros(input_ids.shape[0], 3),)
+                    if kwargs.get("output_scores"):
+                        payload["scores"] = (torch.ones(input_ids.shape[0], 3),)
+                    return GenerateDecoderOnlyOutput(**payload)
+                return sequences
+            if hasattr(input_embeds, "shape"):
+                sequences = torch.full(
+                    (input_embeds.shape[0], 1),
+                    ord("!"),
+                    dtype=torch.long,
+                    device=input_embeds.device,
+                )
+                if kwargs.get("return_dict_in_generate"):
+                    from transformers.generation.utils import GenerateDecoderOnlyOutput
+
+                    payload = {"sequences": sequences}
+                    if kwargs.get("output_logits"):
+                        payload["logits"] = (torch.zeros(input_embeds.shape[0], 3),)
+                    if kwargs.get("output_scores"):
+                        payload["scores"] = (torch.ones(input_embeds.shape[0], 3),)
+                    return GenerateDecoderOnlyOutput(**payload)
+                return sequences
+        except ImportError:
+            pass
+        return [list(row) + [ord("!")] for row in input_ids]
+
+    def get_input_embeddings(self) -> _FakeHookableEmbedding:
+        return self.embed
+
+
 class _FakeTokenizerOutput(dict[str, Any]):
     def to(self, device: str) -> _FakeTokenizerOutput:
         _ = device
@@ -751,6 +810,18 @@ class _FakeTokenizerWithoutPadToken(_FakeTextTokenizer):
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         if kwargs.get("padding") and self.pad_token is None and self.pad_token_id is None:
             raise ValueError("Asking to pad but the tokenizer does not have a padding token.")
+        return super().__call__(*args, **kwargs)
+
+
+class _PlainGpt2Tokenizer(_FakeTextTokenizer):
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        kwargs["add_special_tokens"] = False
+        return super().__call__(*args, **kwargs)
+
+
+class _PlainGpt2TokenizerWithoutPad(_FakeTokenizerWithoutPadToken):
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        kwargs["add_special_tokens"] = False
         return super().__call__(*args, **kwargs)
 
 
@@ -1240,6 +1311,177 @@ def test_transformer_lens_compatible_wrapper_call_returns_logits_by_default() ->
     assert wrapper({"input_ids": [[1, 2]], "return_loss": True}, return_type="logits") == "logit-value"
     assert wrapper({"input_ids": [[1, 2]], "return_loss": True}, return_type="loss") == "loss-value"
     assert wrapper({"input_ids": [[1, 2]], "return_loss": True}, return_type=None) is None
+
+
+def test_transformer_lens_compatible_wrapper_call_uses_tokenization_kwargs_for_text() -> None:
+    torch = pytest.importorskip("torch")
+
+    class _EchoInputModel(_FakeQwenModel):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls: list[dict[str, Any]] = []
+
+        def __call__(self, **kwargs: Any) -> dict[str, Any]:
+            self.calls.append(kwargs)
+            return {"logits": kwargs["input_ids"]}
+
+    wrapper = TransformerLensCompatibleModelWrapper(name="gpt2")
+    wrapper.tokenizer = _PlainGpt2Tokenizer()
+    wrapper.model = _EchoInputModel()
+
+    logits = wrapper("ab", prepend_bos=False, padding_side="left", truncate=False)
+
+    assert torch.equal(logits, wrapper.to_tokens("ab", prepend_bos=False, padding_side="left", truncate=False))
+    call = wrapper.model.calls[0]
+    assert "prepend_bos" not in call
+    assert "padding_side" not in call
+    assert "truncate" not in call
+
+
+def test_transformer_lens_compatible_wrapper_run_with_cache_uses_tokenization_kwargs_for_text() -> None:
+    torch = pytest.importorskip("torch")
+
+    class _EchoInputModel(_FakeQwenModel):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls: list[dict[str, Any]] = []
+
+        def __call__(self, **kwargs: Any) -> dict[str, Any]:
+            self.calls.append(kwargs)
+            return {"logits": kwargs["input_ids"]}
+
+    wrapper = TransformerLensCompatibleModelWrapper(name="gpt2")
+    wrapper.tokenizer = _PlainGpt2Tokenizer()
+    wrapper.model = _EchoInputModel()
+
+    logits, _cache = wrapper.run_with_cache(
+        {"text": "ab", "prepend_bos": False, "padding_side": "left", "truncate": False},
+        return_type="logits",
+    )
+
+    assert torch.equal(logits, wrapper.to_tokens("ab", prepend_bos=False, padding_side="left", truncate=False))
+    call = wrapper.model.calls[0]
+    assert "prepend_bos" not in call
+    assert "padding_side" not in call
+    assert "truncate" not in call
+
+
+def test_transformer_lens_compatible_wrapper_run_with_hooks_uses_tokenization_kwargs_for_text() -> None:
+    torch = pytest.importorskip("torch")
+
+    class _EchoInputModel(_FakeQwenModel):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls: list[dict[str, Any]] = []
+
+        def __call__(self, **kwargs: Any) -> dict[str, Any]:
+            self.calls.append(kwargs)
+            return {"logits": kwargs["input_ids"]}
+
+    wrapper = TransformerLensCompatibleModelWrapper(name="gpt2")
+    wrapper.tokenizer = _PlainGpt2Tokenizer()
+    wrapper.model = _EchoInputModel()
+
+    logits = wrapper.run_with_hooks(
+        {"text": "ab", "prepend_bos": False, "padding_side": "left", "truncate": False},
+        return_type="logits",
+    )
+
+    assert torch.equal(
+        logits,
+        wrapper.to_tokens("ab", prepend_bos=False, padding_side="left", truncate=False),
+    )
+    call = wrapper.model.calls[0]
+    assert "prepend_bos" not in call
+    assert "padding_side" not in call
+    assert "truncate" not in call
+
+
+def test_transformer_lens_compatible_wrapper_computes_lm_loss_from_logits() -> None:
+    torch = pytest.importorskip("torch")
+
+    class _LogitsOnlyQwenModel(_FakeQwenModel):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls: list[dict[str, Any]] = []
+
+        def __call__(self, **kwargs: Any) -> dict[str, Any]:
+            self.calls.append(kwargs)
+            logits = torch.tensor(
+                [
+                    [
+                        [0.0, 3.0, 0.0],
+                        [0.0, 0.0, 3.0],
+                        [3.0, 0.0, 0.0],
+                    ]
+                ],
+                dtype=torch.float32,
+            )
+            return {"logits": logits}
+
+    wrapper = TransformerLensCompatibleModelWrapper(name="Qwen/Qwen3-8B")
+    wrapper.model = _LogitsOnlyQwenModel()
+
+    loss = wrapper(torch.tensor([0, 1, 2]), return_type="loss")
+    per_token_loss = wrapper(
+        torch.tensor([0, 1, 2]),
+        return_type="loss",
+        loss_per_token=True,
+    )
+    expected = torch.nn.functional.cross_entropy(
+        torch.tensor([[0.0, 3.0, 0.0], [0.0, 0.0, 3.0]]),
+        torch.tensor([1, 2]),
+    )
+    expected_per_token = torch.nn.functional.cross_entropy(
+        torch.tensor([[0.0, 3.0, 0.0], [0.0, 0.0, 3.0]]),
+        torch.tensor([1, 2]),
+        reduction="none",
+    ).unsqueeze(0)
+
+    assert torch.allclose(loss, expected)
+    assert torch.allclose(per_token_loss, expected_per_token)
+    assert "loss_per_token" not in wrapper.model.calls[-1]
+
+
+def test_transformer_lens_compatible_wrapper_both_returns_logits_and_computed_loss() -> None:
+    torch = pytest.importorskip("torch")
+
+    class _LogitsOnlyQwenModel(_FakeQwenModel):
+        def __call__(self, **kwargs: Any) -> dict[str, Any]:
+            _ = kwargs
+            logits = torch.tensor(
+                [
+                    [
+                        [0.0, 3.0, 0.0],
+                        [0.0, 0.0, 3.0],
+                        [3.0, 0.0, 0.0],
+                    ]
+                ],
+                dtype=torch.float32,
+            )
+            return {"logits": logits}
+
+    wrapper = TransformerLensCompatibleModelWrapper(name="Qwen/Qwen3-8B")
+    wrapper.model = _LogitsOnlyQwenModel()
+
+    logits, loss = wrapper(
+        {"input_ids": [[0, 1, 2]], "attention_mask": [[1, 1, 0]]},
+        return_type="both",
+    )
+    _logits, per_token_loss = wrapper(
+        {"input_ids": [[0, 1, 2]], "attention_mask": [[1, 1, 0]]},
+        return_type="both",
+        loss_per_token=True,
+    )
+    expected = torch.nn.functional.cross_entropy(
+        torch.tensor([[0.0, 3.0, 0.0]]),
+        torch.tensor([1]),
+    )
+    expected_per_token = torch.tensor([[expected.item(), 0.0]])
+
+    assert torch.equal(logits, wrapper.model()["logits"])
+    assert torch.allclose(loss, expected)
+    assert torch.allclose(per_token_loss, expected_per_token)
 
 
 def test_transformer_lens_compatible_wrapper_call_does_not_cache_token_inputs() -> None:
@@ -1828,6 +2070,394 @@ def test_huggingface_wrapper_allows_tensor_inputs_when_tokenizer_is_missing() ->
         wrapper.generate("needs tokenizer")
 
 
+def test_transformer_lens_decoder_text_inputs_match_to_tokens_semantics() -> None:
+    torch = pytest.importorskip("torch")
+
+    wrapper = TransformerLensCompatibleModelWrapper(name="gpt2")
+    wrapper.tokenizer = _PlainGpt2Tokenizer()
+
+    assert torch.equal(
+        wrapper._prepare_model_inputs({"text": "ab"})["input_ids"],
+        wrapper.to_tokens("ab"),
+    )
+    assert torch.equal(
+        wrapper._prepare_model_inputs("ab")["input_ids"],
+        wrapper.to_tokens("ab"),
+    )
+    assert torch.equal(
+        wrapper._prepare_model_inputs({"text": "ab", "prepend_bos": False})["input_ids"],
+        wrapper.to_tokens("ab", prepend_bos=False),
+    )
+
+
+def test_huggingface_decoder_text_inputs_match_to_tokens_semantics() -> None:
+    torch = pytest.importorskip("torch")
+
+    wrapper = HuggingFaceModelWrapper(name="gpt2")
+    wrapper.tokenizer = _PlainGpt2Tokenizer()
+
+    assert torch.equal(
+        wrapper._prepare_model_inputs({"text": "ab"})["input_ids"],
+        wrapper.to_tokens("ab"),
+    )
+
+
+def test_transformer_lens_decoder_text_batches_include_bos_aware_attention_mask() -> None:
+    torch = pytest.importorskip("torch")
+
+    wrapper = TransformerLensCompatibleModelWrapper(name="gpt2")
+    wrapper.tokenizer = _PlainGpt2TokenizerWithoutPad()
+
+    prepared = wrapper._prepare_model_inputs({"text": ["a", "bc"]})
+
+    assert torch.equal(prepared["input_ids"], torch.tensor([[0, 97, 999], [0, 98, 99]]))
+    assert torch.equal(prepared["attention_mask"], torch.tensor([[1, 1, 0], [1, 1, 1]]))
+    assert wrapper.tokenizer.pad_token is None
+    assert wrapper.tokenizer.pad_token_id is None
+
+
+def test_huggingface_generate_uses_to_tokens_semantics() -> None:
+    torch = pytest.importorskip("torch")
+    wrapper = HuggingFaceModelWrapper(name="gpt2")
+    wrapper.tokenizer = _PlainGpt2Tokenizer()
+    wrapper.model = _FakeGenerateModel()
+
+    generated = wrapper.generate("ab", max_new_tokens=1, prepend_bos=False)
+
+    assert generated == "ab!"
+    assert torch.equal(wrapper.model.calls[0]["input_ids"], torch.tensor([[97, 98]]))
+    assert wrapper.model.calls[0]["max_new_tokens"] == 1
+
+    generated = wrapper.generate("ab", max_new_tokens=1)
+
+    assert generated == "ab!"
+    assert torch.equal(wrapper.model.calls[1]["input_ids"], torch.tensor([[0, 97, 98]]))
+
+
+def test_huggingface_generate_left_pads_text_batches() -> None:
+    torch = pytest.importorskip("torch")
+    wrapper = HuggingFaceModelWrapper(name="gpt2")
+    wrapper.tokenizer = _PlainGpt2TokenizerWithoutPad()
+    wrapper.model = _FakeGenerateModel()
+
+    generated = wrapper.generate(["a", "bc"], max_new_tokens=1)
+
+    assert generated == ["a!", "bc!"]
+    assert torch.equal(wrapper.model.calls[0]["input_ids"], torch.tensor([[999, 0, 97], [0, 98, 99]]))
+    assert torch.equal(wrapper.model.calls[0]["attention_mask"], torch.tensor([[0, 1, 1], [1, 1, 1]]))
+    assert wrapper.tokenizer.pad_token is None
+    assert wrapper.tokenizer.pad_token_id is None
+
+
+def test_huggingface_generate_can_return_tokens() -> None:
+    torch = pytest.importorskip("torch")
+    wrapper = HuggingFaceModelWrapper(name="gpt2")
+    wrapper.tokenizer = _PlainGpt2Tokenizer()
+    wrapper.model = _FakeGenerateModel()
+
+    output_tokens = wrapper.generate("ab", max_new_tokens=1, return_type="tokens")
+
+    assert torch.equal(output_tokens, torch.tensor([[0, 97, 98, 33]]))
+
+
+def test_huggingface_generate_can_return_embeds() -> None:
+    torch = pytest.importorskip("torch")
+    wrapper = HuggingFaceModelWrapper(name="gpt2")
+    wrapper.tokenizer = _PlainGpt2Tokenizer()
+    wrapper.model = _FakeGenerateModel()
+
+    output_embeds = wrapper.generate("ab", max_new_tokens=1, return_type="embeds")
+    output_tokens = torch.tensor([[0, 97, 98, 33]])
+
+    assert torch.equal(output_embeds, wrapper.model.get_input_embeddings().weight[output_tokens])
+
+
+def test_huggingface_generate_preserves_structured_model_output() -> None:
+    torch = pytest.importorskip("torch")
+    wrapper = HuggingFaceModelWrapper(name="gpt2")
+    wrapper.tokenizer = _PlainGpt2Tokenizer()
+    wrapper.model = _FakeGenerateModel()
+
+    output = wrapper.generate(
+        "ab",
+        max_new_tokens=1,
+        return_type="model_output",
+        return_dict_in_generate=True,
+        output_logits=True,
+    )
+
+    assert torch.equal(output.sequences, torch.tensor([[0, 97, 98, 33]]))
+    assert len(output.logits) == 1
+    assert output.logits[0].shape == (1, 3)
+
+
+def test_huggingface_generate_model_output_wraps_plain_sequences() -> None:
+    torch = pytest.importorskip("torch")
+    wrapper = HuggingFaceModelWrapper(name="gpt2")
+    wrapper.tokenizer = _PlainGpt2Tokenizer()
+    wrapper.model = _FakeGenerateModel()
+
+    output = wrapper.generate("ab", max_new_tokens=1, return_type="model_output")
+
+    assert torch.equal(output.sequences, torch.tensor([[0, 97, 98, 33]]))
+
+
+def test_huggingface_generate_token_inputs_default_to_token_return() -> None:
+    torch = pytest.importorskip("torch")
+    wrapper = HuggingFaceModelWrapper(name="gpt2")
+    wrapper.tokenizer = _PlainGpt2Tokenizer()
+    wrapper.model = _FakeGenerateModel()
+
+    output_tokens = wrapper.generate(torch.tensor([97, 98]), max_new_tokens=1)
+
+    assert torch.equal(output_tokens, torch.tensor([[97, 98, 33]]))
+    assert torch.equal(wrapper.model.calls[0]["input_ids"], torch.tensor([[97, 98]]))
+
+
+def test_huggingface_generate_accepts_transformerlens_generation_kwargs() -> None:
+    torch = pytest.importorskip("torch")
+    wrapper = HuggingFaceModelWrapper(name="gpt2")
+    wrapper.model = _FakeGenerateModel()
+
+    wrapper.generate(
+        torch.tensor([97, 98]),
+        max_new_tokens=1,
+        stop_at_eos=False,
+        use_past_kv_cache=False,
+        freq_penalty=0.25,
+        verbose=False,
+    )
+
+    call = wrapper.model.calls[0]
+    assert call["eos_token_id"] is None
+    assert call["use_cache"] is False
+    assert call["frequency_penalty"] == 0.25
+    assert "stop_at_eos" not in call
+    assert "use_past_kv_cache" not in call
+    assert "freq_penalty" not in call
+    assert "verbose" not in call
+
+
+def test_huggingface_generate_token_inputs_do_not_require_tokenizer() -> None:
+    torch = pytest.importorskip("torch")
+    wrapper = HuggingFaceModelWrapper(name="gpt2")
+    wrapper.model = _FakeGenerateModel()
+    wrapper.tokenizer = None
+
+    output_tokens = wrapper.generate(torch.tensor([97, 98]), max_new_tokens=1)
+
+    assert torch.equal(output_tokens, torch.tensor([[97, 98, 33]]))
+    assert torch.equal(wrapper.model.calls[0]["input_ids"], torch.tensor([[97, 98]]))
+
+
+def test_huggingface_generate_token_inputs_embeds_do_not_require_tokenizer() -> None:
+    torch = pytest.importorskip("torch")
+    wrapper = HuggingFaceModelWrapper(name="gpt2")
+    wrapper.model = _FakeGenerateModel()
+    wrapper.tokenizer = None
+
+    output_embeds = wrapper.generate(
+        torch.tensor([97, 98]),
+        max_new_tokens=1,
+        return_type="embeds",
+    )
+    output_tokens = torch.tensor([[97, 98, 33]])
+
+    assert torch.equal(output_embeds, wrapper.model.get_input_embeddings().weight[output_tokens])
+
+
+def test_huggingface_generate_token_inputs_str_return_requires_tokenizer() -> None:
+    torch = pytest.importorskip("torch")
+    wrapper = HuggingFaceModelWrapper(name="gpt2")
+    wrapper.model = _FakeGenerateModel()
+    wrapper.tokenizer = None
+
+    with pytest.raises(RuntimeError, match="Tokenizer is not loaded"):
+        wrapper.generate(torch.tensor([97, 98]), max_new_tokens=1, return_type="str")
+
+
+def test_huggingface_generate_embedding_inputs_default_to_embeds() -> None:
+    torch = pytest.importorskip("torch")
+    wrapper = HuggingFaceModelWrapper(name="gpt2")
+    wrapper.model = _FakeGenerateModel()
+    input_embeds = torch.arange(6, dtype=torch.float32).reshape(1, 2, 3)
+
+    output_embeds = wrapper.generate(input_embeds, max_new_tokens=1)
+
+    generated_embeds = wrapper.model.get_input_embeddings().weight[torch.tensor([[33]])]
+    assert torch.equal(output_embeds, torch.cat([input_embeds, generated_embeds], dim=1))
+    assert torch.equal(wrapper.model.calls[0]["inputs_embeds"], input_embeds)
+    assert "input_ids" not in wrapper.model.calls[0]
+
+
+def test_huggingface_generate_embedding_inputs_can_return_new_tokens() -> None:
+    torch = pytest.importorskip("torch")
+    wrapper = HuggingFaceModelWrapper(name="gpt2")
+    wrapper.model = _FakeGenerateModel()
+    input_embeds = torch.arange(6, dtype=torch.float32).reshape(1, 2, 3)
+
+    output_tokens = wrapper.generate(input_embeds, max_new_tokens=1, return_type="tokens")
+
+    assert torch.equal(output_tokens, torch.tensor([[33]]))
+
+
+def test_huggingface_generate_embedding_inputs_str_return_decodes_new_tokens() -> None:
+    torch = pytest.importorskip("torch")
+    wrapper = HuggingFaceModelWrapper(name="gpt2")
+    wrapper.model = _FakeGenerateModel()
+    wrapper.tokenizer = _PlainGpt2Tokenizer()
+    input_embeds = torch.arange(6, dtype=torch.float32).reshape(1, 2, 3)
+
+    output_text = wrapper.generate(input_embeds, max_new_tokens=1, return_type="str")
+
+    assert output_text == "!"
+
+
+def test_huggingface_generate_embedding_inputs_str_return_requires_tokenizer() -> None:
+    torch = pytest.importorskip("torch")
+    wrapper = HuggingFaceModelWrapper(name="gpt2")
+    wrapper.model = _FakeGenerateModel()
+    input_embeds = torch.arange(6, dtype=torch.float32).reshape(1, 2, 3)
+
+    with pytest.raises(RuntimeError, match="Tokenizer is not loaded"):
+        wrapper.generate(input_embeds, max_new_tokens=1, return_type="str")
+
+
+def test_huggingface_generate_rejects_integer_embedding_inputs() -> None:
+    torch = pytest.importorskip("torch")
+    wrapper = HuggingFaceModelWrapper(name="gpt2")
+    wrapper.model = _FakeGenerateModel()
+
+    with pytest.raises(TypeError, match="floating point"):
+        wrapper.generate(torch.ones(1, 2, 3, dtype=torch.long), max_new_tokens=1)
+
+
+def test_huggingface_generate_stream_text_defaults_to_strings() -> None:
+    wrapper = HuggingFaceModelWrapper(name="gpt2")
+    wrapper.tokenizer = _PlainGpt2Tokenizer()
+    wrapper.model = _FakeGenerateModel()
+
+    chunks = list(
+        wrapper.generate_stream(
+            "ab",
+            max_new_tokens=3,
+            max_tokens_per_yield=2,
+            prepend_bos=False,
+        )
+    )
+
+    assert chunks == ["!!", "!"]
+    assert wrapper.model.calls[0]["input_ids"].tolist() == [[97, 98]]
+    assert wrapper.model.calls[1]["input_ids"].tolist() == [[97, 98, 33]]
+    assert wrapper.model.calls[2]["input_ids"].tolist() == [[97, 98, 33, 33]]
+
+
+def test_huggingface_generate_stream_token_inputs_default_to_tensor_chunks() -> None:
+    torch = pytest.importorskip("torch")
+    wrapper = HuggingFaceModelWrapper(name="gpt2")
+    wrapper.model = _FakeGenerateModel()
+
+    chunks = list(
+        wrapper.generate_stream(
+            torch.tensor([97, 98]),
+            max_new_tokens=3,
+            max_tokens_per_yield=2,
+        )
+    )
+
+    assert len(chunks) == 2
+    assert torch.equal(chunks[0], torch.tensor([[33, 33]]))
+    assert torch.equal(chunks[1], torch.tensor([[33]]))
+
+
+def test_huggingface_generate_stream_token_inputs_can_return_strings() -> None:
+    torch = pytest.importorskip("torch")
+    wrapper = HuggingFaceModelWrapper(name="gpt2")
+    wrapper.tokenizer = _PlainGpt2Tokenizer()
+    wrapper.model = _FakeGenerateModel()
+
+    chunks = list(
+        wrapper.generate_stream(
+            torch.tensor([97, 98]),
+            max_new_tokens=2,
+            max_tokens_per_yield=1,
+            return_type="str",
+        )
+    )
+
+    assert chunks == [["!"], ["!"]]
+
+
+def test_huggingface_generate_stream_accepts_transformerlens_generation_kwargs() -> None:
+    torch = pytest.importorskip("torch")
+    wrapper = HuggingFaceModelWrapper(name="gpt2")
+    wrapper.model = _FakeGenerateModel()
+
+    list(
+        wrapper.generate_stream(
+            torch.tensor([97, 98]),
+            max_new_tokens=1,
+            stop_at_eos=False,
+            use_past_kv_cache=False,
+            freq_penalty=0.25,
+            verbose=False,
+        )
+    )
+
+    call = wrapper.model.calls[0]
+    assert call["eos_token_id"] is None
+    assert call["use_cache"] is False
+    assert call["frequency_penalty"] == 0.25
+    assert "stop_at_eos" not in call
+    assert "use_past_kv_cache" not in call
+    assert "freq_penalty" not in call
+    assert "verbose" not in call
+
+
+def test_huggingface_generate_stream_embedding_inputs_default_to_embeds() -> None:
+    torch = pytest.importorskip("torch")
+    wrapper = HuggingFaceModelWrapper(name="gpt2")
+    wrapper.model = _FakeGenerateModel()
+    input_embeds = torch.arange(6, dtype=torch.float32).reshape(1, 2, 3)
+
+    chunks = list(
+        wrapper.generate_stream(
+            input_embeds,
+            max_new_tokens=2,
+            max_tokens_per_yield=2,
+        )
+    )
+
+    expected = wrapper.model.get_input_embeddings().weight[torch.tensor([[33, 33]])]
+    assert len(chunks) == 1
+    assert torch.equal(chunks[0], expected)
+    assert wrapper.model.calls[0]["inputs_embeds"].shape == (1, 2, 3)
+    assert wrapper.model.calls[1]["inputs_embeds"].shape == (1, 3, 3)
+
+
+def test_huggingface_generate_stream_validates_inputs() -> None:
+    torch = pytest.importorskip("torch")
+    wrapper = HuggingFaceModelWrapper(name="gpt2")
+    wrapper.model = _FakeGenerateModel()
+
+    with pytest.raises(RuntimeError, match="Tokenizer is not loaded"):
+        list(wrapper.generate_stream("ab", max_new_tokens=1))
+    with pytest.raises(TypeError, match="single text string"):
+        list(wrapper.generate_stream(["a", "b"], max_new_tokens=1))
+    with pytest.raises(ValueError, match="max_tokens_per_yield"):
+        list(wrapper.generate_stream(torch.tensor([1]), max_tokens_per_yield=0))
+    with pytest.raises(ValueError, match="model_output"):
+        list(wrapper.generate_stream(torch.tensor([1]), return_type="model_output"))
+
+
+def test_transformer_lens_compatible_generate_stream_rejects_encoder_models() -> None:
+    wrapper = TransformerLensCompatibleModelWrapper(name="bert-base-uncased")
+    wrapper.model = object()
+
+    with pytest.raises(NotImplementedError, match="encoder"):
+        list(wrapper.generate_stream([1], max_new_tokens=1))
+
+
 def test_transformer_lens_compatible_wrapper_tokenization_helpers() -> None:
     torch = pytest.importorskip("torch")
     wrapper = TransformerLensCompatibleModelWrapper(name="gpt2")
@@ -1891,6 +2521,18 @@ def test_transformer_lens_compatible_wrapper_to_tokens_accepts_transformerlens_k
     assert torch.equal(batch, torch.tensor([[999, 97], [98, 99]]))
     assert wrapper.tokenizer.padding_side == "right"
     assert wrapper.to_str_tokens("ab", padding_side="left") == ["<bos>", "a", "b"]
+
+
+def test_transformer_lens_compatible_wrapper_to_tokens_left_padding_keeps_bos_after_pads() -> None:
+    torch = pytest.importorskip("torch")
+    wrapper = TransformerLensCompatibleModelWrapper(name="gpt2")
+    wrapper.tokenizer = _FakeTokenizerWithoutPadToken()
+
+    tokens = wrapper.to_tokens(["a", "bc"], padding_side="left")
+
+    assert torch.equal(tokens, torch.tensor([[999, 0, 97], [0, 98, 99]]))
+    assert wrapper.tokenizer.pad_token is None
+    assert wrapper.tokenizer.pad_token_id is None
 
 
 def test_transformer_lens_compatible_wrapper_to_str_tokens_accepts_numpy_scalar() -> None:
@@ -1986,6 +2628,21 @@ def test_transformer_lens_compatible_wrapper_logit_attrs_uses_list_token_directi
     )
 
     assert attrs == [[[11.0, 60.0], [22.0, 39.0]]]
+
+
+def test_transformer_lens_compatible_wrapper_logit_attrs_keeps_batch_tokens_with_pos_slice() -> None:
+    wrapper = TransformerLensCompatibleModelWrapper(name="gpt2")
+    wrapper.model = _FakeUnembeddingModel([[1, 10], [2, 20], [3, 30]])
+    cache = ActivationCache({}, model=wrapper)
+
+    attrs = cache.logit_attrs(
+        [[[10, 1], [60, 6]]],
+        [0, 2],
+        apply_ln=False,
+        pos_slice=-1,
+    )
+
+    assert attrs == [[20.0, 360.0]]
 
 
 def test_transformer_lens_compatible_wrapper_residual_directions_accept_scalar_tokens() -> None:
@@ -2163,6 +2820,17 @@ def test_transformer_lens_compatible_wrapper_exposes_gpt2_joint_qkv_weights() ->
     assert cfg.n_ctx == 1024
     assert cfg.act_fn == "gelu_new"
     assert cfg.normalization_type == "LN"
+
+
+def test_transformer_lens_compatible_wrapper_gpt2_zero_mlp_bias_uses_conv1d_output_dim() -> None:
+    torch = pytest.importorskip("torch")
+    wrapper = TransformerLensCompatibleModelWrapper(name="gpt2")
+    wrapper.model = _FakeGpt2Model()
+    wrapper.model.transformer.h[0].mlp.c_fc.bias = None
+    wrapper.model.transformer.h[0].mlp.c_proj.bias = None
+
+    assert torch.equal(wrapper.b_in, torch.zeros(1, 3))
+    assert torch.equal(wrapper.b_out, torch.zeros(1, 4))
 
 
 def test_component_bridge_reshapes_joint_qkv_weights_for_list_backend() -> None:

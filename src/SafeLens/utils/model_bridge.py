@@ -381,7 +381,13 @@ class ArchitectureAdapter:
             paths = self._mlp_weight_paths(layer, canonical_component="post")
         else:
             raise ValueError(f"Unsupported MLP bias component {component!r}.")
-        return _bias_from_first_path(model, paths, kind=f"MLP {component} bias")
+        zero_axis = 1 if self.name == "gpt2_decoder" else 0
+        return _bias_from_first_path(
+            model,
+            paths,
+            kind=f"MLP {component} bias",
+            zero_axis=zero_axis,
+        )
 
     def _mlp_weight_paths(
         self,
@@ -451,7 +457,13 @@ def _weight_from_first_path(model: Any, paths: Sequence[str], *, kind: str) -> A
     raise KeyError(f"Could not resolve {kind}. Tried module paths: {attempted_paths}.")
 
 
-def _bias_from_first_path(model: Any, paths: Sequence[str], *, kind: str) -> Any:
+def _bias_from_first_path(
+    model: Any,
+    paths: Sequence[str],
+    *,
+    kind: str,
+    zero_axis: int = 0,
+) -> Any:
     attempted: list[str] = []
     for path in paths:
         attempted.append(path)
@@ -464,7 +476,7 @@ def _bias_from_first_path(model: Any, paths: Sequence[str], *, kind: str) -> Any
             return bias
         weight = getattr(module, "weight", None)
         if weight is not None:
-            return zeros_like_last_dim(weight, axis=0)
+            return zeros_like_last_dim(weight, axis=zero_axis)
     attempted_paths = ", ".join(attempted)
     raise KeyError(f"Could not resolve {kind}. Tried module paths: {attempted_paths}.")
 

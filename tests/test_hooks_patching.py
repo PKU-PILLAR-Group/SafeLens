@@ -469,6 +469,44 @@ def test_activation_cache_resolves_negative_layer_tuple_keys() -> None:
     assert cache[("resid_post", -1)] == [1]
 
 
+def test_activation_cache_mutates_tuple_keys_through_canonical_names() -> None:
+    cache = ActivationCache()
+
+    cache[("resid_pre", 0)] = [1]
+    cache[("q", 0)] = [2]
+    cache[("post", 0, "m")] = [3]
+
+    assert cache.to_dict() == {
+        "layer_0.resid_pre": [1],
+        "layer_0.q": [2],
+        "layer_0.mlp.post": [3],
+    }
+    assert cache["blocks.0.hook_resid_pre"] == [1]
+    assert cache["blocks.0.attn.hook_q"] == [2]
+    assert cache["blocks.0.mlp.hook_post"] == [3]
+
+    cache[("q", 0)] = [4]
+    assert cache.to_dict()["layer_0.q"] == [4]
+
+    del cache[("resid_pre", 0)]
+    assert "layer_0.resid_pre" not in cache.to_dict()
+    assert ("resid_pre", 0) not in cache
+
+
+def test_activation_cache_tuple_key_mutation_updates_existing_transformerlens_names() -> None:
+    cache = ActivationCache(
+        {
+            "blocks.0.hook_resid_post": [0],
+            "blocks.1.hook_resid_post": [1],
+        }
+    )
+
+    cache[("resid_post", -1)] = [9]
+    del cache[("resid_post", 0)]
+
+    assert cache.to_dict() == {"blocks.1.hook_resid_post": [9]}
+
+
 def test_activation_cache_batch_dim_helpers() -> None:
     cache = ActivationCache({"layer_0": [[1, 2]], "scalar": 9})
     without_batch = cache.remove_batch_dim()
@@ -1120,6 +1158,83 @@ def test_activation_cache_neuron_results_project_output_onto_directions() -> Non
     assert stack == [[[[12.0, 15.0]]], [[[40.0, 44.0]]]]
 
 
+def test_activation_cache_neuron_results_projects_torch_weights_before_expansion() -> None:
+    torch = pytest.importorskip("torch")
+    cache = ActivationCache(
+        {"layer_0.post": torch.tensor([[[3.0, 4.0]]])},
+        model=NeuronResultModel(W_out=torch.tensor([[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]])),
+    )
+
+    projected_vector = cache.get_neuron_results(
+        0,
+        project_output_onto=torch.tensor([1.0, 0.0, -1.0]),
+    )
+    projected_matrix = cache.get_neuron_results(
+        0,
+        project_output_onto=torch.tensor([[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]]),
+    )
+
+    assert tuple(projected_vector.shape) == (1, 1, 2)
+    torch.testing.assert_close(projected_vector, torch.tensor([[[-6.0, -8.0]]]))
+    assert tuple(projected_matrix.shape) == (1, 1, 2, 2)
+    torch.testing.assert_close(
+        projected_matrix,
+        torch.tensor([[[[12.0, 15.0], [40.0, 44.0]]]]),
+    )
+
+
+def test_activation_cache_stack_neuron_results_passes_projection_into_neuron_results() -> None:
+    cache = ActivationCache(
+        {"layer_0.post": [[[3, 4]]]},
+        model=NeuronResultModel(W_out=[[[1, 2, 3], [4, 5, 6]]]),
+    )
+    seen_projections: list[Any] = []
+    original = cache.get_neuron_results
+
+    def tracking_get_neuron_results(*args: Any, **kwargs: Any) -> Any:
+        seen_projections.append(kwargs.get("project_output_onto"))
+        return original(*args, **kwargs)
+
+    cache.get_neuron_results = tracking_get_neuron_results  # type: ignore[method-assign]
+
+    stack, labels = cache.stack_neuron_results(
+        project_output_onto=[1, 0, -1],
+        return_labels=True,
+    )
+
+    assert seen_projections == [[1, 0, -1]]
+    assert labels == ["L0N0", "L0N1"]
+    assert stack == [[[-6.0]], [[-8.0]]]
+
+
+def test_activation_cache_stack_neuron_results_projects_after_layernorm() -> None:
+    cache = ActivationCache(
+        {
+            "ln_final.hook_scale": [[[2, 2, 2]]],
+            "layer_0.post": [[[3, 4]]],
+        },
+        model=NeuronResultModel(W_out=[[[1, 2, 3], [4, 5, 6]]]),
+    )
+    seen_projections: list[Any] = []
+    original = cache.get_neuron_results
+
+    def tracking_get_neuron_results(*args: Any, **kwargs: Any) -> Any:
+        seen_projections.append(kwargs.get("project_output_onto"))
+        return original(*args, **kwargs)
+
+    cache.get_neuron_results = tracking_get_neuron_results  # type: ignore[method-assign]
+
+    stack, labels = cache.stack_neuron_results(
+        apply_ln=True,
+        project_output_onto=[1, 0, -1],
+        return_labels=True,
+    )
+
+    assert seen_projections == [None]
+    assert labels == ["L0N0", "L0N1"]
+    assert stack == [[[-3.0]], [[-4.0]]]
+
+
 def test_activation_cache_head_and_neuron_stacks_support_remainder_and_layernorm() -> None:
     cache = ActivationCache(
         {
@@ -1309,6 +1424,20 @@ def test_activation_cache_logit_attrs_slices_batch_directions_without_pos_slice(
     )
 
     assert attrs == [[2.0]]
+
+
+def test_activation_cache_logit_attrs_keeps_batch_directions_with_pos_slice() -> None:
+    cache = ActivationCache()
+
+    attrs = cache.logit_attrs(
+        [[[30, 3], [60, 6]]],
+        None,
+        directions=[[1, 0], [0, 1]],
+        apply_ln=False,
+        pos_slice=-1,
+    )
+
+    assert attrs == [[30.0, 6.0]]
 
 
 def test_activation_cache_logit_attrs_accepts_explicit_position_indices() -> None:
@@ -1892,6 +2021,52 @@ def test_generic_activation_patch_accepts_explicit_transformerlens_index_table()
     assert index_table == [{"layer": 0, "pos": 2}, {"layer": 0, "pos": 0}]
 
 
+def test_generic_activation_patch_requires_layer_first_in_explicit_transformerlens_index_table() -> None:
+    model = ComponentWrapper([[[0], [0], [0]]])
+    clean_cache = ActivationCache({"blocks.0.hook_resid_pre": [[[10], [20], [30]]]})
+
+    def tl_layer_pos_setter(corrupted_activation: Any, index: Sequence[int], clean_activation: Any) -> Any:
+        patched = deepcopy(corrupted_activation)
+        _layer, pos = index
+        patched[0][pos] = clean_activation[0][pos]
+        return patched
+
+    with pytest.raises(ValueError, match="layer.*first column"):
+        generic_activation_patch(
+            model,
+            {"activation": [[[0], [0], [0]]]},
+            clean_cache,
+            patching_metric=lambda output: _nested_sum(output["activation"]),
+            patch_setter=tl_layer_pos_setter,
+            activation_name="resid_pre",
+            index_df=[{"pos": 2, "layer": 0}],
+            return_details=False,
+        )
+
+
+def test_generic_activation_patch_rejects_explicit_transformerlens_index_rows_with_mismatched_columns() -> None:
+    model = ComponentWrapper([[[0], [0], [0]]])
+    clean_cache = ActivationCache({"blocks.0.hook_resid_pre": [[[10], [20], [30]]]})
+
+    def tl_layer_pos_setter(corrupted_activation: Any, index: Sequence[int], clean_activation: Any) -> Any:
+        patched = deepcopy(corrupted_activation)
+        _layer, pos = index
+        patched[0][pos] = clean_activation[0][pos]
+        return patched
+
+    with pytest.raises(ValueError, match="same columns"):
+        generic_activation_patch(
+            model,
+            {"activation": [[[0], [0], [0]]]},
+            clean_cache,
+            patching_metric=lambda output: _nested_sum(output["activation"]),
+            patch_setter=tl_layer_pos_setter,
+            activation_name="resid_pre",
+            index_df=[{"layer": 0, "pos": 2}, {"layer": 0}],
+            return_details=False,
+        )
+
+
 def test_make_df_from_ranges_matches_transformerlens_index_table_shape() -> None:
     index_df = make_df_from_ranges((2, 3), ("layer", "pos"))
     records, columns = normalize_index_table(index_df)
@@ -1936,7 +2111,7 @@ def test_generic_activation_patch_accepts_make_df_from_ranges_output() -> None:
     assert index_table == [{"layer": 0, "pos": 0}, {"layer": 0, "pos": 1}]
 
 
-def test_generic_activation_patch_respects_index_axis_names_for_explicit_index_table() -> None:
+def test_generic_activation_patch_rejects_index_axis_names_with_explicit_index_table() -> None:
     model = ComponentWrapper([[[0], [0], [0]]])
     clean_cache = ActivationCache({"blocks.0.hook_resid_pre": [[[10], [20], [30]]]})
 
@@ -1946,21 +2121,19 @@ def test_generic_activation_patch_respects_index_axis_names_for_explicit_index_t
         patched[0][pos] = clean_activation[0][pos]
         return patched
 
-    grid, index_table = generic_activation_patch(
-        model,
-        {"activation": [[[0], [0], [0]]]},
-        clean_cache,
-        patching_metric=lambda output: _nested_sum(output["activation"]),
-        patch_setter=tl_layer_pos_setter,
-        activation_name="resid_pre",
-        index_axis_names=("layer", "pos"),
-        index_df=[{"pos": 2, "layer": 0}, {"pos": 0, "layer": 0}],
-        return_details=False,
-        return_index_df=True,
-    )
-
-    assert grid == [30.0, 10.0]
-    assert index_table == [{"layer": 0, "pos": 2}, {"layer": 0, "pos": 0}]
+    with pytest.raises(ValueError, match="index_axis_names.*index_df"):
+        generic_activation_patch(
+            model,
+            {"activation": [[[0], [0], [0]]]},
+            clean_cache,
+            patching_metric=lambda output: _nested_sum(output["activation"]),
+            patch_setter=tl_layer_pos_setter,
+            activation_name="resid_pre",
+            index_axis_names=("layer", "pos"),
+            index_df=[{"pos": 2, "layer": 0}, {"pos": 0, "layer": 0}],
+            return_details=False,
+            return_index_df=True,
+        )
 
 
 def test_transformerlens_patch_setter_internal_type_errors_propagate() -> None:
@@ -2443,6 +2616,50 @@ def test_attention_pattern_patch_can_return_transformerlens_metric_grid() -> Non
     assert grid == [[[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]]]
     assert index_table[0] == {"layer": 0, "head_index": 0, "dest_pos": 0, "src_pos": 0}
     assert index_table[-1] == {"layer": 0, "head_index": 0, "dest_pos": 1, "src_pos": 2}
+
+
+def test_attention_scores_patch_helpers_share_pattern_index_semantics_for_list_backend() -> None:
+    from SafeLens.core.patching import (
+        get_act_patch_attn_scores_all_pos,
+        get_act_patch_attn_scores_by_pos,
+        get_act_patch_attn_scores_dest_src_pos,
+    )
+
+    model = ComponentWrapper([[[[0, 0, 0], [0, 0, 0]]]])
+    clean_cache = ActivationCache({"layer_0.attn_scores": [[[[1, 2, 3], [4, 5, 6]]]]})
+    kwargs = {
+        "layers": [0],
+        "heads": [0],
+        "dest_positions": [1],
+        "source_positions": [2],
+        "return_details": True,
+    }
+
+    all_pos = get_act_patch_attn_scores_all_pos(
+        model,
+        {"activation": [[[[0, 0, 0], [0, 0, 0]]]]},
+        clean_cache,
+        metric=lambda output: _nested_sum(output["activation"]),
+        **kwargs,
+    )
+    by_pos = get_act_patch_attn_scores_by_pos(
+        model,
+        {"activation": [[[[0, 0, 0], [0, 0, 0]]]]},
+        clean_cache,
+        metric=lambda output: _nested_sum(output["activation"]),
+        **kwargs,
+    )
+    dest_src = get_act_patch_attn_scores_dest_src_pos(
+        model,
+        {"activation": [[[[0, 0, 0], [0, 0, 0]]]]},
+        clean_cache,
+        metric=lambda output: _nested_sum(output["activation"]),
+        **kwargs,
+    )
+
+    assert all_pos[0].output["activation"] == [[[[1, 2, 3], [4, 5, 6]]]]
+    assert by_pos[0].output["activation"] == [[[[0, 0, 0], [4, 5, 6]]]]
+    assert dest_src[0].output["activation"] == [[[[0, 0, 0], [0, 0, 6]]]]
 
 
 def test_block_every_patches_resid_attention_and_mlp_components() -> None:

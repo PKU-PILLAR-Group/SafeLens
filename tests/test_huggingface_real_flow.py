@@ -9,6 +9,7 @@ import pytest
 
 from SafeLens.core.base import PipelineConfig
 from SafeLens.core.analysis import compute_head_results_from_z, direct_logit_attribution
+from SafeLens.core.analysis import test_prompt as run_test_prompt
 from SafeLens.core.hooks import ActivationCache
 from SafeLens.pipelines.runner import PipelineRunner
 from SafeLens.utils import HuggingFaceModelWrapper, build_model_wrapper
@@ -81,6 +82,43 @@ def test_huggingface_wrapper_real_model_forward_cache_and_generate() -> None:
             embed_cache["hook_embed"] + embed_cache["hook_pos_embed"],
         )
 
+        prompt = "SafeLens checks text token semantics."
+        prepared = wrapper._prepare_model_inputs({"text": prompt})
+        assert torch.equal(prepared["input_ids"], wrapper.to_tokens(prompt))
+        logits_without_bos = wrapper(prompt, prepend_bos=False)
+        assert logits_without_bos.shape[:2] == wrapper.to_tokens(prompt, prepend_bos=False).shape
+        prompt_check = run_test_prompt(
+            wrapper,
+            "SafeLens checks",
+            wrapper.to_single_str_token(int(wrapper.to_tokens("SafeLens checks")[:, -1].item())),
+            prepend_bos=False,
+            top_k=3,
+        )
+        assert isinstance(prompt_check["predicted_token_id"], int)
+        assert len(prompt_check["top_tokens"]) == 3
+        computed_loss = wrapper(wrapper.to_tokens(prompt), return_type="loss")
+        per_token_loss = wrapper(
+            wrapper.to_tokens(prompt),
+            return_type="loss",
+            loss_per_token=True,
+        )
+        logits, both_loss = wrapper(wrapper.to_tokens(prompt), return_type="both")
+        _logits, both_per_token_loss = wrapper(
+            wrapper.to_tokens(prompt),
+            return_type="both",
+            loss_per_token=True,
+        )
+        hf_loss = wrapper.model(
+            input_ids=wrapper.to_tokens(prompt),
+            labels=wrapper.to_tokens(prompt),
+        ).loss
+        assert logits.shape[:2] == wrapper.to_tokens(prompt).shape
+        assert per_token_loss.shape == (1, wrapper.to_tokens(prompt).shape[1] - 1)
+        assert torch.allclose(computed_loss, hf_loss, atol=1e-5)
+        assert torch.allclose(per_token_loss.mean(), computed_loss, atol=1e-5)
+        assert torch.allclose(both_loss, computed_loss, atol=1e-5)
+        assert torch.allclose(both_per_token_loss, per_token_loss, atol=1e-5)
+
         generated = wrapper.generate(
             "SafeLens",
             max_new_tokens=2,
@@ -90,6 +128,73 @@ def test_huggingface_wrapper_real_model_forward_cache_and_generate() -> None:
 
         assert isinstance(generated, str)
         assert generated.startswith("SafeLens")
+        generated_tokens = wrapper.generate(
+            "SafeLens",
+            max_new_tokens=1,
+            do_sample=False,
+            pad_token_id=wrapper.tokenizer.eos_token_id,
+            return_type="tokens",
+        )
+        assert torch.equal(generated_tokens[:, : wrapper.to_tokens("SafeLens").shape[1]], wrapper.to_tokens("SafeLens"))
+        generated_embeds = wrapper.generate(
+            "SafeLens",
+            max_new_tokens=1,
+            do_sample=False,
+            pad_token_id=wrapper.tokenizer.eos_token_id,
+            return_type="embeds",
+        )
+        assert generated_embeds.shape[:2] == generated_tokens.shape
+        input_embeds = wrapper.model.get_input_embeddings()(wrapper.to_tokens("SafeLens"))
+        generated_from_embeds = wrapper.generate(
+            input_embeds,
+            max_new_tokens=1,
+            do_sample=False,
+            pad_token_id=wrapper.tokenizer.eos_token_id,
+            return_type="tokens",
+        )
+        assert generated_from_embeds.shape == (1, 1)
+        generated_embeds_from_embeds = wrapper.generate(
+            input_embeds,
+            max_new_tokens=1,
+            do_sample=False,
+            pad_token_id=wrapper.tokenizer.eos_token_id,
+        )
+        assert generated_embeds_from_embeds.shape[1] == input_embeds.shape[1] + 1
+        assert torch.allclose(generated_embeds_from_embeds[:, : input_embeds.shape[1]], input_embeds)
+        stream_chunks = list(
+            wrapper.generate_stream(
+                "SafeLens",
+                max_new_tokens=2,
+                max_tokens_per_yield=1,
+                do_sample=False,
+                pad_token_id=wrapper.tokenizer.eos_token_id,
+            )
+        )
+        assert len(stream_chunks) == 2
+        assert all(isinstance(chunk, str) for chunk in stream_chunks)
+        stream_token_chunks = list(
+            wrapper.generate_stream(
+                wrapper.to_tokens("SafeLens"),
+                max_new_tokens=2,
+                max_tokens_per_yield=2,
+                do_sample=False,
+                pad_token_id=wrapper.tokenizer.eos_token_id,
+                return_type="tokens",
+            )
+        )
+        assert len(stream_token_chunks) == 1
+        assert stream_token_chunks[0].shape == (1, 2)
+        generated_output = wrapper.generate(
+            "SafeLens",
+            max_new_tokens=1,
+            do_sample=False,
+            pad_token_id=wrapper.tokenizer.eos_token_id,
+            return_type="model_output",
+            return_dict_in_generate=True,
+            output_logits=True,
+        )
+        assert torch.equal(generated_output.sequences, generated_tokens)
+        assert len(generated_output.logits) == 1
     finally:
         wrapper.remove_hooks()
 

@@ -102,7 +102,14 @@ class FactoredMatrix:
     def __matmul__(self, other: Any) -> Any:
         """Multiply by another matrix/vector/factored matrix."""
         if isinstance(other, FactoredMatrix):
-            return FactoredMatrix(self.A, matmul(matmul(self.B, other.A), other.B))
+            left_leading = shape_of(self.A)[:-2]
+            right_leading = shape_of(other.A)[:-2]
+            leading_shape = broadcast_leading_shape(left_leading, right_leading)
+            left_a = broadcast_to_shape(self.A, leading_shape + shape_of(self.A)[-2:])
+            left_b = broadcast_to_shape(self.B, leading_shape + shape_of(self.B)[-2:])
+            right_a = broadcast_to_shape(other.A, leading_shape + shape_of(other.A)[-2:])
+            right_b = broadcast_to_shape(other.B, leading_shape + shape_of(other.B)[-2:])
+            return FactoredMatrix(left_a, matmul(matmul(left_b, right_a), right_b))
         if _is_vector_like(other):
             return matmul(self.AB, other)
         right_shape = shape_of(other)

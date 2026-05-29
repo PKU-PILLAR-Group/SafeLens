@@ -21,6 +21,7 @@ from SafeLens.core.analysis import (
     replace_activation_hook,
     residual_stack_to_logits,
     softmax,
+    test_prompt as run_test_prompt,
     topk_tokens,
     zero_ablation_hook,
 )
@@ -685,6 +686,32 @@ def test_factored_matrix_composes_nontrivial_factors_once() -> None:
     assert (left @ right).AB == matmul(left.AB, right.AB)
 
 
+def test_factored_matrix_composition_preserves_standard_leading_broadcast() -> None:
+    left = FactoredMatrix(
+        [
+            [[[1, 0], [0, 1]]],
+            [[[2, 0], [0, 2]]],
+        ],
+        [
+            [[[1, 0], [0, 1]]],
+            [[[1, 0], [0, 1]]],
+        ],
+    )
+    right = FactoredMatrix(
+        [
+            [[[1, 0], [0, 1]], [[0, 1], [1, 0]], [[2, 0], [0, 1]]],
+        ],
+        [
+            [[[1, 0], [0, 1]], [[1, 0], [0, 1]], [[1, 0], [0, 1]]],
+        ],
+    )
+
+    composed = left @ right
+
+    assert composed.shape == (2, 3, 2, 2)
+    assert composed.AB == matmul(left.AB, right.AB)
+
+
 def test_factored_matrix_left_matrix_multiply_preserves_factored_form() -> None:
     matrix = FactoredMatrix([[1, 2], [3, 4]], [[5, 6], [7, 8]])
     left_matrix = [[2, 0], [0, 3]]
@@ -1103,6 +1130,68 @@ def test_logit_loss_and_token_helpers() -> None:
     ]
     assert logit_diff([[1.0, 4.0], [7.0, 2.0]], 0, 1, pos=-1) == 5.0
     assert logit_diff([[[1.0, 4.0], [7.0, 2.0]]], 0, 1, pos=-1) == 5.0
+
+
+def test_topk_tokens_clamps_k_to_vocab_size_across_backends() -> None:
+    indices, values = topk_tokens([1, 2], k=5)
+
+    assert indices == [1, 0]
+    assert values == [2, 1]
+
+    torch = pytest.importorskip("torch")
+    torch_indices, torch_values = topk_tokens(torch.tensor([[1.0, 2.0]]), k=5)
+
+    assert torch.equal(torch_indices, torch.tensor([[1, 0]]))
+    assert torch.equal(torch_values, torch.tensor([[2.0, 1.0]]))
+
+
+def test_topk_tokens_clamps_numpy_k_to_vocab_size() -> None:
+    np = pytest.importorskip("numpy")
+
+    indices, values = topk_tokens(np.array([[1.0, 2.0]]), k=5)
+
+    assert np.array_equal(indices, np.array([[1, 0]]))
+    assert np.array_equal(values, np.array([[2.0, 1.0]]))
+
+
+def test_topk_tokens_rejects_negative_k() -> None:
+    with pytest.raises(ValueError, match="non-negative"):
+        topk_tokens([1, 2], k=-1)
+
+
+def test_prompt_returns_structured_next_token_check() -> None:
+    class _PromptModel:
+        def __call__(self, prompt: str, *, return_type: str, prepend_bos: bool) -> Any:
+            assert prompt == "The answer is"
+            assert return_type == "logits"
+            assert prepend_bos is False
+            return [[[0.0, 1.0, 2.0], [0.0, 4.0, 1.0]]]
+
+        def to_single_token(self, token: str) -> int:
+            return {" yes": 1, " no": 2}[token]
+
+        def to_single_str_token(self, token: int) -> str:
+            return {0: "<bos>", 1: " yes", 2: " no"}[token]
+
+    result = run_test_prompt(
+        _PromptModel(),
+        "The answer is",
+        " yes",
+        " no",
+        prepend_bos=False,
+        top_k=2,
+    )
+
+    assert result["correct_token_id"] == 1
+    assert result["incorrect_token_id"] == 2
+    assert result["predicted_token_id"] == 1
+    assert result["predicted_token"] == " yes"
+    assert result["is_correct"] is True
+    assert result["logit_diff"] == 3.0
+    assert result["top_tokens"] == [
+        {"token_id": 1, "token": " yes", "logit": 4.0},
+        {"token_id": 2, "token": " no", "logit": 1.0},
+    ]
 
 
 def test_causal_lm_log_probs_and_loss_shift_targets() -> None:

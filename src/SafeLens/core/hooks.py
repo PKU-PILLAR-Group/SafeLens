@@ -327,11 +327,11 @@ class ActivationCache(MutableMapping[Any, Any]):
     def __getitem__(self, key: ActivationKey) -> Any:
         return self._cache[self.resolve_key(key)]
 
-    def __setitem__(self, key: str, value: Any) -> None:
-        self._cache[key] = value
+    def __setitem__(self, key: ActivationKey, value: Any) -> None:
+        self._cache[self.storage_key(key)] = value
 
-    def __delitem__(self, key: str) -> None:
-        del self._cache[key]
+    def __delitem__(self, key: ActivationKey) -> None:
+        del self._cache[self.resolve_key(key)]
 
     def __iter__(self) -> Iterator[str]:
         return iter(self._cache)
@@ -359,6 +359,28 @@ class ActivationCache(MutableMapping[Any, Any]):
             if candidate in self._cache:
                 return candidate
         raise KeyError(f"Unknown activation key {key!r}. Tried {candidates!r}.")
+
+    def storage_key(self, key: ActivationKey) -> str:
+        """Return the existing or canonical storage name for an activation key."""
+        try:
+            return self.resolve_key(key)
+        except KeyError:
+            if isinstance(key, tuple) and key:
+                layer = key[1] if len(key) >= 2 else None
+                if layer == -1:
+                    n_layers = self._infer_n_layers()
+                    if n_layers > 0:
+                        layer = n_layers - 1
+                layer_type = str(key[2]) if len(key) >= 3 and key[2] is not None else None
+                layer_type = _LAYER_TYPE_ALIASES.get(layer_type, layer_type)
+                name = _ACT_NAME_ALIASES.get(str(key[0]), str(key[0]))
+                if layer_type:
+                    return f"{activation_name_for_layer(layer)}.{layer_type}.{name}"
+                return safelens_act_name(name, layer)
+            candidates = activation_name_candidates(key, n_layers=self._infer_n_layers())
+            if candidates:
+                return candidates[0]
+            return str(key)
 
     def store(
         self,
@@ -732,10 +754,9 @@ class ActivationCache(MutableMapping[Any, Any]):
         neuron_indices = _indices_from_slice(neuron_slice, neuron_count)
         neuron_acts = _select_indices_dim(neuron_acts, neuron_indices, dim=-1)
         layer_w_out = _select_indices_dim(w_out, neuron_indices, dim=0)
-        neuron_results = _multiply_last_dim_by_matrix(neuron_acts, layer_w_out)
         if project_output_onto is not None:
-            neuron_results = _project_last_dim(neuron_results, project_output_onto)
-        return neuron_results
+            layer_w_out = _project_last_dim(layer_w_out, project_output_onto)
+        return _multiply_last_dim_by_matrix(neuron_acts, layer_w_out)
 
     def stack_neuron_results(
         self,
@@ -753,6 +774,8 @@ class ActivationCache(MutableMapping[Any, Any]):
         target_layer = self._normalize_layer(layer)
         values: list[Any] = []
         labels: list[str] = []
+        can_project_before_stack = project_output_onto is not None and not apply_ln and not incl_remainder
+        results_are_projected = False
         for current_layer in range(target_layer):
             if (component, current_layer) not in self:
                 continue
@@ -763,14 +786,21 @@ class ActivationCache(MutableMapping[Any, Any]):
                     current_layer,
                     neuron_slice=neuron_indices,
                     pos_slice=pos_slice,
+                    project_output_onto=project_output_onto if can_project_before_stack else None,
                     component=component,
                 )
-                neuron_dim = -2
+                results_are_projected = can_project_before_stack
+                neuron_dim = (
+                    -1
+                    if results_are_projected and len(_shape_of(project_output_onto)) == 1
+                    else -2
+                )
             except ValueError:
                 if project_output_onto is not None:
                     raise
                 layer_results = _select_indices_dim(activation, neuron_indices, dim=-1)
                 neuron_dim = -1
+                results_are_projected = False
             for position, neuron_index in enumerate(neuron_indices):
                 neuron_value = _slice_dim(layer_results, position, dim=neuron_dim)
                 values.append(neuron_value)
@@ -812,7 +842,7 @@ class ActivationCache(MutableMapping[Any, Any]):
                 pos_slice=pos_slice,
                 has_batch_dim=self.has_batch_dim,
             )
-        if project_output_onto is not None:
+        if project_output_onto is not None and not results_are_projected:
             neuron_stack = _project_last_dim(neuron_stack, project_output_onto)
         if return_labels:
             return neuron_stack, labels
@@ -1438,12 +1468,12 @@ def _direction_batch_dim(
         return None
     if len(shape) >= 3:
         return 0
-    if prefer_pos_axis:
-        return None
     residual_shape = _shape_of(residual_stack)
     if len(residual_shape) >= 3 and shape[0] == residual_shape[1]:
         if len(residual_shape) < 4 or shape[0] != residual_shape[2]:
             return 0
+    if prefer_pos_axis:
+        return None
     return None
 
 
@@ -1457,13 +1487,17 @@ def _direction_pos_dim(
     shape = _shape_of(direction)
     if len(shape) < 2:
         return None
+    residual_shape = _shape_of(residual_stack)
+    if has_batch_dim and len(shape) == 2 and len(residual_shape) >= 3:
+        batch_size = residual_shape[1]
+        if shape[0] == batch_size and (len(residual_shape) < 4 or shape[0] != residual_shape[2]):
+            return None
     if not has_batch_dim:
         return 0
     if len(shape) >= 3:
         return 1
     if prefer_pos_axis:
         return 0
-    residual_shape = _shape_of(residual_stack)
     if len(residual_shape) >= 4:
         batch_size = residual_shape[1]
         if shape[0] != batch_size or batch_size == 1:
@@ -1620,6 +1654,8 @@ def _multiply_last_dim_by_matrix(left: Any, right: Any) -> Any:
                     dtype=getattr(left, "dtype", None),
                     device=getattr(left, "device", None),
                 )
+            if right.ndim == 1:
+                return left * right
             return torch.einsum("...n,nm->...nm", left, right)
     except Exception:
         pass
@@ -1627,6 +1663,9 @@ def _multiply_last_dim_by_matrix(left: Any, right: Any) -> Any:
         import numpy as np
 
         if hasattr(left, "shape") or hasattr(right, "shape"):
+            right = np.asarray(right)
+            if right.ndim == 1:
+                return np.asarray(left) * right
             return np.einsum("...n,nm->...nm", left, right)
     except Exception:
         pass

@@ -18,6 +18,7 @@ from SafeLens.core.analysis import (
     replace_activation_hook,
     residual_stack_to_logits,
     softmax,
+    test_prompt,
     topk_tokens,
     zero_ablation_hook,
 )
@@ -254,6 +255,7 @@ __all__ = [
     "softmax",
     "stack_values",
     "temporary_hooks",
+    "test_prompt",
     "topk_tokens",
     "zero_ablation_hook",
 ]

@@ -277,6 +277,8 @@ def generic_activation_patch(
                 name_style="transformer_lens",
             )
         else:
+            if index_axis_names is not None:
+                raise ValueError("Pass either `index_axis_names` or explicit `index_df`, not both.")
             index_df, resolved_index_axis_names = normalize_index_table(
                 index_df,
                 index_axis_names,
@@ -489,11 +491,19 @@ def make_transformer_lens_patch_specs(
 ) -> list[PatchSpec]:
     """Create specs for a TransformerLens-style `generic_activation_patch` call."""
     specs: list[PatchSpec] = []
+    expected_columns: tuple[str, ...] | None = None
     for row in index_table:
         if "layer" not in row:
             raise ValueError("TL-style patch index rows must include a `layer` column.")
+        columns = tuple(row.keys())
+        if not columns or columns[0] != "layer":
+            raise ValueError("TL-style patch index rows must have `layer` as the first column.")
+        if expected_columns is None:
+            expected_columns = columns
+        elif columns != expected_columns:
+            raise ValueError("TL-style patch index rows must all have the same columns.")
         layer = row["layer"]
-        index = tuple(row[column] for column in row.keys())
+        index = tuple(row[column] for column in columns)
         target_name = activation_name_for_component(
             activation_name,
             layer,

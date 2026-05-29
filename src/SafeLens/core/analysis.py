@@ -123,6 +123,7 @@ def lm_accuracy(logits: Any, tokens: Any, attention_mask: Any | None = None) -> 
 
 def topk_tokens(logits: Any, k: int = 5) -> Any:
     """Return top-k token indices and values for the final dimension."""
+    k = _clamp_top_k(logits, k)
     try:
         import torch
 
@@ -147,6 +148,20 @@ def topk_tokens(logits: Any, k: int = 5) -> Any:
     return [index for index, _value in pairs], [value for _index, value in pairs]
 
 
+def _clamp_top_k(logits: Any, k: int) -> int:
+    if k < 0:
+        raise ValueError("k must be non-negative.")
+    shape = getattr(logits, "shape", None)
+    if shape is not None and len(shape) > 0:
+        return min(k, int(shape[-1]))
+    value = logits
+    while isinstance(value, list) and value and isinstance(value[0], list):
+        value = value[0]
+    if isinstance(value, list):
+        return min(k, len(value))
+    return k
+
+
 def logit_diff(logits: Any, correct_token: int, incorrect_token: int, *, pos: int = -1) -> float:
     """Return logit difference at one position."""
     shape = getattr(logits, "shape", None)
@@ -168,6 +183,71 @@ def logit_diff(logits: Any, correct_token: int, incorrect_token: int, *, pos: in
     else:
         row = logits
     return float(row[correct_token]) - float(row[incorrect_token])
+
+
+def test_prompt(
+    model: Any,
+    prompt: str,
+    correct_token: str | int,
+    incorrect_token: str | int | None = None,
+    *,
+    prepend_bos: bool = True,
+    top_k: int = 10,
+    return_type: str = "logits",
+    print_details: bool = False,
+) -> dict[str, Any]:
+    """Run a TransformerLens-style next-token prompt sanity check.
+
+    The helper mirrors the common ``transformer_lens.utils.test_prompt`` workflow
+    without depending on TransformerLens: run a prompt, inspect final-position
+    logits, compare a correct token against an optional incorrect token, and
+    return top-k predictions in a structured form.
+    """
+    correct_token_id = _resolve_single_token(model, correct_token)
+    incorrect_token_id = (
+        None if incorrect_token is None else _resolve_single_token(model, incorrect_token)
+    )
+    logits = model(prompt, return_type=return_type, prepend_bos=prepend_bos)
+    final_logits = _final_position_logits(logits)
+    predicted_token_id = _argmax_token_id(final_logits)
+    top_indices, top_values = topk_tokens(final_logits, k=top_k)
+    top_token_ids = _as_int_list(top_indices)
+    top_token_values = [float(value) for value in _as_flat_list(top_values)]
+    result = {
+        "prompt": prompt,
+        "correct_token": correct_token,
+        "correct_token_id": correct_token_id,
+        "correct_logit": _index_last_dim_float(final_logits, correct_token_id),
+        "predicted_token_id": predicted_token_id,
+        "predicted_token": _decode_single_token_if_possible(model, predicted_token_id),
+        "is_correct": predicted_token_id == correct_token_id,
+        "top_tokens": [
+            {
+                "token_id": token_id,
+                "token": _decode_single_token_if_possible(model, token_id),
+                "logit": logit_value,
+            }
+            for token_id, logit_value in zip(top_token_ids, top_token_values, strict=False)
+        ],
+        "logits": logits,
+    }
+    if incorrect_token_id is not None:
+        result.update(
+            {
+                "incorrect_token": incorrect_token,
+                "incorrect_token_id": incorrect_token_id,
+                "incorrect_logit": _index_last_dim_float(final_logits, incorrect_token_id),
+            }
+        )
+        result["logit_diff"] = (
+            float(result["correct_logit"]) - float(result["incorrect_logit"])
+        )
+    if print_details:
+        _print_test_prompt_result(result)
+    return result
+
+
+test_prompt.__test__ = False
 
 
 def residual_stack_to_logits(residual_stack: Any, unembed: Any) -> Any:
@@ -367,6 +447,102 @@ def replace_activation_hook(replacement: Any) -> Callable[[Any, HookPoint | None
         return clone_activation(replacement)
 
     return hook
+
+
+def _resolve_single_token(model: Any, token: str | int) -> int:
+    if isinstance(token, str):
+        to_single_token = getattr(model, "to_single_token", None)
+        if callable(to_single_token):
+            return int(to_single_token(token))
+        try:
+            return int(token)
+        except ValueError as exc:
+            raise TypeError(
+                "String tokens require a model with `to_single_token`, or an integer string."
+            ) from exc
+    return int(token)
+
+
+def _final_position_logits(logits: Any) -> Any:
+    shape = getattr(logits, "shape", None)
+    if shape is not None:
+        if len(shape) >= 3:
+            return logits[0, -1]
+        if len(shape) == 2:
+            return logits[-1]
+        return logits
+    if isinstance(logits, list) and logits and isinstance(logits[0], list):
+        if logits[0] and isinstance(logits[0][0], list):
+            return logits[0][-1]
+        return logits[-1]
+    return logits
+
+
+def _argmax_token_id(logits: Any) -> int:
+    argmax = argmax_last_dim(logits)
+    item = getattr(argmax, "item", None)
+    return int(item() if callable(item) else argmax)
+
+
+def _index_last_dim_float(values: Any, index: int) -> float:
+    try:
+        value = values[index]
+    except Exception:
+        value = gather_last_dim(values, index)
+    item = getattr(value, "item", None)
+    return float(item() if callable(item) else value)
+
+
+def _as_flat_list(value: Any) -> list[Any]:
+    tolist = getattr(value, "tolist", None)
+    if callable(tolist):
+        value = tolist()
+    if isinstance(value, tuple):
+        value = list(value)
+    if isinstance(value, list):
+        if value and isinstance(value[0], list):
+            flattened: list[Any] = []
+            for item in value:
+                flattened.extend(_as_flat_list(item))
+            return flattened
+        return value
+    return [value]
+
+
+def _as_int_list(value: Any) -> list[int]:
+    return [int(item) for item in _as_flat_list(value)]
+
+
+def _decode_single_token_if_possible(model: Any, token_id: int) -> str | int:
+    to_single_str_token = getattr(model, "to_single_str_token", None)
+    if callable(to_single_str_token):
+        try:
+            return str(to_single_str_token(int(token_id)))
+        except Exception:
+            pass
+    to_string = getattr(model, "to_string", None)
+    if callable(to_string):
+        try:
+            decoded = to_string([int(token_id)])
+            if isinstance(decoded, list):
+                return str(decoded[0])
+            return str(decoded)
+        except Exception:
+            pass
+    return int(token_id)
+
+
+def _print_test_prompt_result(result: dict[str, Any]) -> None:
+    predicted = result["predicted_token"]
+    correct = result["correct_token"]
+    print(f"Prompt: {result['prompt']!r}")
+    print(f"Predicted token: {predicted!r} (id {result['predicted_token_id']})")
+    print(f"Correct token: {correct!r} (id {result['correct_token_id']})")
+    if "logit_diff" in result:
+        print(f"Logit diff: {result['logit_diff']:.4f}")
+    print("Top tokens:")
+    for item in result["top_tokens"]:
+        print(f"  {item['token']!r} ({item['token_id']}): {item['logit']:.4f}")
 
 
 def gather_last_dim(values: Any, indices: Any) -> Any:

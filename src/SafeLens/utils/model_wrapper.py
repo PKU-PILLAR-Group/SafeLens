@@ -348,9 +348,24 @@ class DummyModelWrapper(ModelWrapper):
             remove_batch_dim=remove_batch_dim,
         )
 
-    def generate(self, prompt: str, **generation_kwargs: Any) -> str:
+    def generate(self, prompt: str | Sequence[str], **generation_kwargs: Any) -> str | list[str]:
         _ = generation_kwargs
         return f"{prompt} [dummy generation]"
+
+    def generate_stream(
+        self,
+        prompt: str | Sequence[str],
+        *,
+        max_new_tokens: int = 10,
+        max_tokens_per_yield: int = 25,
+        **generation_kwargs: Any,
+    ) -> Iterable[str | list[str]]:
+        generated = self.generate(prompt, max_new_tokens=max_new_tokens, **generation_kwargs)
+        if isinstance(generated, list):
+            yield generated
+        else:
+            for start in range(0, len(generated), max_tokens_per_yield):
+                yield generated[start : start + max_tokens_per_yield]
 
     def remove_hooks(self) -> None:
         self._hooks.clear()
@@ -715,11 +730,16 @@ class HuggingFaceModelWrapper(ModelWrapper):
         **kwargs: Any,
     ) -> Any:
         """Run the wrapped model directly, returning logits by default like TransformerLens."""
+        loss_per_token = bool(kwargs.pop("loss_per_token", False))
         if kwargs:
             model_input = _merge_extra_model_kwargs(batch, kwargs)
         else:
             model_input = batch
-        return self._run_model_forward(model_input, return_type=return_type)
+        return self._run_model_forward(
+            model_input,
+            return_type=return_type,
+            loss_per_token=loss_per_token,
+        )
 
     def _register_hook(self, layer: LayerRef, hook_fn: HookFn) -> Any:
         model = self._require_model()
@@ -749,6 +769,7 @@ class HuggingFaceModelWrapper(ModelWrapper):
         pos_slice: Any = None,
         cache_all: bool | object = _DEFAULT_CACHE_ALL,
         return_type: str | None | object = _DEFAULT_RETURN_TYPE,
+        loss_per_token: bool = False,
     ) -> tuple[Any, dict[str, Any] | ActivationCache]:
         model = self._require_model()
         cache = ActivationCache(model=self, has_batch_dim=not remove_batch_dim)
@@ -780,7 +801,12 @@ class HuggingFaceModelWrapper(ModelWrapper):
             model_inputs = self._prepare_model_inputs(batch)
             with _no_grad_context():
                 raw_output = model(**model_inputs)
-                output = _format_model_output(raw_output, resolved_return_type)
+                output = _format_model_output(
+                    raw_output,
+                    resolved_return_type,
+                    model_inputs=model_inputs,
+                    loss_per_token=loss_per_token,
+                )
         finally:
             self._run_requires_output_attentions = False
             for handle in reversed(temp_handles):
@@ -966,6 +992,7 @@ class HuggingFaceModelWrapper(ModelWrapper):
         batch: Any,
         *,
         return_type: str | None | object = _DEFAULT_RETURN_TYPE,
+        loss_per_token: bool = False,
     ) -> Any:
         """Run the wrapped model without adding temporary cache hooks."""
         model = self._require_model()
@@ -974,26 +1001,288 @@ class HuggingFaceModelWrapper(ModelWrapper):
             model_inputs = self._prepare_model_inputs(batch)
             with _no_grad_context():
                 raw_output = model(**model_inputs)
-                return _format_model_output(raw_output, resolved_return_type)
+                return _format_model_output(
+                    raw_output,
+                    resolved_return_type,
+                    model_inputs=model_inputs,
+                    loss_per_token=loss_per_token,
+                )
         finally:
             self._run_requires_output_attentions = False
 
-    def generate(self, prompt: str, **generation_kwargs: Any) -> str:
+    def generate(self, prompt: Any = "", **generation_kwargs: Any) -> Any:
         model = self._require_model()
-        if self.tokenizer is None:
+
+        import torch
+
+        prepend_bos = bool(generation_kwargs.pop("prepend_bos", True))
+        input_is_text = isinstance(prompt, str) or _is_text_batch(prompt)
+        input_is_embeds = _looks_like_input_embeds(prompt)
+        default_padding_side = "left" if _is_text_batch(prompt) else None
+        padding_side = generation_kwargs.pop("padding_side", default_padding_side)
+        truncate = bool(generation_kwargs.pop("truncate", True))
+        return_type = generation_kwargs.pop("return_type", "input")
+        _normalize_transformer_lens_generation_kwargs(generation_kwargs, model=model)
+        normalized_return_type = _normalize_generate_return_type(
+            return_type,
+            prompt=prompt,
+            input_is_text=input_is_text,
+            input_is_embeds=input_is_embeds,
+        )
+        if self.tokenizer is None and (input_is_text or normalized_return_type == "str"):
             detail = _tokenizer_error_detail(self._tokenizer_load_error)
             raise RuntimeError(
                 "Tokenizer is not loaded, so text generation is unavailable. " f"{detail}"
             )
+        if input_is_text:
+            input_ids = self.to_tokens(
+                prompt,
+                prepend_bos=prepend_bos,
+                padding_side=padding_side,
+                truncate=truncate,
+            )
+        elif _looks_like_token_ids(prompt):
+            input_ids = _ensure_token_batch_dim(prompt)
+            if self.device is not None:
+                to_fn = getattr(input_ids, "to", None)
+                if callable(to_fn):
+                    input_ids = to_fn(self.device)
+        elif input_is_embeds:
+            input_ids = None
+            input_embeds = prompt
+            if not isinstance(input_embeds, torch.Tensor):
+                input_embeds = torch.as_tensor(input_embeds)
+            if not torch.is_floating_point(input_embeds):
+                raise TypeError(
+                    "generate embedding inputs must be floating point tensors shaped "
+                    "[batch, pos, hidden]."
+                )
+            if self.device is not None:
+                input_embeds = input_embeds.to(self.device)
+        else:
+            raise TypeError(
+                "generate input must be a text string, list of strings, token ids shaped "
+                "[pos] or [batch, pos], or embeddings shaped [batch, pos, hidden]."
+            )
+        inputs = {"inputs_embeds": input_embeds} if input_is_embeds else {"input_ids": input_ids}
+        if _is_text_batch(prompt):
+            attention_mask = _attention_mask_from_tokens(
+                input_ids,
+                _tokenizer_effective_pad_token_id(self.tokenizer),
+                prepend_bos=prepend_bos,
+                padding_side=str(padding_side or getattr(self.tokenizer, "padding_side", "right")),
+                bos_token_id=getattr(self.tokenizer, "bos_token_id", None),
+            )
+            if attention_mask is not None:
+                inputs["attention_mask"] = attention_mask
+        with torch.no_grad():
+            generated_output = model.generate(**inputs, **generation_kwargs)
+        output_ids = _generated_sequences(generated_output)
+        if normalized_return_type == "model_output":
+            return _normalize_generated_model_output(generated_output, output_ids)
+        if normalized_return_type == "tokens":
+            return output_ids
+        if normalized_return_type == "embeds":
+            output_embeds = _tokens_to_input_embeddings(model, output_ids)
+            if input_is_embeds:
+                return _append_sequence_values(input_embeds, output_embeds)
+            return output_embeds
+        return _decode_generated_sequences(
+            self.tokenizer,
+            output_ids,
+            force_batch=_is_text_batch(prompt),
+        )
+
+    def generate_stream(
+        self,
+        prompt: Any = "",
+        *,
+        max_new_tokens: int = 10,
+        max_tokens_per_yield: int = 25,
+        **generation_kwargs: Any,
+    ) -> Iterable[Any]:
+        model = self._require_model()
+        if max_new_tokens < 0:
+            raise ValueError("max_new_tokens must be non-negative.")
+        if max_tokens_per_yield <= 0:
+            raise ValueError("max_tokens_per_yield must be positive.")
 
         import torch
 
-        inputs = self.tokenizer(prompt, return_tensors="pt")
-        if self.device is not None:
-            inputs = inputs.to(self.device)
+        prepend_bos = bool(generation_kwargs.pop("prepend_bos", True))
+        input_is_text = isinstance(prompt, str)
+        if _is_text_batch(prompt):
+            raise TypeError(
+                "generate_stream supports a single text string or token ids; pass token ids "
+                "for batched streaming inputs."
+            )
+        input_is_embeds = _looks_like_input_embeds(prompt)
+        padding_side = generation_kwargs.pop("padding_side", None)
+        truncate = bool(generation_kwargs.pop("truncate", True))
+        return_type = generation_kwargs.pop("return_type", "input")
+        _normalize_transformer_lens_generation_kwargs(generation_kwargs, model=model)
+        normalized_return_type = _normalize_generate_return_type(
+            return_type,
+            prompt=prompt,
+            input_is_text=input_is_text,
+            input_is_embeds=input_is_embeds,
+            token_return_name="tensor",
+        )
+        if normalized_return_type == "model_output":
+            raise ValueError("generate_stream does not support return_type='model_output'.")
+        if self.tokenizer is None and (input_is_text or normalized_return_type == "str"):
+            detail = _tokenizer_error_detail(self._tokenizer_load_error)
+            raise RuntimeError(
+                "Tokenizer is not loaded, so streaming text generation is unavailable. "
+                f"{detail}"
+            )
+
+        if input_is_text:
+            tokens = self.to_tokens(
+                prompt,
+                prepend_bos=prepend_bos,
+                padding_side=padding_side,
+                truncate=truncate,
+            )
+        elif _looks_like_token_ids(prompt):
+            tokens = _ensure_token_batch_dim(prompt)
+            if not isinstance(tokens, torch.Tensor):
+                tokens = torch.as_tensor(tokens, dtype=torch.long)
+            if self.device is not None:
+                tokens = tokens.to(self.device)
+        elif input_is_embeds:
+            input_embeds = prompt if isinstance(prompt, torch.Tensor) else torch.as_tensor(prompt)
+            if not torch.is_floating_point(input_embeds):
+                raise TypeError(
+                    "generate_stream embedding inputs must be floating point tensors shaped "
+                    "[batch, pos, hidden]."
+                )
+            if self.device is not None:
+                input_embeds = input_embeds.to(self.device)
+            yield from self._generate_stream_from_embeds(
+                model,
+                input_embeds,
+                max_new_tokens=max_new_tokens,
+                max_tokens_per_yield=max_tokens_per_yield,
+                return_type=normalized_return_type,
+                generation_kwargs=generation_kwargs,
+            )
+            return
+        else:
+            raise TypeError(
+                "generate_stream input must be a text string, token ids shaped [pos] or "
+                "[batch, pos], or embeddings shaped [batch, pos, hidden]."
+            )
+
+        yield from self._generate_stream_from_tokens(
+            model,
+            tokens,
+            max_new_tokens=max_new_tokens,
+            max_tokens_per_yield=max_tokens_per_yield,
+            return_type=normalized_return_type,
+            generation_kwargs=generation_kwargs,
+            text_output_is_single=input_is_text,
+        )
+
+    def _generate_stream_from_tokens(
+        self,
+        model: Any,
+        tokens: Any,
+        *,
+        max_new_tokens: int,
+        max_tokens_per_yield: int,
+        return_type: str,
+        generation_kwargs: dict[str, Any],
+        text_output_is_single: bool,
+    ) -> Iterable[Any]:
+        import torch
+
+        current_tokens = tokens
+        accumulated: list[Any] = []
         with torch.no_grad():
-            output_ids = model.generate(**inputs, **generation_kwargs)
-        return str(self.tokenizer.decode(output_ids[0], skip_special_tokens=True))
+            for _index in range(max_new_tokens):
+                step_output = model.generate(
+                    input_ids=current_tokens,
+                    max_new_tokens=1,
+                    **generation_kwargs,
+                )
+                step_sequences = _generated_sequences(step_output)
+                new_tokens = _slice_generated_suffix(step_sequences, current_tokens)
+                accumulated.append(new_tokens)
+                current_tokens = _append_sequence_values(current_tokens, new_tokens)
+                if len(accumulated) >= max_tokens_per_yield:
+                    yield self._format_stream_chunk(
+                        accumulated,
+                        return_type=return_type,
+                        text_output_is_single=text_output_is_single,
+                    )
+                    accumulated = []
+        if accumulated:
+            yield self._format_stream_chunk(
+                accumulated,
+                return_type=return_type,
+                text_output_is_single=text_output_is_single,
+            )
+
+    def _generate_stream_from_embeds(
+        self,
+        model: Any,
+        input_embeds: Any,
+        *,
+        max_new_tokens: int,
+        max_tokens_per_yield: int,
+        return_type: str,
+        generation_kwargs: dict[str, Any],
+    ) -> Iterable[Any]:
+        import torch
+
+        current_embeds = input_embeds
+        accumulated: list[Any] = []
+        with torch.no_grad():
+            for _index in range(max_new_tokens):
+                step_output = model.generate(
+                    inputs_embeds=current_embeds,
+                    max_new_tokens=1,
+                    **generation_kwargs,
+                )
+                step_sequences = _generated_sequences(step_output)
+                new_tokens = _normalize_generated_new_tokens(step_sequences)
+                accumulated.append(new_tokens)
+                new_embeds = _tokens_to_input_embeddings(model, new_tokens)
+                current_embeds = _append_sequence_values(current_embeds, new_embeds)
+                if len(accumulated) >= max_tokens_per_yield:
+                    yield self._format_stream_chunk(
+                        accumulated,
+                        return_type=return_type,
+                        text_output_is_single=False,
+                    )
+                    accumulated = []
+        if accumulated:
+            yield self._format_stream_chunk(
+                accumulated,
+                return_type=return_type,
+                text_output_is_single=False,
+            )
+
+    def _format_stream_chunk(
+        self,
+        chunks: Sequence[Any],
+        *,
+        return_type: str,
+        text_output_is_single: bool,
+    ) -> Any:
+        combined_tokens = _concat_token_chunks(chunks)
+        if return_type == "str":
+            return _decode_generated_sequences(
+                self.tokenizer,
+                combined_tokens,
+                force_batch=not text_output_is_single,
+            )
+        if return_type in {"tokens", "tensor"}:
+            return combined_tokens
+        if return_type == "embeds":
+            return _tokens_to_input_embeddings(self._require_model(), combined_tokens)
+        raise ValueError("generate_stream return_type must be 'input', 'str', 'tokens', or 'embeds'.")
 
     def to_tokens(
         self,
@@ -1015,6 +1304,8 @@ class HuggingFaceModelWrapper(ModelWrapper):
             _temporary_tokenizer_padding_side(tokenizer, padding_side),
             _temporary_tokenizer_pad_token(tokenizer, enabled=bool(token_kwargs["padding"])),
         ):
+            effective_pad_token_id = _tokenizer_effective_pad_token_id(tokenizer)
+            effective_padding_side = str(getattr(tokenizer, "padding_side", "right"))
             if truncate:
                 n_ctx = _tokenization_context_length(self.model, tokenizer)
                 token_kwargs["truncation"] = True
@@ -1029,7 +1320,12 @@ class HuggingFaceModelWrapper(ModelWrapper):
             )
         tokens = tokenized["input_ids"] if isinstance(tokenized, dict) else tokenized.input_ids
         if prepend_bos:
-            tokens = _prepend_bos_token(tokens, tokenizer)
+            tokens = _prepend_bos_token(
+                tokens,
+                tokenizer,
+                pad_token_id=effective_pad_token_id,
+                padding_side=effective_padding_side,
+            )
         if move_to_device and self.device is not None:
             tokens = tokens.to(self.device)
         return tokens
@@ -1344,8 +1640,14 @@ class HuggingFaceModelWrapper(ModelWrapper):
 
     def _prepare_model_inputs(self, batch: Any) -> dict[str, Any]:
         batch = _normalize_model_batch(batch)
+        model_kwargs = _model_kwargs_without_tokenization(batch)
         if "input_ids" in batch:
-            model_inputs = dict(batch)
+            model_inputs = {
+                key: value
+                for key, value in batch.items()
+                if key not in {"model_kwargs", "prepend_bos", "padding_side", "truncate"}
+            }
+            model_inputs.update(model_kwargs)
             model_inputs["input_ids"] = _ensure_token_batch_dim(model_inputs["input_ids"])
             return self._with_attention_flags(model_inputs)
         for token_key in ("tokens", "token_ids"):
@@ -1353,13 +1655,26 @@ class HuggingFaceModelWrapper(ModelWrapper):
                 model_inputs = {
                     key: value
                     for key, value in batch.items()
-                    if key not in {"tokens", "token_ids"}
+                    if key
+                    not in {
+                        "tokens",
+                        "token_ids",
+                        "model_kwargs",
+                        "prepend_bos",
+                        "padding_side",
+                        "truncate",
+                    }
                 }
+                model_inputs.update(model_kwargs)
                 model_inputs["input_ids"] = _ensure_token_batch_dim(batch[token_key])
                 return self._with_attention_flags(model_inputs)
         if self.tokenizer is not None and "input_ids" not in batch:
             text = batch.get("text") or batch.get("prompt")
             if text is not None:
+                if transformer_lens_model_kind(self.name) == "decoder":
+                    prepared = _prepare_text_inputs_with_to_tokens(self, batch)
+                    if prepared is not None:
+                        return self._with_attention_flags(prepared)
                 tokenized = _tokenize_text_batch(self.tokenizer, text)
                 if self.device is not None:
                     tokenized = tokenized.to(self.device)
@@ -1747,7 +2062,7 @@ class TransformerLensCompatibleModelWrapper(HuggingFaceModelWrapper):
     def _prepare_model_inputs(self, batch: Any) -> dict[str, Any]:
         batch = _normalize_model_batch(batch)
         kind = transformer_lens_model_kind(self.name)
-        model_kwargs = dict(batch.get("model_kwargs", {}))
+        model_kwargs = _model_kwargs_without_tokenization(batch)
         if kind == "encoder_decoder" and "encoder_tokens" in batch and "decoder_tokens" in batch:
             return self._with_attention_flags(
                 {
@@ -1786,6 +2101,12 @@ class TransformerLensCompatibleModelWrapper(HuggingFaceModelWrapper):
                     int(decoder_start_token_id),
                 )
             return self._with_attention_flags(prepared)
+        if kind == "decoder":
+            prepared = self._prepare_decoder_text_inputs(batch)
+            if prepared is None:
+                prepared = super()._prepare_model_inputs(batch)
+            prepared.update(model_kwargs)
+            return self._with_attention_flags(prepared)
         if kind != "audio_encoder":
             prepared = super()._prepare_model_inputs(batch)
             prepared.update(model_kwargs)
@@ -1808,7 +2129,10 @@ class TransformerLensCompatibleModelWrapper(HuggingFaceModelWrapper):
             processed = processed.to(self.device)
         return self._with_attention_flags({**dict(processed), **model_kwargs})
 
-    def generate(self, prompt: str, **generation_kwargs: Any) -> str:
+    def _prepare_decoder_text_inputs(self, batch: Mapping[str, Any]) -> dict[str, Any] | None:
+        return _prepare_text_inputs_with_to_tokens(self, batch)
+
+    def generate(self, prompt: Any = "", **generation_kwargs: Any) -> Any:
         kind = transformer_lens_model_kind(self.name)
         if kind in {"encoder", "audio_encoder"}:
             raise NotImplementedError(
@@ -1816,6 +2140,15 @@ class TransformerLensCompatibleModelWrapper(HuggingFaceModelWrapper):
                 "the independent SafeLens Transformers wrapper."
             )
         return super().generate(prompt, **generation_kwargs)
+
+    def generate_stream(self, prompt: Any = "", **generation_kwargs: Any) -> Iterable[Any]:
+        kind = transformer_lens_model_kind(self.name)
+        if kind in {"encoder", "audio_encoder"}:
+            raise NotImplementedError(
+                f"{kind} models do not expose autoregressive text generation through "
+                "the independent SafeLens Transformers wrapper."
+            )
+        return super().generate_stream(prompt, **generation_kwargs)
 
     def _load_audio_processor(
         self,
@@ -1882,6 +2215,7 @@ class Qwen3DenseModelWrapper(HuggingFaceModelWrapper):
         pos_slice: Any = None,
         cache_all: bool | object = _DEFAULT_CACHE_ALL,
         return_type: str | None | object = _DEFAULT_RETURN_TYPE,
+        loss_per_token: bool = False,
     ) -> tuple[Any, dict[str, Any] | ActivationCache]:
         model = self._require_model()
         cache = ActivationCache(model=self, has_batch_dim=not remove_batch_dim)
@@ -1913,7 +2247,12 @@ class Qwen3DenseModelWrapper(HuggingFaceModelWrapper):
             model_inputs = self._prepare_model_inputs(batch)
             with _no_grad_context():
                 raw_output = model(**model_inputs)
-                output = _format_model_output(raw_output, resolved_return_type)
+                output = _format_model_output(
+                    raw_output,
+                    resolved_return_type,
+                    model_inputs=model_inputs,
+                    loss_per_token=loss_per_token,
+                )
         finally:
             self._run_requires_output_attentions = False
             for handle in reversed(temp_handles):
@@ -2617,10 +2956,258 @@ def _call_decode_with_supported_kwargs(
             current_kwargs.pop(removable, None)
 
 
-def _prepend_bos_token(tokens: Any, tokenizer: Any) -> Any:
+def _prepare_text_inputs_with_to_tokens(
+    wrapper: HuggingFaceModelWrapper,
+    batch: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    if any(key in batch for key in ("input_ids", "tokens", "token_ids", "inputs_embeds")):
+        return None
+    text = batch.get("text") if "text" in batch else batch.get("prompt")
+    if text is None:
+        return None
+    if wrapper.tokenizer is None:
+        detail = _tokenizer_error_detail(wrapper._tokenizer_load_error)
+        raise ValueError(
+            "This model did not load a tokenizer, so text batches cannot be "
+            f"tokenized. Provide `input_ids` or `inputs_embeds` directly. {detail}"
+        )
+
+    prepend_bos = bool(batch.get("prepend_bos", True))
+    padding_side = batch.get("padding_side")
+    truncate = bool(batch.get("truncate", True))
+    input_ids = wrapper.to_tokens(
+        text,
+        prepend_bos=prepend_bos,
+        padding_side=padding_side,
+        truncate=truncate,
+    )
+    prepared: dict[str, Any] = {"input_ids": input_ids}
+    if "attention_mask" in batch:
+        prepared["attention_mask"] = _ensure_token_batch_dim(batch["attention_mask"])
+    elif not isinstance(text, str):
+        attention_mask = _attention_mask_from_tokens(
+            input_ids,
+            _tokenizer_effective_pad_token_id(wrapper.tokenizer),
+            prepend_bos=prepend_bos,
+            padding_side=str(padding_side or getattr(wrapper.tokenizer, "padding_side", "right")),
+            bos_token_id=getattr(wrapper.tokenizer, "bos_token_id", None),
+        )
+        if attention_mask is not None:
+            prepared["attention_mask"] = attention_mask
+    return prepared
+
+
+def _is_text_batch(value: Any) -> bool:
+    return isinstance(value, list) and all(isinstance(item, str) for item in value)
+
+
+def _looks_like_input_embeds(value: Any) -> bool:
+    shape = getattr(value, "shape", None)
+    if shape is not None:
+        return len(tuple(int(dim) for dim in shape)) == 3
+    return False
+
+
+def _normalize_generate_return_type(
+    return_type: Any,
+    *,
+    prompt: Any,
+    input_is_text: bool,
+    input_is_embeds: bool = False,
+    token_return_name: str = "tokens",
+) -> str:
+    if return_type is None:
+        return "str"
+    if not isinstance(return_type, str):
+        raise ValueError(f"Unsupported generate return_type {return_type!r}.")
+    normalized = return_type.lower()
+    if normalized == "input":
+        if input_is_embeds:
+            return "embeds"
+        return "str" if input_is_text else token_return_name
+    if normalized in {"str", "string", "text"}:
+        return "str"
+    if normalized in {"tokens", "token"}:
+        return "tokens"
+    if normalized in {"tensor", "tensors"}:
+        return "tensor"
+    if normalized == "embeds":
+        return "embeds"
+    if normalized in {"model_output", "raw", "output"}:
+        return "model_output"
+    raise ValueError(
+        "generate return_type must be one of 'input', 'str', 'tokens', 'embeds', or "
+        "'model_output'."
+    )
+
+
+def _normalize_transformer_lens_generation_kwargs(
+    generation_kwargs: dict[str, Any],
+    *,
+    model: Any,
+) -> None:
+    generation_kwargs.pop("verbose", None)
+    stop_at_eos = generation_kwargs.pop("stop_at_eos", None)
+    if stop_at_eos is False and "eos_token_id" not in generation_kwargs:
+        generation_kwargs["eos_token_id"] = None
+    use_past_kv_cache = generation_kwargs.pop("use_past_kv_cache", None)
+    if use_past_kv_cache is not None and "use_cache" not in generation_kwargs:
+        generation_kwargs["use_cache"] = bool(use_past_kv_cache)
+    if "freq_penalty" in generation_kwargs and "frequency_penalty" not in generation_kwargs:
+        generation_kwargs["frequency_penalty"] = generation_kwargs.pop("freq_penalty")
+    elif "freq_penalty" in generation_kwargs:
+        generation_kwargs.pop("freq_penalty")
+    accepted = _accepted_generate_kwargs(model)
+    if accepted is not None:
+        for key in ("frequency_penalty",):
+            if key in generation_kwargs and key not in accepted:
+                generation_kwargs.pop(key, None)
+
+
+def _accepted_generate_kwargs(model: Any) -> set[str] | None:
+    generate = getattr(model, "generate", None)
+    try:
+        parameters = signature(generate).parameters.values()
+    except (TypeError, ValueError):
+        return None
+    if any(param.kind == Parameter.VAR_KEYWORD for param in parameters):
+        return None
+    return {
+        param.name
+        for param in parameters
+        if param.kind in (Parameter.POSITIONAL_OR_KEYWORD, Parameter.KEYWORD_ONLY)
+    }
+
+
+def _generated_sequences(generated_output: Any) -> Any:
+    sequences = getattr(generated_output, "sequences", None)
+    return generated_output if sequences is None else sequences
+
+
+def _normalize_generated_model_output(generated_output: Any, sequences: Any) -> Any:
+    if getattr(generated_output, "sequences", None) is not None:
+        return generated_output
+    try:
+        from transformers.generation.utils import GenerateDecoderOnlyOutput
+
+        return GenerateDecoderOnlyOutput(sequences=sequences)
+    except Exception:
+        try:
+            from transformers.utils import ModelOutput
+
+            return ModelOutput(sequences=sequences)
+        except Exception:
+            return {"sequences": sequences}
+
+
+def _tokens_to_input_embeddings(model: Any, tokens: Any) -> Any:
+    embedding_module = _input_embedding_module(model)
+    if embedding_module is None:
+        raise RuntimeError(
+            "Could not resolve an input embedding module for generate(return_type='embeds')."
+        )
+    return embedding_module(tokens)
+
+
+def _slice_generated_suffix(generated_sequences: Any, input_tokens: Any) -> Any:
+    input_length = int(tuple(int(dim) for dim in getattr(input_tokens, "shape"))[1])
+    shape = getattr(generated_sequences, "shape", None)
+    if shape is not None:
+        if len(tuple(int(dim) for dim in shape)) == 1:
+            return generated_sequences.unsqueeze(1)
+        if int(shape[1]) <= input_length:
+            return generated_sequences
+        return generated_sequences[:, input_length:]
+    return [list(row)[input_length:] or list(row) for row in generated_sequences]
+
+
+def _normalize_generated_new_tokens(tokens: Any) -> Any:
+    shape = getattr(tokens, "shape", None)
+    if shape is not None and len(tuple(int(dim) for dim in shape)) == 1:
+        return tokens.unsqueeze(1)
+    return tokens
+
+
+def _concat_token_chunks(chunks: Sequence[Any]) -> Any:
+    if not chunks:
+        return []
+    first = chunks[0]
+    try:
+        import torch
+
+        if hasattr(first, "shape"):
+            return torch.cat(list(chunks), dim=1)
+    except ImportError:
+        pass
+    rows: list[list[Any]] = []
+    for chunk in chunks:
+        chunk_rows = chunk.tolist() if hasattr(chunk, "tolist") else chunk
+        if chunk_rows and not isinstance(chunk_rows[0], list):
+            chunk_rows = [chunk_rows]
+        if not rows:
+            rows = [list(row) for row in chunk_rows]
+        else:
+            for row_index, row in enumerate(chunk_rows):
+                rows[row_index].extend(row)
+    return rows
+
+
+def _append_sequence_values(prefix: Any, suffix: Any) -> Any:
+    try:
+        import torch
+
+        if hasattr(prefix, "shape") or hasattr(suffix, "shape"):
+            if not hasattr(prefix, "shape"):
+                prefix = torch.as_tensor(prefix, dtype=getattr(suffix, "dtype", None))
+            if not hasattr(suffix, "shape"):
+                suffix = torch.as_tensor(
+                    suffix,
+                    dtype=getattr(prefix, "dtype", None),
+                    device=getattr(prefix, "device", None),
+                )
+            return torch.cat([prefix, suffix.to(device=prefix.device, dtype=prefix.dtype)], dim=1)
+    except ImportError:
+        pass
+    if isinstance(prefix, list) and isinstance(suffix, list):
+        return [list(prefix_row) + list(suffix_row) for prefix_row, suffix_row in zip(prefix, suffix, strict=False)]
+    raise TypeError("Could not append generated embeddings to the input embeddings.")
+
+
+def _decode_generated_sequences(
+    tokenizer: Any,
+    output_ids: Any,
+    *,
+    force_batch: bool = False,
+) -> str | list[str]:
+    batch_decode = getattr(tokenizer, "batch_decode", None)
+    if force_batch:
+        if callable(batch_decode):
+            return [
+                str(text)
+                for text in _call_decode_with_supported_kwargs(
+                    batch_decode,
+                    output_ids,
+                    {"skip_special_tokens": True},
+                )
+            ]
+        return [str(tokenizer.decode(row, skip_special_tokens=True)) for row in output_ids]
+    return str(tokenizer.decode(output_ids[0], skip_special_tokens=True))
+
+
+def _prepend_bos_token(
+    tokens: Any,
+    tokenizer: Any,
+    *,
+    pad_token_id: int | None = None,
+    padding_side: str | None = None,
+) -> Any:
     bos_token_id = getattr(tokenizer, "bos_token_id", None)
     if bos_token_id is None:
         return tokens
+    if pad_token_id is None:
+        pad_token_id = getattr(tokenizer, "pad_token_id", None)
+    if padding_side is None:
+        padding_side = getattr(tokenizer, "padding_side", None)
     try:
         import torch
 
@@ -2631,14 +3218,99 @@ def _prepend_bos_token(tokens: Any, tokenizer: Any) -> Any:
                 dtype=tokens.dtype,
                 device=tokens.device,
             )
+            if padding_side == "left" and pad_token_id is not None:
+                pad_mask = tokens == int(pad_token_id)
+                first_non_pad = (~pad_mask).to(dtype=torch.long).argmax(dim=1)
+                rows = []
+                for row_index in range(tokens.shape[0]):
+                    insert_at = int(first_non_pad[row_index].item())
+                    row = tokens[row_index]
+                    rows.append(torch.cat([row[:insert_at], bos[row_index], row[insert_at:]]))
+                return torch.stack(rows, dim=0)
             return torch.cat([bos, tokens], dim=1)
     except ImportError:
         pass
     if isinstance(tokens, list):
         if tokens and isinstance(tokens[0], list):
+            if padding_side == "left" and pad_token_id is not None:
+                rows = []
+                for row in tokens:
+                    insert_at = next(
+                        (
+                            index
+                            for index, token in enumerate(row)
+                            if int(token) != int(pad_token_id)
+                        ),
+                        len(row),
+                    )
+                    rows.append([*row[:insert_at], bos_token_id, *row[insert_at:]])
+                return rows
             return [[bos_token_id, *row] for row in tokens]
         return [bos_token_id, *tokens]
     return tokens
+
+
+def _tokenizer_effective_pad_token_id(tokenizer: Any) -> int | None:
+    pad_token_id = getattr(tokenizer, "pad_token_id", None)
+    if pad_token_id is not None:
+        return int(pad_token_id)
+    eos_token_id = getattr(tokenizer, "eos_token_id", None)
+    if eos_token_id is not None:
+        return int(eos_token_id)
+    bos_token_id = getattr(tokenizer, "bos_token_id", None)
+    if bos_token_id is not None:
+        return int(bos_token_id)
+    return None
+
+
+def _attention_mask_from_tokens(
+    tokens: Any,
+    pad_token_id: int | None,
+    *,
+    prepend_bos: bool,
+    padding_side: str = "right",
+    bos_token_id: int | None = None,
+) -> Any | None:
+    if pad_token_id is None:
+        return None
+    try:
+        import torch
+
+        if hasattr(tokens, "shape"):
+            mask = (tokens != int(pad_token_id)).to(dtype=torch.long)
+            if prepend_bos and bos_token_id is not None and mask.shape[-1] > 0:
+                if padding_side == "left":
+                    mask = mask | (tokens == int(bos_token_id)).to(dtype=torch.long)
+                else:
+                    mask[..., 0] = 1
+            return mask
+    except ImportError:
+        pass
+    if isinstance(tokens, list):
+        if tokens and isinstance(tokens[0], list):
+            mask_rows = [
+                [0 if int(token) == int(pad_token_id) else 1 for token in row]
+                for row in tokens
+            ]
+            if prepend_bos:
+                for row in mask_rows:
+                    if row and padding_side != "left":
+                        row[0] = 1
+            if prepend_bos and padding_side == "left" and bos_token_id is not None:
+                for row_mask, row_tokens in zip(mask_rows, tokens, strict=False):
+                    for index, token in enumerate(row_tokens):
+                        if int(token) == int(bos_token_id):
+                            row_mask[index] = 1
+            return mask_rows
+        mask = [0 if int(token) == int(pad_token_id) else 1 for token in tokens]
+        if prepend_bos and mask and padding_side != "left":
+            mask[0] = 1
+        if prepend_bos and padding_side == "left" and bos_token_id is not None:
+            for index, token in enumerate(tokens):
+                if int(token) == int(bos_token_id):
+                    mask[index] = 1
+        return mask
+    return None
 
 
 def _tokenize_text_batch(tokenizer: Any, text: Any) -> Any:
@@ -2953,10 +3625,27 @@ def _format_cache_result(
 
 def _merge_extra_model_kwargs(batch: Any, kwargs: dict[str, Any]) -> dict[str, Any]:
     normalized = _normalize_model_batch(batch)
+    tokenization_kwargs = _pop_tokenization_kwargs(kwargs)
+    normalized.update(tokenization_kwargs)
     model_kwargs = dict(normalized.get("model_kwargs", {}))
     model_kwargs.update(kwargs)
     normalized["model_kwargs"] = model_kwargs
     return normalized
+
+
+def _pop_tokenization_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
+    tokenization_kwargs: dict[str, Any] = {}
+    for key in ("prepend_bos", "padding_side", "truncate"):
+        if key in kwargs:
+            tokenization_kwargs[key] = kwargs.pop(key)
+    return tokenization_kwargs
+
+
+def _model_kwargs_without_tokenization(batch: Mapping[str, Any]) -> dict[str, Any]:
+    model_kwargs = dict(batch.get("model_kwargs", {}))
+    for key in ("prepend_bos", "padding_side", "truncate"):
+        model_kwargs.pop(key, None)
+    return model_kwargs
 
 
 def _resolve_return_type(batch: Any, return_type: str | None | object) -> str | None:
@@ -2996,18 +3685,25 @@ def _normalize_return_type(return_type: str | None | object) -> str | None:
         "logit": "logits",
         "logits": "logits",
         "loss": "loss",
+        "both": "both",
         "model_output": "model_output",
         "raw": "model_output",
         "output": "model_output",
     }
     if normalized not in aliases:
         raise ValueError(
-            "return_type must be one of 'logits', 'loss', 'model_output', 'raw', or None."
+            "return_type must be one of 'logits', 'loss', 'both', 'model_output', 'raw', or None."
         )
     return aliases[normalized]
 
 
-def _format_model_output(output: Any, return_type: str | None) -> Any:
+def _format_model_output(
+    output: Any,
+    return_type: str | None,
+    *,
+    model_inputs: Mapping[str, Any] | None = None,
+    loss_per_token: bool = False,
+) -> Any:
     if return_type is None:
         return None
     if return_type == "model_output":
@@ -3018,11 +3714,92 @@ def _format_model_output(output: Any, return_type: str | None) -> Any:
             raise RuntimeError("Model output does not expose logits.")
         return logits
     if return_type == "loss":
-        loss = _extract_output_field(output, "loss")
-        if loss is None:
-            raise RuntimeError("Model output does not expose loss.")
-        return loss
+        return _extract_or_compute_loss(
+            output,
+            model_inputs,
+            loss_per_token=loss_per_token,
+        )
+    if return_type == "both":
+        logits = _extract_output_field(output, "logits")
+        if logits is None:
+            raise RuntimeError("Model output does not expose logits.")
+        return logits, _extract_or_compute_loss(
+            output,
+            model_inputs,
+            logits=logits,
+            loss_per_token=loss_per_token,
+        )
     raise ValueError(f"Unsupported return_type {return_type!r}.")
+
+
+def _extract_or_compute_loss(
+    output: Any,
+    model_inputs: Mapping[str, Any] | None,
+    *,
+    logits: Any | None = None,
+    loss_per_token: bool = False,
+) -> Any:
+    loss = _extract_output_field(output, "loss")
+    if loss is not None and not loss_per_token:
+        return loss
+    if logits is None:
+        logits = _extract_output_field(output, "logits")
+    if logits is None or model_inputs is None:
+        raise RuntimeError("Model output does not expose loss.")
+    input_ids = model_inputs.get("input_ids")
+    if input_ids is None:
+        raise RuntimeError(
+            "Model output does not expose loss and causal LM loss cannot be computed "
+            "without input_ids."
+        )
+    try:
+        import torch
+        import torch.nn.functional as F
+
+        if not hasattr(logits, "shape"):
+            raise TypeError
+        tokens = input_ids
+        if not hasattr(tokens, "shape"):
+            tokens = torch.as_tensor(tokens, device=logits.device)
+        else:
+            tokens = tokens.to(logits.device)
+        if tokens.shape[-1] < 2:
+            empty_loss = logits.new_zeros((*tokens.shape[:-1], 0))
+            return empty_loss if loss_per_token else logits.new_tensor(0.0)
+        shifted_logits = logits[:, :-1, :].contiguous()
+        shifted_tokens = tokens[:, 1:].contiguous()
+        per_token_loss = F.cross_entropy(
+            shifted_logits.view(-1, shifted_logits.shape[-1]),
+            shifted_tokens.view(-1),
+            reduction="none",
+        ).view_as(shifted_tokens)
+        attention_mask = model_inputs.get("attention_mask")
+        if attention_mask is not None:
+            if not hasattr(attention_mask, "shape"):
+                attention_mask = torch.as_tensor(attention_mask, device=logits.device)
+            else:
+                attention_mask = attention_mask.to(logits.device)
+            loss_mask = attention_mask[:, 1:].to(dtype=per_token_loss.dtype)
+            if loss_per_token:
+                return per_token_loss * loss_mask
+            denominator = loss_mask.sum().clamp_min(1)
+            return (per_token_loss * loss_mask).sum() / denominator
+        if loss_per_token:
+            return per_token_loss
+        return per_token_loss.mean()
+    except ImportError:
+        from SafeLens.core.analysis import lm_cross_entropy_loss
+
+        return lm_cross_entropy_loss(
+            logits,
+            input_ids,
+            model_inputs.get("attention_mask"),
+            per_token=loss_per_token,
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            "Model output does not expose loss and SafeLens could not compute causal LM loss."
+        ) from exc
 
 
 def _extract_output_field(output: Any, field: str) -> Any:
