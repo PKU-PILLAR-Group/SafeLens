@@ -82,9 +82,14 @@ tokens = model.to_tokens("hello")
 logits, cache = model.run_with_cache(tokens)
 resid_pre = cache["resid_pre", 0]
 logits, cache = model.run_with_cache(tokens, names_filter="blocks.0.hook_resid_post")
+loss, cache = model.run_with_cache(tokens, "loss")
 raw_output, cache = model.run_with_cache(tokens, return_type="model_output")
 raw_output, full_cache = model.run_with_cache({"input_ids": tokens}, cache_all=True)
 ```
+
+Prefer `layers=...` for SafeLens layer selection; the extra positional arguments
+on `run_with_cache()` and `run_with_hooks()` follow TransformerLens forward
+ordering, beginning with `return_type` and `loss_per_token`.
 
 The same wrappers can install persistent cache hooks, matching
 TransformerLens' `cache_all()` and `cache_some()` workflows. These hooks are

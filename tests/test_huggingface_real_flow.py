@@ -8,7 +8,7 @@ from typing import Any
 import pytest
 
 from SafeLens.core.base import PipelineConfig
-from SafeLens.core.analysis import compute_head_results_from_z, direct_logit_attribution
+from SafeLens.core.analysis import compute_head_results_from_z, detect_head, direct_logit_attribution
 from SafeLens.core.analysis import test_prompt as run_test_prompt
 from SafeLens.core.hooks import ActivationCache
 from SafeLens.pipelines.runner import PipelineRunner
@@ -223,7 +223,7 @@ def test_huggingface_wrapper_real_direct_logit_attribution_workflow() -> None:
     try:
         output, cache_dict = wrapper.run_with_cache(
             {"id": "hf-dla", "text": "SafeLens checks direct logit attribution."},
-            layers=("layer_0.z", "layer_0.result"),
+            layers=("layer_0.z", "layer_0.result", "layer_0.post"),
         )
         cache = ActivationCache(cache_dict, model=wrapper)
         z = cache["layer_0.z"]
@@ -231,6 +231,8 @@ def test_huggingface_wrapper_real_direct_logit_attribution_workflow() -> None:
 
         assert output.logits.ndim == 3
         assert torch.allclose(compute_head_results_from_z(z, wrapper.W_O[0]), result)
+        assert wrapper.W_out.shape[1] == cache[("post", 0)].shape[-1]
+        assert wrapper.W_out.shape[2] == wrapper.cfg.d_model
 
         target_token = int(output.logits[0, -1].argmax())
         direction = wrapper.tokens_to_residual_directions(target_token)
@@ -258,6 +260,14 @@ def test_huggingface_wrapper_real_direct_logit_attribution_workflow() -> None:
             ),
             int,
         )
+        head_scores = detect_head(
+            wrapper,
+            wrapper.to_tokens("SafeLens SafeLens", prepend_bos=False),
+            "previous_token_head",
+            heads=[(0, 0)],
+        )
+        assert head_scores.shape == (wrapper.cfg.n_layers, wrapper.cfg.n_heads)
+        assert torch.isfinite(head_scores[0, 0])
     finally:
         wrapper.remove_hooks()
 

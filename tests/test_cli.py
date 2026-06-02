@@ -27,6 +27,64 @@ def test_cli_inspect_model_infers_qwen3_adapter(capsys: pytest.CaptureFixture[st
     assert payload["download_plan"]["cache_dir"] == ".cache/safelens/models/huggingface"
 
 
+def test_cli_inspect_model_does_not_infer_transformerlens_from_family_marker(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    main(["inspect-model", "--model", "org/qwen-this-does-not-exist", "--json"])
+
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["source"] == "huggingface"
+    assert payload["supported"] is True
+
+
+def test_cli_inspect_model_transformerlens_override_rejects_unknown_family_marker(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    main(
+        [
+            "inspect-model",
+            "--model",
+            "org/qwen-this-does-not-exist",
+            "--source",
+            "transformer_lens",
+            "--json",
+        ]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["source"] == "transformer_lens"
+    assert payload["supported"] is False
+    assert payload["safelens_transformer_lens_compatible"] is False
+
+
+def test_cli_inspect_model_flags_native_transformerlens_checkpoint(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    main(["inspect-model", "--model", "solu-1l", "--json"])
+
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["source"] == "transformer_lens"
+    assert payload["supported"] is False
+    assert payload["official_transformer_lens_supported"] is True
+    assert payload["checkpoint_format"] == "transformer_lens_hooked_transformer"
+    assert payload["transformers_loadable"] is False
+
+
+def test_cli_inspect_model_reports_architecture_specific_transformerlens_components(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    main(["inspect-model", "--model", "mamba-130m", "--source", "transformer_lens", "--json"])
+
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["architecture_bridge_adapter"] == "mamba_ssm"
+    assert "ssm_in" in payload["bridge_components"]
+    assert "pattern" not in payload["bridge_components"]
+
+
 def test_cli_inspect_model_honors_source_override(capsys: pytest.CaptureFixture[str]) -> None:
     main(
         [

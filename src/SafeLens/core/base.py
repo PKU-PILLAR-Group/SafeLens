@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 Batch = Mapping[str, Any]
 HookFn = Callable[..., Any]
-LayerRef = int | str
+LayerRef = int | str | tuple[Any, ...]
 SUPPORTED_MODEL_SOURCES = (
     "dummy",
     "mock",

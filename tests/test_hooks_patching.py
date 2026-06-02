@@ -17,7 +17,9 @@ from SafeLens.core.hooks import (
     safelens_act_name,
     temporary_hooks,
 )
+from SafeLens.core.tensors import Slice
 from SafeLens.core.patching import (
+    PatchResult,
     PatchSpec,
     activation_name_for_component,
     apply_patch,
@@ -33,6 +35,7 @@ from SafeLens.core.patching import (
     get_act_patch_block_every,
     get_act_patch_resid_pre,
     infer_heads,
+    infer_layers,
     infer_positions,
     get_indexed,
     layer_head_dest_src_pos_pattern_patch_setter,
@@ -42,8 +45,10 @@ from SafeLens.core.patching import (
     layer_pos_head_vector_patch_setter,
     layer_pos_patch_setter,
     make_df_from_ranges,
+    make_patch_hook,
     make_patch_specs,
     normalize_index_table,
+    patch_results_to_index_df,
     patch_results_to_index_table,
     patch_results_to_metric_grid,
     run_activation_patch,
@@ -208,6 +213,38 @@ class NeuronResultModel:
         self.W_out = W_out
 
 
+class TransformerLensBlockWeightModel:
+    def __init__(self, *, W_O: Any | None = None, W_out: Any | None = None) -> None:
+        attn = type("AttentionWeights", (), {})()
+        mlp = type("MlpWeights", (), {})()
+        if W_O is not None:
+            attn.W_O = W_O
+        if W_out is not None:
+            mlp.W_out = W_out
+        self.blocks = [type("Block", (), {"attn": attn, "mlp": mlp})()]
+
+
+class BiasOnlyModel:
+    def accumulated_bias(
+        self,
+        layer: int,
+        mlp_input: bool = False,
+        include_mlp_biases: bool = True,
+    ) -> Any:
+        _ = mlp_input
+        bias = [10.0 * layer, 100.0 * layer]
+        if include_mlp_biases:
+            bias = [bias[0] + layer, bias[1] + layer]
+        return bias
+
+
+class AttnOnlyModel:
+    class Cfg:
+        attn_only = True
+
+    cfg = Cfg()
+
+
 class LogitAttributionModel:
     def __init__(self) -> None:
         self.normalization_type = "RMS"
@@ -234,6 +271,13 @@ class LayerNormAttributionModel(LogitAttributionModel):
         self.normalization_type = "LN"
 
 
+class LogitLensModel(LogitAttributionModel):
+    def __init__(self) -> None:
+        super().__init__()
+        self.W_U = [[1, 0, 1], [0, 1, 1]]
+        self.b_U = [0.5, -1.0, 10.0]
+
+
 class DeviceMoveModel:
     def __init__(self) -> None:
         self.devices: list[Any] = []
@@ -252,6 +296,11 @@ def _nested_sum(value: Any) -> float:
     if isinstance(value, list):
         return float(sum(_nested_sum(item) for item in value))
     return float(value)
+
+
+def _index_records(index_df: Any) -> list[dict[str, Any]]:
+    records, _columns = normalize_index_table(index_df)
+    return records
 
 
 def test_activation_cache_and_name_filter() -> None:
@@ -281,8 +330,26 @@ def test_hook_point_runs_orders_and_removes_hooks() -> None:
     hook.remove_hooks(including_permanent=True)
     assert hook([0]) == [0]
     assert permanent.removed
+    hook.add_hook(lambda grad, _hook: grad + [4], "bwd")
+    hook.remove_hooks()
+    assert hook.has_hooks("bwd")
+    hook.remove_hooks("bwd")
+    assert not hook.has_hooks()
     hook.clear_context()
     assert hook.ctx == {}
+
+
+def test_hook_point_including_permanent_removal_ignores_context_level() -> None:
+    hook = HookPoint("blocks.0.hook_resid_pre")
+    hook.add_hook(lambda activation, _hook: activation + ["temp-1"], level=1)
+    hook.add_hook(lambda activation, _hook: activation + ["temp-2"], level=2)
+    permanent = hook.add_perma_hook(lambda activation, _hook: activation + ["permanent"])
+    permanent.context_level = 99
+
+    hook.remove_hooks(including_permanent=True, level=1)
+
+    assert hook([]) == ["temp-2"]
+    assert permanent.removed
 
 
 def test_hook_point_accepts_single_argument_hooks() -> None:
@@ -290,6 +357,25 @@ def test_hook_point_accepts_single_argument_hooks() -> None:
     hook.add_hook(lambda activation: activation + [1])
 
     assert hook([0]) == [0, 1]
+
+
+def test_hook_point_accepts_official_positional_direction_argument() -> None:
+    hook = HookPoint("blocks.0.hook_resid_pre")
+    hook.add_perma_hook(lambda activation, _hook: activation + [1], "fwd")
+    handle = hook.add_hook(lambda grad, _hook: grad + 2, "bwd")
+
+    assert hook([0]) == [0, 1]
+    assert hook.has_hooks("bwd")
+    assert handle.context_level is None
+
+
+def test_hook_point_accepts_official_hook_keyword_argument() -> None:
+    hook = HookPoint("blocks.0.hook_resid_pre")
+
+    hook.add_hook(hook=lambda activation, _hook: activation + [1])
+    hook.add_perma_hook(hook=lambda activation, _hook: activation + [2])
+
+    assert hook([0]) == [0, 1, 2]
 
 
 def test_hook_point_accepts_alternate_positional_hook_names() -> None:
@@ -396,10 +482,13 @@ def test_hook_point_alias_names_match_transformerlens_call_shape() -> None:
 
 def test_activation_name_shorthands_resolve_to_transformerlens_and_safelens_names() -> None:
     assert get_act_name("q", 2) == "blocks.2.attn.hook_q"
+    assert get_act_name("hook_q", 2, "attn") == "blocks.2.attn.hook_q"
+    assert get_act_name("hook_resid_pre", 2) == "blocks.2.hook_resid_pre"
     assert get_act_name("attn", 1) == "blocks.1.attn.hook_pattern"
     assert get_act_name("scale", 0, "ln1") == "blocks.0.ln1.hook_scale"
     assert get_act_name("scale4b") == "blocks.4.hook_scale"
     assert get_act_name("normalized", 2, "b") == "blocks.2.hook_normalized"
+    assert safelens_act_name("hook_q", 1) == "layer_1.q"
     assert safelens_act_name("attn", 1) == "layer_1.pattern"
 
 
@@ -413,12 +502,31 @@ def test_activation_cache_resolves_tuple_keys_and_matching_keys() -> None:
     )
 
     assert cache[("resid_pre", 0)] == [1]
+    assert cache[("hook_resid_pre", 0)] == [1]
     assert cache[("q", 1)] == [2]
+    assert cache[("hook_q", 1, "attn")] == [2]
     assert cache.resolve_key(("mlp_out", 1)) == "layer_1.mlp_out"
     assert cache.keys_matching(lambda name: "layer_" in name) == [
         "layer_0.resid_pre",
         "layer_1.mlp_out",
     ]
+
+
+def test_activation_cache_exposes_transformerlens_mapping_views() -> None:
+    cache = ActivationCache(
+        {
+            "layer_0.resid_pre": [1],
+            "blocks.1.attn.hook_q": [2],
+        }
+    )
+
+    assert list(cache.keys()) == ["layer_0.resid_pre", "blocks.1.attn.hook_q"]
+    assert list(cache.values()) == [[1], [2]]
+    assert list(cache.items()) == [
+        ("layer_0.resid_pre", [1]),
+        ("blocks.1.attn.hook_q", [2]),
+    ]
+    assert cache[("resid_pre", 0)] == [1]
 
 
 def test_activation_cache_resolves_transformerlens_block_layer_type_alias() -> None:
@@ -457,6 +565,20 @@ def test_activation_cache_resolves_tuple_component_keys_to_safelens_nested_keys(
     assert cache[("post", 0)] == [2]
 
 
+def test_activation_cache_canonicalizes_hook_prefix_tuple_writes() -> None:
+    cache = ActivationCache()
+
+    cache[("hook_q", 0, "attn")] = [1]
+    cache[("hook_resid_pre", 0)] = [2]
+
+    assert cache.to_dict() == {
+        "layer_0.attn.q": [1],
+        "layer_0.resid_pre": [2],
+    }
+    assert cache[("q", 0, "attn")] == [1]
+    assert cache[("resid_pre", 0)] == [2]
+
+
 def test_activation_cache_resolves_full_transformerlens_names_to_safelens_cache_keys() -> None:
     cache = ActivationCache(
         {
@@ -489,6 +611,44 @@ def test_activation_cache_resolves_transformerlens_string_shorthands_to_safelens
         "layer_0.resid_pre",
         "layer_1.mlp.post",
     ]
+
+
+def test_activation_cache_canonicalizes_transformerlens_string_shorthand_storage() -> None:
+    cache = ActivationCache(
+        {
+            "q0": [1],
+            "post1m": [2],
+            "scale4ln1": [3],
+            "custom123": [4],
+        }
+    )
+
+    assert cache.to_dict() == {
+        "layer_0.q": [1],
+        "layer_1.mlp.post": [2],
+        "layer_4.ln1.scale": [3],
+        "custom123": [4],
+    }
+    assert cache[("q", 0)] == [1]
+    assert cache["blocks.0.attn.hook_q"] == [1]
+    assert cache[("post", 1, "m")] == [2]
+    assert cache["blocks.1.mlp.hook_post"] == [2]
+    assert cache[("scale", 4, "ln1")] == [3]
+    assert cache["blocks.4.ln1.hook_scale"] == [3]
+
+
+def test_activation_cache_string_shorthand_writes_update_canonical_storage() -> None:
+    cache = ActivationCache({"blocks.0.attn.hook_q": [1]})
+
+    cache["q0"] = [2]
+    cache["post1m"] = [3]
+
+    assert cache.to_dict() == {
+        "blocks.0.attn.hook_q": [2],
+        "layer_1.mlp.post": [3],
+    }
+    assert cache[("q", 0)] == [2]
+    assert cache["blocks.1.mlp.hook_post"] == [3]
 
 
 def test_activation_cache_resolves_safelens_names_to_transformerlens_cache_keys() -> None:
@@ -594,6 +754,8 @@ def test_activation_cache_batch_slice_accepts_explicit_indices_and_masks() -> No
     assert cache.apply_slice_to_batch_dim([True, False, True]).to_dict() == {
         "layer_0": [[[1]], [[3]]]
     }
+    with pytest.raises(IndexError, match="Boolean index has length"):
+        cache.apply_slice_to_batch_dim([True, False])
 
 
 def test_activation_cache_batch_slice_matches_transformerlens_slice_inputs() -> None:
@@ -643,6 +805,23 @@ def test_activation_cache_remove_batch_dim_matches_transformerlens_shape_toleran
     assert cache.to_dict() == {"batched": [1, 2], "already_flat": [3, 4]}
     assert not cache.has_batch_dim
 
+    mixed_rank_cache = ActivationCache(
+        {
+            "batched": [[[1, 2]]],
+            "already_matrix": [[3, 4], [5, 6]],
+            "scalar": 7,
+        }
+    )
+
+    mixed_rank_cache.remove_batch_dim()
+
+    assert mixed_rank_cache.to_dict() == {
+        "batched": [[1, 2]],
+        "already_matrix": [[3, 4], [5, 6]],
+        "scalar": 7,
+    }
+    assert not mixed_rank_cache.has_batch_dim
+
     multi_batch = ActivationCache({"layer_0": [[1], [2]]})
     try:
         multi_batch.remove_batch_dim()
@@ -652,18 +831,13 @@ def test_activation_cache_remove_batch_dim_matches_transformerlens_shape_toleran
         raise AssertionError("Expected non-singleton batch removal to raise.")
 
 
-def test_activation_cache_remove_batch_dim_is_atomic_for_mixed_invalid_shapes() -> None:
+def test_activation_cache_remove_batch_dim_leaves_ambiguous_non_singleton_when_batch_seen() -> None:
     cache = ActivationCache({"singleton": [[1, 2]], "multi": [[3], [4]]})
 
-    try:
-        cache.remove_batch_dim()
-    except ValueError as exc:
-        assert "multi" in str(exc)
-    else:
-        raise AssertionError("Expected mixed invalid batch removal to raise.")
+    cache.remove_batch_dim()
 
-    assert cache.to_dict() == {"singleton": [[1, 2]], "multi": [[3], [4]]}
-    assert cache.has_batch_dim
+    assert cache.to_dict() == {"singleton": [1, 2], "multi": [[3], [4]]}
+    assert not cache.has_batch_dim
 
 
 def test_activation_cache_exposes_transformerlens_cache_dict_and_embed_flags() -> None:
@@ -680,6 +854,50 @@ def test_activation_cache_exposes_transformerlens_cache_dict_and_embed_flags() -
     cache.cache_dict = {"layer_0": [3]}
     assert cache.to_dict() == {"layer_0": [3]}
     assert not cache.has_embed
+
+
+def test_activation_cache_canonicalizes_top_level_embedding_constructor_aliases() -> None:
+    cache = ActivationCache(
+        {
+            "embed": [[1, 0]],
+            "pos_embed": [[0, 1]],
+            "layer_0.attn_out": [[2, 0]],
+            "layer_0.mlp_out": [[0, 3]],
+        }
+    )
+
+    stack, labels = cache.decompose_resid(return_labels=True)
+
+    assert cache.has_embed
+    assert cache.has_pos_embed
+    assert cache.to_dict()["hook_embed"] == [[1, 0]]
+    assert cache.to_dict()["hook_pos_embed"] == [[0, 1]]
+    assert labels == ["embed", "pos_embed", "0_attn_out", "0_mlp_out"]
+    assert stack == [[[1, 0]], [[0, 1]], [[2, 0]], [[0, 3]]]
+
+    cache.cache_dict = {"embed": [3], "pos_embed": [4]}
+
+    assert cache.to_dict() == {"hook_embed": [3], "hook_pos_embed": [4]}
+    assert cache.has_embed
+    assert cache.has_pos_embed
+
+
+def test_activation_cache_canonicalizes_top_level_embedding_writes() -> None:
+    cache = ActivationCache()
+
+    cache["embed"] = [1]
+    cache[("pos_embed",)] = [2]
+
+    assert cache.to_dict() == {"hook_embed": [1], "hook_pos_embed": [2]}
+    assert cache.has_embed
+    assert cache.has_pos_embed
+    assert cache["hook_embed"] == [1]
+    assert cache["pos_embed"] == [2]
+
+    cache[("hook_embed",)] = [3]
+    cache["hook_pos_embed"] = [4]
+
+    assert cache.to_dict() == {"hook_embed": [3], "hook_pos_embed": [4]}
 
 
 def test_activation_cache_to_mutates_in_place_and_optionally_moves_model() -> None:
@@ -711,6 +929,41 @@ def test_activation_cache_stack_activation_and_accumulated_resid() -> None:
     assert stack == [[[1, 10]], [[2, 20]], [[3, 30]], [[4, 40]]]
 
 
+def test_activation_cache_stacks_numpy_backend_like_tensor_workflows() -> None:
+    np = pytest.importorskip("numpy")
+    cache = ActivationCache(
+        {
+            "hook_embed": np.array([[[1.0, 0.0], [0.5, 0.5]]]),
+            "layer_0.resid_pre": np.array([[[1.0, 10.0], [2.0, 20.0]]]),
+            "layer_0.resid_post": np.array([[[3.0, 30.0], [4.0, 40.0]]]),
+            "layer_0.attn_out": np.array([[[2.0, 0.0], [0.0, 2.0]]]),
+            "layer_0.mlp_out": np.array([[[0.0, 3.0], [3.0, 0.0]]]),
+            "layer_0.result": np.array([[[[1.0, 10.0], [2.0, 20.0]]]]),
+            "layer_0.post": np.array([[[5.0, 6.0]]]),
+        }
+    )
+
+    resid_stack, resid_labels = cache.accumulated_resid(pos_slice=[1, 0], return_labels=True)
+    decomp_stack, decomp_labels = cache.decompose_resid(return_labels=True)
+    head_stack, head_labels = cache.stack_head_results(return_labels=True)
+    neuron_stack, neuron_labels = cache.stack_neuron_results(return_labels=True)
+
+    assert resid_labels == ["0_pre", "final_post"]
+    assert isinstance(resid_stack, np.ndarray)
+    assert resid_stack.shape == (2, 1, 2, 2)
+    assert np.allclose(resid_stack[0], np.array([[[2.0, 20.0], [1.0, 10.0]]]))
+    assert np.allclose(resid_stack[1], np.array([[[4.0, 40.0], [3.0, 30.0]]]))
+    assert decomp_labels == ["embed", "0_attn_out", "0_mlp_out"]
+    assert isinstance(decomp_stack, np.ndarray)
+    assert decomp_stack.shape == (3, 1, 2, 2)
+    assert head_labels == ["L0H0", "L0H1"]
+    assert isinstance(head_stack, np.ndarray)
+    assert head_stack.shape == (2, 1, 1, 2)
+    assert neuron_labels == ["L0N0", "L0N1"]
+    assert isinstance(neuron_stack, np.ndarray)
+    assert neuron_stack.shape == (2, 1, 1)
+
+
 def test_activation_cache_constructor_and_stack_activation_match_transformerlens_call_style() -> None:
     cache = ActivationCache(
         {
@@ -738,6 +991,18 @@ def test_activation_cache_accumulated_resid_accepts_explicit_position_indices() 
 
     assert labels == ["0_pre", "final_post"]
     assert stack == [[[[3], [1]]], [[[6], [4]]]]
+
+
+def test_activation_cache_pos_slice_rejects_mismatched_boolean_mask() -> None:
+    cache = ActivationCache(
+        {
+            "layer_0.resid_pre": [[[1], [2], [3]]],
+            "layer_0.resid_post": [[[4], [5], [6]]],
+        }
+    )
+
+    with pytest.raises(IndexError, match="Boolean index has length"):
+        cache.accumulated_resid(pos_slice=[True, False], return_labels=True)
 
 
 def test_activation_cache_accumulated_resid_accepts_transformerlens_slice_like_object() -> None:
@@ -937,6 +1202,198 @@ def test_activation_cache_residual_decomposition() -> None:
     assert stack == [[[1, 0]], [[0, 1]], [[2, 0]], [[0, 3]]]
 
 
+def test_activation_cache_decoder_residual_decomposition_uses_prefixed_components() -> None:
+    cache = ActivationCache(
+        {
+            "layer_0.resid_pre": [[[100, 100]]],
+            "layer_0.resid_post": [[[200, 200]]],
+            "layer_0.attn_out": [[[300, 300]]],
+            "decoder.0.hook_resid_pre": [[[1, 10]]],
+            "decoder.0.hook_resid_mid": [[[2, 20]]],
+            "decoder.0.hook_resid_post": [[[3, 30]]],
+            "decoder.0.hook_attn_out": [[[4, 40]]],
+            "decoder.0.hook_cross_attn_out": [[[5, 50]]],
+            "decoder.0.hook_mlp_out": [[[6, 60]]],
+        }
+    )
+
+    default_stack, default_labels = cache.accumulated_resid(return_labels=True)
+    decoder_stack, decoder_labels = cache.accumulated_resid(
+        incl_mid=True,
+        return_labels=True,
+        stack="decoder",
+    )
+    decomp_stack, decomp_labels = cache.decompose_resid(
+        incl_embeds=False,
+        return_labels=True,
+        stack="decoder",
+    )
+
+    assert default_labels == ["0_pre", "final_post"]
+    assert default_stack == [[[[100, 100]]], [[[200, 200]]]]
+    assert decoder_labels == ["0_pre", "0_mid", "final_post"]
+    assert decoder_stack == [[[[1, 10]]], [[[2, 20]]], [[[3, 30]]]]
+    assert decomp_labels == ["0_attn_out", "0_cross_attn_out", "0_mlp_out"]
+    assert decomp_stack == [[[[4, 40]]], [[[5, 50]]], [[[6, 60]]]]
+
+
+def test_activation_cache_decoder_residual_stack_uses_decoder_layer_count() -> None:
+    class AsymmetricConfig:
+        num_layers = 1
+        num_decoder_layers = 2
+
+    class AsymmetricModel:
+        config = AsymmetricConfig()
+
+    cache = ActivationCache(
+        {
+            "layer_0.resid_pre": [[[100]]],
+            "layer_0.resid_post": [[[200]]],
+            "decoder.0.hook_resid_pre": [[[1]]],
+            "decoder.0.hook_resid_post": [[[2]]],
+            "decoder.1.hook_resid_pre": [[[3]]],
+            "decoder.1.hook_resid_post": [[[4]]],
+        },
+        model=AsymmetricModel(),
+    )
+
+    encoder_stack, encoder_labels = cache.accumulated_resid(return_labels=True)
+    decoder_stack, decoder_labels = cache.accumulated_resid(
+        return_labels=True,
+        stack="decoder",
+    )
+
+    assert encoder_labels == ["0_pre", "final_post"]
+    assert encoder_stack == [[[[100]]], [[[200]]]]
+    assert decoder_labels == ["0_pre", "1_pre", "final_post"]
+    assert decoder_stack == [[[[1]]], [[[3]]], [[[4]]]]
+
+
+def test_activation_cache_decoder_negative_layer_keys_use_decoder_layer_count() -> None:
+    class AsymmetricConfig:
+        num_layers = 1
+        num_decoder_layers = 2
+
+    class AsymmetricModel:
+        config = AsymmetricConfig()
+
+    cache = ActivationCache(
+        {
+            "encoder.0.attn.hook_q": ["encoder_last"],
+            "decoder.0.hook_resid_pre": ["decoder_first"],
+            "decoder.1.hook_resid_pre": ["decoder_last"],
+            "decoder.1.cross_attn.hook_q": ["cross_last"],
+        },
+        model=AsymmetricModel(),
+    )
+
+    assert cache[("q", -1)] == ["encoder_last"]
+    assert cache[("decoder_resid_pre", -1)] == ["decoder_last"]
+    assert cache[("cross_q", -1)] == ["cross_last"]
+
+
+def test_activation_cache_decoder_layer_count_falls_back_to_decoder_cache_keys() -> None:
+    cache = ActivationCache(
+        {
+            "decoder.0.hook_resid_pre": [[[1]]],
+            "decoder.1.hook_resid_pre": [[[2]]],
+            "decoder.1.hook_resid_post": [[[3]]],
+        }
+    )
+
+    stack, labels = cache.accumulated_resid(return_labels=True, stack="decoder")
+
+    assert labels == ["0_pre", "1_pre", "final_post"]
+    assert stack == [[[[1]]], [[[2]]], [[[3]]]]
+
+
+def test_activation_cache_decoder_layer_count_reads_nested_dict_configs() -> None:
+    cache = ActivationCache(
+        {
+            "decoder.0.hook_resid_pre": [[[1]]],
+            "decoder.1.hook_resid_pre": [[[2]]],
+            "decoder.1.hook_resid_post": [[[3]]],
+        },
+        model=type(
+            "NestedDictModel",
+            (),
+            {
+                "config": {
+                    "model_type": "wrapper",
+                    "text_config": {"num_layers": 1, "num_decoder_layers": 2},
+                }
+            },
+        )(),
+    )
+
+    stack, labels = cache.accumulated_resid(return_labels=True, stack="decoder")
+
+    assert labels == ["0_pre", "1_pre", "final_post"]
+    assert stack == [[[[1]]], [[[2]]], [[[3]]]]
+
+
+def test_activation_cache_decoder_decompose_resid_uses_decoder_layernorm_scales() -> None:
+    cache = ActivationCache(
+        {
+            "decoder.0.hook_attn_out": [[[10.0, 20.0]]],
+            "decoder.0.hook_cross_attn_out": [[[30.0, 60.0]]],
+            "decoder.0.ln1.hook_scale": [[[2.0, 2.0]]],
+            "decoder.0.ln3.hook_scale": [[[10.0, 10.0]]],
+            "blocks.0.ln2.hook_scale": [[[100.0, 100.0]]],
+        },
+        model=LogitAttributionModel(),
+    )
+
+    stack, labels = cache.decompose_resid(
+        layer=0,
+        mlp_input=True,
+        mode="attn",
+        apply_ln=True,
+        incl_embeds=False,
+        return_labels=True,
+        stack="decoder",
+    )
+
+    assert labels == ["0_attn_out", "0_cross_attn_out"]
+    assert stack == [[[[1.0, 2.0]]], [[[3.0, 6.0]]]]
+
+
+def test_activation_cache_residual_decomposition_uses_top_level_write_aliases() -> None:
+    cache = ActivationCache(
+        {
+            "layer_0.attn_out": [[2, 0]],
+            "layer_0.mlp_out": [[0, 3]],
+        }
+    )
+    cache["embed"] = [[1, 0]]
+    cache["pos_embed"] = [[0, 1]]
+
+    stack, labels = cache.decompose_resid(return_labels=True)
+
+    assert labels == ["embed", "pos_embed", "0_attn_out", "0_mlp_out"]
+    assert stack == [[[1, 0]], [[0, 1]], [[2, 0]], [[0, 3]]]
+
+
+def test_activation_cache_residual_decomposition_respects_attn_only_models() -> None:
+    cache = ActivationCache(
+        {
+            "hook_embed": [[1, 0]],
+            "layer_0.attn_out": [[2, 0]],
+            "layer_0.mlp_out": [[0, 99]],
+            "layer_0.post": [[[123, 456]]],
+        },
+        model=AttnOnlyModel(),
+    )
+
+    stack, labels = cache.decompose_resid(return_labels=True)
+    full_stack, full_labels = cache.get_full_resid_decomposition(return_labels=True)
+
+    assert labels == ["embed", "0_attn_out"]
+    assert stack == [[[1, 0]], [[2, 0]]]
+    assert full_labels == ["0_attn_out", "embed"]
+    assert full_stack == [[[2, 0]], [[1, 0]]]
+
+
 def test_activation_cache_head_and_neuron_decomposition() -> None:
     cache = ActivationCache(
         {
@@ -966,8 +1423,65 @@ def test_activation_cache_computes_head_results_from_z_and_w_o() -> None:
     assert labels == ["0_result"]
     assert result_stack == [[[[[1.0, 2.0, 3.0], [15.0, 22.0, 4.0]], [[5.0, 6.0, 11.0], [31.0, 46.0, 8.0]]]]]
     assert cache["layer_0.result"] == result_stack[0]
+    assert cache["blocks.0.attn.hook_result"] == result_stack[0]
+    assert cache.cache_dict["blocks.0.attn.hook_result"] == result_stack[0]
     assert head_labels == ["L0H0", "L0H1"]
     assert head_stack == [[[[1.0, 2.0, 3.0], [5.0, 6.0, 11.0]]], [[[15.0, 22.0, 4.0], [31.0, 46.0, 8.0]]]]
+
+
+def test_activation_cache_computes_head_results_from_transformerlens_block_w_o() -> None:
+    cache = ActivationCache(
+        {"blocks.0.attn.hook_z": [[[[1, 2], [3, 4]]]]},
+        model=TransformerLensBlockWeightModel(
+            W_O=[[[1, 0, 1], [0, 1, 1]], [[1, 2, 0], [3, 4, 1]]],
+        ),
+    )
+
+    result_stack, labels = cache.compute_head_results(return_labels=True)
+
+    assert labels == ["0_result"]
+    assert result_stack == [[[[[1.0, 2.0, 3.0], [15.0, 22.0, 4.0]]]]]
+    assert cache["blocks.0.attn.hook_result"] == result_stack[0]
+
+
+def test_activation_cache_compute_head_results_reuses_cached_result_without_w_o() -> None:
+    cache = ActivationCache({"blocks.0.attn.hook_result": [[[[1, 2]], [[3, 4]]]]})
+
+    result_stack, labels = cache.compute_head_results(return_labels=True)
+    sliced_stack = cache.compute_head_results(pos_slice=1)
+
+    assert labels == ["0_result"]
+    assert result_stack == [[[[[1, 2]], [[3, 4]]]]]
+    assert sliced_stack == [[[[3, 4]]]]
+
+
+def test_activation_cache_compute_head_results_reuses_result_and_computes_missing_z() -> None:
+    cache = ActivationCache(
+        {
+            "blocks.0.attn.hook_result": [[[[1, 2]]]],
+            "blocks.1.attn.hook_z": [[[[3, 4]]]],
+        },
+        model=HeadResultModel(W_O=[[[[0, 0], [0, 0]]], [[[1, 0], [0, 1]]]]),
+    )
+
+    result_stack, labels = cache.compute_head_results(return_labels=True)
+
+    assert labels == ["0_result", "1_result"]
+    assert result_stack == [[[[[1, 2]]]], [[[[3.0, 4.0]]]]]
+    assert cache["blocks.1.attn.hook_result"] == [[[[3.0, 4.0]]]]
+
+
+def test_activation_cache_compute_head_results_store_false_does_not_cache_aliases() -> None:
+    cache = ActivationCache(
+        {"blocks.0.attn.hook_z": [[[[1, 2]]]]},
+        model=HeadResultModel(W_O=[[[[1, 0], [0, 1]]]]),
+    )
+
+    result_stack = cache.compute_head_results(store=False)
+
+    assert result_stack == [[[[[1.0, 2.0]]]]]
+    assert "layer_0.result" not in cache.cache_dict
+    assert "blocks.0.attn.hook_result" not in cache.cache_dict
 
 
 def test_activation_cache_stack_head_results_auto_computes_from_z() -> None:
@@ -1059,6 +1573,46 @@ def test_activation_cache_stack_head_results_layer_zero_remainder() -> None:
     assert head_stack == [[[[3, 4]]]]
 
 
+def test_activation_cache_stack_head_results_layer_zero_remainder_uses_resid_pre() -> None:
+    cache = ActivationCache(
+        {
+            "layer_0.resid_pre": [[[1, 2], [3, 4]]],
+            "layer_0.resid_post": [[[10, 20], [30, 40]]],
+            "layer_1.resid_post": [[[100, 200], [300, 400]]],
+        }
+    )
+
+    head_stack, labels = cache.stack_head_results(
+        layer=0,
+        incl_remainder=True,
+        pos_slice=[1],
+        return_labels=True,
+    )
+
+    assert labels == ["remainder"]
+    assert head_stack == [[[[3, 4]]]]
+
+
+def test_activation_cache_stack_neuron_results_layer_zero_remainder_uses_resid_pre() -> None:
+    cache = ActivationCache(
+        {
+            "layer_0.resid_pre": [[[1, 2], [3, 4]]],
+            "layer_0.resid_post": [[[10, 20], [30, 40]]],
+            "layer_1.resid_post": [[[100, 200], [300, 400]]],
+        }
+    )
+
+    neuron_stack, labels = cache.stack_neuron_results(
+        layer=0,
+        incl_remainder=True,
+        pos_slice=[1],
+        return_labels=True,
+    )
+
+    assert labels == ["remainder"]
+    assert neuron_stack == [[[[3, 4]]]]
+
+
 def test_activation_cache_stack_head_results_layer_zero_returns_empty_stack() -> None:
     cache = ActivationCache({"hook_embed": [[[1, 2], [3, 4]]]})
 
@@ -1078,6 +1632,41 @@ def test_activation_cache_stack_head_results_requires_result_for_remainder() -> 
 
     with pytest.raises(ValueError, match="residual-space `result`"):
         cache.stack_head_results(component="q", incl_remainder=True)
+
+
+def test_activation_cache_stack_head_results_handles_attention_pattern_axes() -> None:
+    cache = ActivationCache(
+        {
+            "layer_0.pattern": [
+                [
+                    [[1, 2, 3], [4, 5, 6]],
+                    [[7, 8, 9], [10, 11, 12]],
+                ]
+            ],
+            "layer_0.attn_scores": [
+                [
+                    [[-1, -2, -3], [-4, -5, -6]],
+                    [[-7, -8, -9], [-10, -11, -12]],
+                ]
+            ],
+        }
+    )
+
+    pattern_stack, pattern_labels = cache.stack_head_results(
+        component="pattern",
+        pos_slice=[1],
+        return_labels=True,
+    )
+    scores_stack, scores_labels = cache.stack_head_results(
+        component="attn_scores",
+        pos_slice=1,
+        return_labels=True,
+    )
+
+    assert pattern_labels == ["L0H0", "L0H1"]
+    assert pattern_stack == [[[[4, 5, 6]]], [[[10, 11, 12]]]]
+    assert scores_labels == ["L0H0", "L0H1"]
+    assert scores_stack == [[[-4, -5, -6]], [[-10, -11, -12]]]
 
 
 def test_activation_cache_empty_head_and_neuron_stacks_preserve_torch_shape() -> None:
@@ -1116,6 +1705,37 @@ def test_activation_cache_full_residual_decomposition_and_logit_attrs() -> None:
     assert labels == ["L0H0", "embed"]
     assert stack == [[[[2, 0]]], [[1, 0]]]
     assert attrs == [12.0, 43.0]
+
+
+def test_activation_cache_decoder_full_residual_decomposition_includes_self_and_cross_heads() -> None:
+    cache = ActivationCache(
+        {
+            "decoder.0.attn.hook_result": [[[[1, 10], [2, 20]]]],
+            "decoder.0.cross_attn.hook_result": [[[[3, 30], [4, 40]]]],
+            "decoder.0.hook_mlp_out": [[[5, 50]]],
+        }
+    )
+
+    stack, labels = cache.get_full_resid_decomposition(
+        expand_neurons=True,
+        return_labels=True,
+        stack="decoder",
+    )
+
+    assert labels == [
+        "L0H0_decoder",
+        "L0H1_decoder",
+        "L0H0_cross",
+        "L0H1_cross",
+        "0_mlp_out",
+    ]
+    assert stack == [
+        [[[1, 10]]],
+        [[[2, 20]]],
+        [[[3, 30]]],
+        [[[4, 40]]],
+        [[[5, 50]]],
+    ]
 
 
 def test_activation_cache_full_decomposition_prefers_fine_residual_components() -> None:
@@ -1186,6 +1806,20 @@ def test_activation_cache_gets_and_slices_neuron_results() -> None:
 
     assert labels == ["L0N1", "L0N2"]
     assert stack == [[[[0, 8]]], [[[15, 15]]]]
+
+
+def test_activation_cache_gets_neuron_results_from_transformerlens_block_w_out() -> None:
+    cache = ActivationCache(
+        {"blocks.0.mlp.hook_post": [[[3, 4]]]},
+        model=TransformerLensBlockWeightModel(W_out=[[1, 0], [0, 2]]),
+    )
+
+    result = cache.get_neuron_results(0)
+    stack, labels = cache.stack_neuron_results(return_labels=True)
+
+    assert result == [[[[3, 0], [0, 8]]]]
+    assert labels == ["L0N0", "L0N1"]
+    assert stack == [[[[3, 0]]], [[[0, 8]]]]
 
 
 def test_activation_cache_get_neuron_results_slices_numpy_arrays() -> None:
@@ -1338,6 +1972,96 @@ def test_activation_cache_stack_neuron_results_projects_after_layernorm() -> Non
     assert stack == [[[-3.0]], [[-4.0]]]
 
 
+def test_activation_cache_stack_neuron_results_folds_layernorm_projection_matrix() -> None:
+    cache = ActivationCache(
+        {
+            "ln_final.hook_scale": [[[2.0]]],
+            "layer_0.post": [[[3.0, 4.0]]],
+        },
+        model=type(
+            "LayerNormNeuronProjectionModel",
+            (),
+            {
+                "normalization_type": "LN",
+                "W_out": [[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]],
+            },
+        )(),
+    )
+
+    stack, labels = cache.stack_neuron_results(
+        apply_ln=True,
+        project_output_onto=[[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]],
+        return_labels=True,
+    )
+
+    assert labels == ["L0N0", "L0N1"]
+    assert stack == [[[[0.0, 1.5]]], [[[0.0, 2.0]]]]
+
+
+def test_activation_cache_stack_neuron_results_folded_path_skips_neuron_expansion() -> None:
+    cache = ActivationCache(
+        {
+            "ln_final.hook_scale": [[[2.0]]],
+            "layer_0.post": [[[3.0, 4.0]]],
+        },
+        model=NeuronResultModel(W_out=[[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]]),
+    )
+
+    def fail_get_neuron_results(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("folded LN projection path should not expand neuron results")
+
+    cache.get_neuron_results = fail_get_neuron_results  # type: ignore[method-assign]
+
+    stack, labels = cache.stack_neuron_results(
+        apply_ln=True,
+        project_output_onto=[1.0, 0.0, -1.0],
+        return_labels=True,
+    )
+
+    assert labels == ["L0N0", "L0N1"]
+    assert stack == [[[-3.0]], [[-4.0]]]
+
+
+def test_activation_cache_stack_neuron_results_folds_layernorm_vector_projection_shape() -> None:
+    cache = ActivationCache(
+        {
+            "ln_final.hook_scale": [[[2.0]]],
+            "layer_0.post": [[[3.0, 4.0]]],
+        },
+        model=type(
+            "LayerNormNeuronVectorProjectionModel",
+            (),
+            {
+                "normalization_type": "LN",
+                "W_out": [[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]],
+            },
+        )(),
+    )
+
+    stack, labels = cache.stack_neuron_results(
+        apply_ln=True,
+        project_output_onto=[1.0, 0.0, -1.0],
+        return_labels=True,
+    )
+
+    assert labels == ["L0N0", "L0N1"]
+    assert stack == [[[-3.0]], [[-4.0]]]
+
+
+def test_activation_cache_cached_ln_scale_helper_slices_batch_and_position() -> None:
+    cache = ActivationCache(
+        {"blocks.0.ln1.hook_scale": [[[1.0], [2.0]], [[3.0], [4.0]]]},
+        model=type("LayerNormScaleModel", (), {"n_layers": 1})(),
+    )
+
+    assert cache._get_cached_ln_scale(0, mlp_input=False, batch_slice=1, pos_slice=0) == [3.0]
+    with pytest.raises(KeyError, match="Cached LN scale"):
+        ActivationCache({}, model=type("NoScaleModel", (), {"n_layers": 1})())._get_cached_ln_scale(
+            0,
+            mlp_input=False,
+        )
+
+
 def test_activation_cache_stack_neuron_results_requires_output_weights_for_remainder() -> None:
     cache = ActivationCache(
         {
@@ -1428,6 +2152,237 @@ def test_activation_cache_full_decomposition_projects_output_directions() -> Non
     assert stack == [[[0.0]], [[-4.0]], [[-2.0]]]
 
 
+def test_activation_cache_full_decomposition_passes_projection_to_neuron_stack() -> None:
+    cache = ActivationCache(
+        {
+            "hook_embed": [[[1.0, 2.0, 3.0]]],
+            "layer_0.result": [[[[1.0, 0.0, 1.0]]]],
+            "layer_0.post": [[[2.0]]],
+        },
+        model=NeuronResultModel(W_out=[[[3.0, 4.0, 5.0]]]),
+    )
+    seen: list[dict[str, Any]] = []
+    original = cache.stack_neuron_results
+
+    def tracking_stack_neuron_results(*args: Any, **kwargs: Any) -> Any:
+        seen.append(
+            {
+                "project_output_onto": kwargs.get("project_output_onto"),
+                "apply_ln": kwargs.get("apply_ln"),
+            }
+        )
+        return original(*args, **kwargs)
+
+    cache.stack_neuron_results = tracking_stack_neuron_results  # type: ignore[method-assign]
+
+    stack, labels = cache.get_full_resid_decomposition(
+        project_output_onto=[1.0, 0.0, -1.0],
+        return_labels=True,
+    )
+
+    assert seen == [{"project_output_onto": [1.0, 0.0, -1.0], "apply_ln": False}]
+    assert labels == ["L0H0", "L0N0", "embed"]
+    assert stack == [[[0.0]], [[-4.0]], [[-2.0]]]
+
+
+def test_activation_cache_full_decomposition_fuses_layernorm_projection_for_neurons() -> None:
+    cache = ActivationCache(
+        {
+            "ln_final.hook_scale": [[[2.0]]],
+            "hook_embed": [[[3.0, 5.0, 7.0]]],
+            "layer_0.result": [[[[1.0, 2.0, 3.0]]]],
+            "layer_0.post": [[[4.0]]],
+        },
+        model=type(
+            "LayerNormFullProjectionModel",
+            (),
+            {
+                "normalization_type": "LN",
+                "W_out": [[[2.0, 4.0, 8.0]]],
+            },
+        )(),
+    )
+
+    def fail_get_neuron_results(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("full decomposition should use folded LN projection for neurons")
+
+    cache.get_neuron_results = fail_get_neuron_results  # type: ignore[method-assign]
+
+    stack, labels = cache.get_full_resid_decomposition(
+        apply_ln=True,
+        project_output_onto=[1.0, 0.0, -1.0],
+        return_labels=True,
+    )
+
+    assert labels == ["L0H0", "L0N0", "embed"]
+    assert stack == [[[-1.0]], [[-12.0]], [[-2.0]]]
+
+
+def test_activation_cache_full_decomposition_layernorm_projection_expands_bias_first() -> None:
+    class LayerNormProjectionBiasModel:
+        normalization_type = "LN"
+
+        def accumulated_bias(
+            self,
+            layer: int,
+            mlp_input: bool = False,
+            include_mlp_biases: bool = True,
+        ) -> Any:
+            _ = layer, mlp_input, include_mlp_biases
+            return [10.0, 40.0, 100.0]
+
+    cache = ActivationCache(
+        {
+            "ln_final.hook_scale": [[[2.0]]],
+            "hook_embed": [[[3.0, 5.0, 7.0]]],
+            "layer_0.result": [[[[1.0, 2.0, 3.0]]]],
+        },
+        model=LayerNormProjectionBiasModel(),
+    )
+
+    stack, labels = cache.get_full_resid_decomposition(
+        apply_ln=True,
+        project_output_onto=[1.0, 0.0, -1.0],
+        return_labels=True,
+    )
+
+    assert labels == ["L0H0", "embed", "bias"]
+    assert stack == [[[-1.0]], [[-2.0]], [[-45.0]]]
+
+
+def test_activation_cache_full_decomposition_bias_tracks_neuron_expansion() -> None:
+    cache = ActivationCache(
+        {
+            "hook_embed": [[[1.0, 2.0]]],
+            "layer_0.attn_out": [[[3.0, 4.0]]],
+            "layer_0.mlp_out": [[[5.0, 6.0]]],
+            "layer_0.post": [[[1.0, 2.0]]],
+            "layer_1.attn_out": [[[7.0, 8.0]]],
+            "layer_1.mlp_out": [[[9.0, 10.0]]],
+            "layer_1.post": [[[3.0, 4.0]]],
+        },
+        model=type(
+            "BiasAndNeuronModel",
+            (BiasOnlyModel,),
+            {"W_out": [[[1.0, 0.0], [0.0, 1.0]], [[1.0, 0.0], [0.0, 1.0]]]},
+        )(),
+    )
+
+    expanded_stack, expanded_labels = cache.get_full_resid_decomposition(
+        layer=2,
+        expand_neurons=True,
+        return_labels=True,
+    )
+    coarse_stack, coarse_labels = cache.get_full_resid_decomposition(
+        layer=2,
+        expand_neurons=False,
+        return_labels=True,
+    )
+
+    assert expanded_labels == [
+        "0_attn_out",
+        "1_attn_out",
+        "L0N0",
+        "L0N1",
+        "L1N0",
+        "L1N1",
+        "embed",
+        "bias",
+    ]
+    assert coarse_labels == [
+        "0_attn_out",
+        "1_attn_out",
+        "0_mlp_out",
+        "1_mlp_out",
+        "embed",
+        "bias",
+    ]
+    assert expanded_stack[-1] == [[[22.0, 202.0]]]
+    assert coarse_stack[-1] == [[[20.0, 200.0]]]
+
+
+def test_activation_cache_coarse_full_decomposition_does_not_double_count_mlp_bias() -> None:
+    class CoarseBiasModel:
+        def accumulated_bias(
+            self,
+            layer: int,
+            mlp_input: bool = False,
+            include_mlp_biases: bool = True,
+        ) -> Any:
+            _ = mlp_input
+            attn_bias = [10.0 * layer, 100.0 * layer]
+            mlp_bias = [1.0 * layer, 2.0 * layer]
+            if include_mlp_biases:
+                return [attn_bias[0] + mlp_bias[0], attn_bias[1] + mlp_bias[1]]
+            return attn_bias
+
+    cache = ActivationCache(
+        {
+            "layer_0.attn_out": [[[3.0, 4.0]]],
+            "layer_0.mlp_out": [[[6.0, 8.0]]],
+            "layer_1.attn_out": [[[5.0, 6.0]]],
+            "layer_1.mlp_out": [[[10.0, 12.0]]],
+        },
+        model=CoarseBiasModel(),
+    )
+
+    stack, labels = cache.get_full_resid_decomposition(
+        layer=2,
+        expand_neurons=False,
+        return_labels=True,
+    )
+
+    summed = [
+        sum(component[0][0][axis] for component in stack)
+        for axis in range(2)
+    ]
+
+    assert labels == ["0_attn_out", "1_attn_out", "0_mlp_out", "1_mlp_out", "bias"]
+    assert stack[-1] == [[[20.0, 200.0]]]
+    assert summed == [44.0, 230.0]
+
+
+def test_activation_cache_full_decomposition_fallback_does_not_count_mlp_bias() -> None:
+    class CoarseBiasModel:
+        def accumulated_bias(
+            self,
+            layer: int,
+            mlp_input: bool = False,
+            include_mlp_biases: bool = True,
+        ) -> Any:
+            _ = mlp_input
+            attn_bias = [10.0 * layer, 100.0 * layer]
+            mlp_bias = [1.0 * layer, 2.0 * layer]
+            if include_mlp_biases:
+                return [attn_bias[0] + mlp_bias[0], attn_bias[1] + mlp_bias[1]]
+            return attn_bias
+
+    cache = ActivationCache(
+        {
+            "layer_0.attn_out": [[[3.0, 4.0]]],
+            "layer_0.mlp_out": [[[6.0, 8.0]]],
+            "layer_1.attn_out": [[[5.0, 6.0]]],
+            "layer_1.mlp_out": [[[10.0, 12.0]]],
+        },
+        model=CoarseBiasModel(),
+    )
+
+    requested_expanded_stack, requested_expanded_labels = cache.get_full_resid_decomposition(
+        layer=2,
+        expand_neurons=True,
+        return_labels=True,
+    )
+    coarse_stack, coarse_labels = cache.get_full_resid_decomposition(
+        layer=2,
+        expand_neurons=False,
+        return_labels=True,
+    )
+
+    assert requested_expanded_labels == coarse_labels
+    assert requested_expanded_stack == coarse_stack
+    assert requested_expanded_stack[-1] == [[[20.0, 200.0]]]
+
+
 def test_activation_cache_logit_attrs_broadcasts_directions_over_component_axis() -> None:
     cache = ActivationCache()
     residual_stack = [
@@ -1480,11 +2435,27 @@ def test_activation_cache_logit_attrs_accepts_numpy_residuals_with_python_direct
     assert np.array_equal(attrs, np.array([[[1.0, 4.0]], [[10.0, 40.0]]]))
 
 
+def test_activation_cache_logit_attrs_applies_ln_to_tuple_backed_residuals() -> None:
+    cache = ActivationCache({"ln_final.hook_scale": (((2.0,), (4.0,)),)})
+
+    attrs = cache.logit_attrs(
+        (((((8.0, 16.0), (8.0, 16.0)),),),),
+        None,
+        directions=((((1.0, 0.0), (0.0, 1.0)),),),
+    )
+
+    assert attrs == [[[[4.0, 4.0]]]]
+
+
 def test_activation_cache_logit_attrs_accepts_string_tokens_and_checks_logit_diff_shape() -> None:
     cache = ActivationCache(model=LogitAttributionModel())
 
     assert cache.logit_attrs([[1, 2], [3, 4]], " yes", apply_ln=False) == [1.0, 3.0]
     assert cache.logit_attrs([[1, 2], [3, 4]], " yes", incorrect_tokens=" no", apply_ln=False) == [
+        -1.0,
+        -1.0,
+    ]
+    assert cache.logit_attrs([[1, 2], [3, 4]], " yes", " no", apply_ln=False) == [
         -1.0,
         -1.0,
     ]
@@ -1509,6 +2480,27 @@ def test_activation_cache_logit_attrs_slices_positions_and_layernorm_scales() ->
     )
 
     assert attrs == [[[4.0, 3.0]]]
+
+
+def test_activation_cache_logit_attrs_accepts_transformerlens_positional_slices() -> None:
+    cache = ActivationCache(
+        {"ln_final.hook_scale": [[[2], [4], [8]], [[10], [20], [40]]]},
+        model=LogitAttributionModel(),
+    )
+
+    attrs = cache.logit_attrs(
+        [
+            [[[8, 16], [8, 16], [16, 24]], [[10, 10], [20, 20], [40, 40]]],
+            [[[4, 8], [4, 8], [8, 12]], [[1, 2], [3, 4], [5, 6]]],
+        ],
+        [[1, 2, 3], [3, 2, 1]],
+        None,
+        [2, 0],
+        0,
+        True,
+    )
+
+    assert attrs == [[5.0, 4.0], [2.5, 2.0]]
 
 
 def test_activation_cache_logit_attrs_broadcasts_single_token_direction_with_pos_slice() -> None:
@@ -1557,6 +2549,50 @@ def test_activation_cache_logit_attrs_slices_batch_directions_without_pos_slice(
     assert attrs == [[2.0]]
 
 
+def test_activation_cache_logit_attrs_slices_batch_then_position_directions() -> None:
+    cache = ActivationCache()
+
+    attrs = cache.logit_attrs(
+        [
+            [[10, 1, 0], [30, 3, 0]],
+            [[50, 5, 0], [70, 7, 0]],
+        ],
+        None,
+        directions=[
+            [[1, 0, 0], [0, 1, 0]],
+            [[1, 1, 0], [1, -1, 0]],
+        ],
+        apply_ln=False,
+        batch_slice=1,
+        pos_slice=0,
+    )
+
+    assert attrs == [33.0, 77.0]
+
+
+def test_activation_cache_logit_attrs_applies_final_scale_to_batchless_pos_slice() -> None:
+    cache = ActivationCache(
+        {
+            "ln_final.hook_scale": [[2.0], [4.0]],
+        },
+        has_batch_dim=False,
+    )
+
+    attrs = cache.logit_attrs(
+        [
+            [8.0, 16.0],
+            [4.0, 12.0],
+        ],
+        None,
+        directions=[1.0, 0.0],
+        apply_ln=True,
+        pos_slice=1,
+        has_batch_dim=False,
+    )
+
+    assert attrs == [2.0, 1.0]
+
+
 def test_activation_cache_logit_attrs_keeps_batch_directions_with_pos_slice() -> None:
     cache = ActivationCache()
 
@@ -1586,6 +2622,21 @@ def test_activation_cache_logit_attrs_accepts_explicit_position_indices() -> Non
     assert attrs == [[[5.0, 4.0]]]
 
 
+def test_activation_cache_logit_attrs_slices_full_residual_stack_for_explicit_positions() -> None:
+    cache = ActivationCache(
+        {"ln_final.hook_scale": [[[2], [4], [8]]]},
+        model=LogitAttributionModel(),
+    )
+
+    attrs = cache.logit_attrs(
+        [[[[4.0, 8.0], [8.0, 16.0], [16.0, 24.0]]]],
+        [[1, 2, 3]],
+        pos_slice=[2, 0],
+    )
+
+    assert attrs == [[[5.0, 2.0]]]
+
+
 def test_activation_cache_logit_attrs_uses_cache_batch_dim_by_default() -> None:
     cache = ActivationCache(
         {"ln_final.hook_scale": [[2], [4], [8]]},
@@ -1602,6 +2653,81 @@ def test_activation_cache_logit_attrs_uses_cache_batch_dim_by_default() -> None:
     assert attrs == [[5.0, 4.0]]
 
 
+def test_activation_cache_logit_attrs_slices_batch_for_unstacked_residuals() -> None:
+    cache = ActivationCache()
+
+    attrs = cache.logit_attrs(
+        [
+            [[10.0, 1.0], [20.0, 2.0]],
+            [[30.0, 3.0], [40.0, 4.0]],
+        ],
+        None,
+        directions=[
+            [[1.0, 0.0], [0.0, 1.0]],
+            [[1.0, 1.0], [1.0, -1.0]],
+        ],
+        apply_ln=False,
+        batch_slice=1,
+    )
+
+    assert attrs == [33.0, 36.0]
+
+
+def test_activation_cache_logit_attrs_slices_torch_batch_for_unstacked_residuals() -> None:
+    torch = pytest.importorskip("torch")
+    cache = ActivationCache()
+
+    attrs = cache.logit_attrs(
+        torch.tensor(
+            [
+                [[10.0, 1.0], [20.0, 2.0]],
+                [[30.0, 3.0], [40.0, 4.0]],
+            ]
+        ),
+        None,
+        directions=torch.tensor(
+            [
+                [[1.0, 0.0], [0.0, 1.0]],
+                [[1.0, 1.0], [1.0, -1.0]],
+            ]
+        ),
+        apply_ln=False,
+        batch_slice=1,
+    )
+
+    assert torch.equal(attrs, torch.tensor([33.0, 36.0]))
+
+
+def test_activation_cache_logit_attrs_slices_residual_pos_after_integer_batch_slice() -> None:
+    torch = pytest.importorskip("torch")
+    cache = ActivationCache(
+        {
+            "ln_final.hook_scale": torch.tensor(
+                [
+                    [[1.0], [2.0], [4.0]],
+                    [[5.0], [10.0], [20.0]],
+                ]
+            )
+        }
+    )
+    residual_stack = torch.arange(2 * 2 * 3 * 3, dtype=torch.float32).reshape(2, 2, 3, 3)
+
+    attrs = cache.logit_attrs(
+        residual_stack,
+        None,
+        directions=torch.ones(2, 3),
+        batch_slice=1,
+        pos_slice=[2, 0],
+    )
+
+    expected = (
+        residual_stack[:, 1][:, [2, 0]]
+        / torch.tensor([[[20.0], [5.0]]])
+        * torch.ones(2, 3)
+    ).sum(dim=-1)
+    assert torch.allclose(attrs, expected)
+
+
 def test_activation_cache_apply_ln_slices_batch_and_position_scales() -> None:
     cache = ActivationCache({"ln_final.hook_scale": [[[2], [4]], [[8], [16]]]})
 
@@ -1611,6 +2737,66 @@ def test_activation_cache_apply_ln_slices_batch_and_position_scales() -> None:
         batch_slice=1,
         pos_slice=slice(1, 2),
     ) == [[[1.0, 2.0]]]
+
+
+def test_activation_cache_apply_ln_slices_position_scale_for_batchless_residual_override() -> None:
+    cache = ActivationCache({"ln_final.hook_scale": [[[2.0], [4.0]]]})
+
+    assert cache.apply_ln_to_stack(
+        [[[8.0, 16.0], [4.0, 12.0]]],
+        layer=-1,
+        pos_slice=1,
+        has_batch_dim=False,
+    ) == [[[2.0, 4.0], [1.0, 3.0]]]
+
+
+def test_activation_cache_logit_attrs_slices_position_scale_for_batchless_residual_override() -> None:
+    cache = ActivationCache({"ln_final.hook_scale": [[[2.0], [4.0]]]})
+
+    attrs = cache.logit_attrs(
+        [[[8.0, 16.0], [4.0, 12.0]]],
+        None,
+        directions=[1.0, 0.0],
+        pos_slice=1,
+        has_batch_dim=False,
+    )
+
+    assert attrs == [1.0]
+
+
+def test_activation_cache_canonicalizes_top_level_layernorm_scale_writes() -> None:
+    cache = ActivationCache()
+
+    cache["scale"] = [[[2]]]
+
+    assert cache.to_dict() == {"ln_final.hook_scale": [[[2]]]}
+    assert cache.apply_ln_to_stack([[[[8, 16]]]], layer=-1) == [[[[4.0, 8.0]]]]
+
+    cache[("hook_scale",)] = [[[4]]]
+
+    assert cache.to_dict() == {"ln_final.hook_scale": [[[4]]]}
+    assert cache.apply_ln_to_stack([[[[8, 16]]]], layer=-1) == [[[[2.0, 4.0]]]]
+
+
+def test_activation_cache_reads_top_level_layernorm_aliases() -> None:
+    cache = ActivationCache(
+        {
+            "ln_final.hook_scale": [[[2]]],
+            "ln_final.hook_normalized": [[[1, -1]]],
+        }
+    )
+
+    assert cache["scale"] == [[[2]]]
+    assert cache["hook_scale"] == [[[2]]]
+    assert cache[("scale",)] == [[[2]]]
+    assert cache[("hook_scale",)] == [[[2]]]
+    assert cache["normalized"] == [[[1, -1]]]
+    assert cache["hook_normalized"] == [[[1, -1]]]
+    assert cache[("hook_normalized",)] == [[[1, -1]]]
+    assert cache.keys_matching("hook_scale") == ["ln_final.hook_scale"]
+    assert cache.select("hook_normalized").to_dict() == {
+        "ln_final.hook_normalized": [[[1, -1]]]
+    }
 
 
 def test_activation_cache_apply_ln_prefers_layer_scales_for_intermediate_layers() -> None:
@@ -1673,6 +2859,35 @@ def test_activation_cache_full_decomposition_uses_mlp_input_layernorm_scale() ->
     assert stack == [[[[1.0, 2.0]]]]
 
 
+def test_activation_cache_head_remainder_subtracts_tuple_backed_components() -> None:
+    cache = ActivationCache(
+        {
+            "layer_0.result": ((((1.0, 2.0), (3.0, 4.0)),),),
+            "layer_0.resid_post": (((10.0, 20.0),),),
+        }
+    )
+
+    stack, labels = cache.stack_head_results(layer=1, incl_remainder=True, return_labels=True)
+
+    assert labels == ["L0H0", "L0H1", "remainder"]
+    assert stack == [[[[1.0, 2.0]]], [[[3.0, 4.0]]], [[[6.0, 14.0]]]]
+
+
+def test_activation_cache_neuron_results_project_tuple_backed_outputs() -> None:
+    class TupleNeuronModel:
+        W_out = (((10.0, 0.0), (0.0, 20.0)),)
+
+    cache = ActivationCache(
+        {"layer_0.mlp.post": (((2.0, 3.0),),)},
+        model=TupleNeuronModel(),
+    )
+
+    assert cache.get_neuron_results(0) == [[[[20.0, 0.0], [0.0, 60.0]]]]
+    stack, labels = cache.stack_neuron_results(layer=1, return_labels=True)
+    assert labels == ["L0N0", "L0N1"]
+    assert stack == [[[[20.0, 0.0]]], [[[0.0, 60.0]]]]
+
+
 def test_activation_cache_apply_ln_centers_layernorm_components_only() -> None:
     ln_cache = ActivationCache(
         {"ln_final.hook_scale": [[[2], [4]]]},
@@ -1691,6 +2906,34 @@ def test_activation_cache_apply_ln_centers_layernorm_components_only() -> None:
     ]
 
 
+def test_activation_cache_apply_ln_noops_for_explicit_non_layernorm_models() -> None:
+    cache = ActivationCache(
+        {"ln_final.hook_scale": [[[2]]]},
+        model=type("NoNormModel", (), {"normalization_type": "none"})(),
+    )
+
+    assert cache.apply_ln_to_stack([[[[8, 16]]]], layer=-1) == [[[[8, 16]]]]
+
+
+def test_activation_cache_apply_ln_requires_scale_for_explicit_layernorm_models() -> None:
+    cache = ActivationCache(model=LayerNormAttributionModel())
+
+    with pytest.raises(KeyError, match="Cached LN scale"):
+        cache.apply_ln_to_stack([[[[2.0, 6.0]]]], layer=-1)
+    with pytest.raises(KeyError, match="Cached LN scale"):
+        cache.logit_attrs([[[[2.0, 6.0]]]], " yes")
+
+
+def test_activation_cache_apply_ln_requires_requested_intermediate_scale() -> None:
+    cache = ActivationCache(
+        {"blocks.0.ln2.hook_scale": [[[10.0]]]},
+        model=LogitAttributionModel(),
+    )
+
+    with pytest.raises(KeyError, match="blocks\\.0\\.ln1\\.hook_scale"):
+        cache.apply_ln_to_stack([[[[8.0, 16.0]]]], layer=0, mlp_input=False)
+
+
 def test_activation_cache_logit_attrs_uses_centered_layernorm_for_ln_models() -> None:
     cache = ActivationCache(
         {"ln_final.hook_scale": [[[2]]]},
@@ -1698,6 +2941,171 @@ def test_activation_cache_logit_attrs_uses_centered_layernorm_for_ln_models() ->
     )
 
     assert cache.logit_attrs([[[[2, 6]]]], " yes") == [[[-1.0]]]
+
+
+def test_activation_cache_projects_residual_stack_to_logits() -> None:
+    cache = ActivationCache(
+        {"ln_final.hook_scale": [[[2], [4]]]},
+        model=LogitLensModel(),
+    )
+
+    logits = cache.residual_stack_to_logits(
+        [[[[8, 16], [4, 12]]]],
+        pos_slice=1,
+        use_unembed_bias=True,
+    )
+
+    assert logits == [[[1.5, 2.0, 14.0]]]
+
+
+def test_activation_cache_residual_stack_to_logits_uses_top_level_scale_alias() -> None:
+    cache = ActivationCache(model=LogitLensModel())
+    cache["scale"] = [[[2], [4]]]
+
+    logits = cache.residual_stack_to_logits(
+        [[[[8, 16], [4, 12]]]],
+        pos_slice=1,
+        use_unembed_bias=True,
+    )
+
+    assert logits == [[[1.5, 2.0, 14.0]]]
+
+
+def test_activation_cache_residual_stack_to_logits_slices_batch_then_position_axis() -> None:
+    cache = ActivationCache(
+        {"ln_final.hook_scale": [[[1], [1]], [[2], [2]]]},
+        model=LogitLensModel(),
+    )
+
+    logits = cache.residual_stack_to_logits(
+        [[[[1, 10], [2, 20]], [[3, 30], [4, 40]]]],
+        apply_ln=False,
+        batch_slice=1,
+        pos_slice=0,
+        use_unembed_bias=False,
+    )
+
+    assert logits == [[3.0, 30.0, 33.0]]
+
+
+def test_activation_cache_residual_stack_to_logits_slices_batch_then_position_after_ln() -> None:
+    cache = ActivationCache(
+        {"ln_final.hook_scale": [[[1], [1]], [[2], [2]]]},
+        model=LogitLensModel(),
+    )
+
+    logits = cache.residual_stack_to_logits(
+        [[[[1, 10], [2, 20]], [[3, 30], [4, 40]]]],
+        batch_slice=1,
+        pos_slice=0,
+        use_unembed_bias=False,
+    )
+
+    assert logits == [[1.5, 15.0, 16.5]]
+
+
+def test_activation_cache_residual_stack_to_logits_accepts_explicit_position_indices_after_ln() -> None:
+    cache = ActivationCache(
+        {"ln_final.hook_scale": [[[1.0], [2.0], [4.0]]]},
+        model=LogitLensModel(),
+    )
+
+    logits = cache.residual_stack_to_logits(
+        [[[[1.0, 10.0], [2.0, 20.0], [4.0, 40.0]]]],
+        pos_slice=[2, 0],
+        use_unembed_bias=False,
+    )
+
+    assert logits == [[[[1.0, 10.0, 11.0], [1.0, 10.0, 11.0]]]]
+
+
+def test_activation_cache_residual_stack_to_logits_preserves_unwrapped_integer_pos_dim_after_ln() -> None:
+    cache = ActivationCache(
+        {"ln_final.hook_scale": [[[1.0], [2.0], [4.0]]]},
+        model=LogitLensModel(),
+    )
+
+    logits = cache.residual_stack_to_logits(
+        [[[[1.0, 10.0], [2.0, 20.0], [4.0, 40.0]]]],
+        pos_slice=Slice.unwrap(2),
+        use_unembed_bias=False,
+    )
+
+    assert logits == [[[[1.0, 10.0, 11.0]]]]
+
+
+def test_activation_cache_accumulated_resid_to_logits_returns_labels() -> None:
+    cache = ActivationCache(
+        {
+            "ln_final.hook_scale": [[[2]]],
+            "layer_0.resid_pre": [[[2, 4]]],
+            "layer_0.resid_post": [[[6, 8]]],
+        },
+        model=LogitLensModel(),
+    )
+
+    logits, labels = cache.accumulated_resid_to_logits(return_labels=True)
+
+    assert labels == ["0_pre", "final_post"]
+    assert logits == [
+        [[[1.5, 1.0, 13.0]]],
+        [[[3.5, 3.0, 17.0]]],
+    ]
+
+
+def test_activation_cache_decompose_resid_to_logits_omits_bias_by_default() -> None:
+    cache = ActivationCache(
+        {
+            "ln_final.hook_scale": [[[2]]],
+            "hook_embed": [[[2, 4]]],
+            "layer_0.attn_out": [[[6, 8]]],
+        },
+        model=LogitLensModel(),
+    )
+
+    logits, labels = cache.decompose_resid_to_logits(return_labels=True)
+
+    assert labels == ["embed", "0_attn_out"]
+    assert logits == [
+        [[[1.0, 2.0, 3.0]]],
+        [[[3.0, 4.0, 7.0]]],
+    ]
+
+
+def test_activation_cache_decoder_residual_helpers_project_to_logits() -> None:
+    cache = ActivationCache(
+        {
+            "ln_final.hook_scale": [[[2.0], [4.0]]],
+            "decoder.0.hook_resid_pre": [[[2.0, 4.0], [8.0, 16.0]]],
+            "decoder.0.hook_resid_post": [[[6.0, 8.0], [16.0, 32.0]]],
+            "decoder.0.hook_attn_out": [[[10.0, 20.0], [20.0, 40.0]]],
+            "decoder.0.hook_cross_attn_out": [[[30.0, 60.0], [40.0, 80.0]]],
+            "decoder.0.hook_mlp_out": [[[50.0, 100.0], [60.0, 120.0]]],
+        },
+        model=LogitLensModel(),
+    )
+
+    accum_logits, accum_labels = cache.accumulated_resid_to_logits(
+        pos_slice=1,
+        return_labels=True,
+        use_unembed_bias=False,
+        stack="decoder",
+    )
+    decomp_logits, decomp_labels = cache.decompose_resid_to_logits(
+        pos_slice=1,
+        incl_embeds=False,
+        return_labels=True,
+        stack="decoder",
+    )
+
+    assert accum_labels == ["0_pre", "final_post"]
+    assert accum_logits == [[[2.0, 4.0, 6.0]], [[4.0, 8.0, 12.0]]]
+    assert decomp_labels == ["0_attn_out", "0_cross_attn_out", "0_mlp_out"]
+    assert decomp_logits == [
+        [[5.0, 10.0, 15.0]],
+        [[10.0, 20.0, 30.0]],
+        [[15.0, 30.0, 45.0]],
+    ]
 
 
 def test_activation_cache_apply_ln_and_value_transforms() -> None:
@@ -1913,6 +3321,18 @@ def test_run_activation_patch_accepts_direct_token_inputs_with_wrapper_hooks() -
     assert model.hooks == []
 
 
+def test_patch_hook_accepts_transformerlens_two_argument_call() -> None:
+    hook_context = type("TransformerLensHookContext", (), {"name": "blocks.0.hook_resid_pre"})()
+    hook = make_patch_hook(
+        PatchSpec(layer="blocks.0.hook_resid_pre", target_index=1),
+        ActivationCache({"blocks.0.hook_resid_pre": [10, 20, 30]}),
+    )
+
+    patched = hook([0, 0, 0], hook_context)
+
+    assert patched == [0, 20, 0]
+
+
 def test_generic_activation_patch_runs_patch_grid() -> None:
     model = ToyWrapper([0, 0, 0])
     clean_cache = ActivationCache({"layer_0": [10, 20, 30]})
@@ -1946,6 +3366,23 @@ def test_generic_activation_patch_accepts_single_patch_spec() -> None:
     assert results[0].metric == 20.0
 
 
+def test_generic_activation_patch_accepts_numpy_size_one_metric_outputs() -> None:
+    np = pytest.importorskip("numpy")
+    model = ToyWrapper([0, 0, 0])
+    clean_cache = ActivationCache({"layer_0": [10, 20, 30]})
+    spec = PatchSpec(layer=0, target_index=1)
+
+    results = generic_activation_patch(
+        model,
+        {"activation": [0, 0, 0]},
+        clean_cache,
+        spec,
+        metric=lambda output: np.array([sum(output["activation"])]),
+    )
+
+    assert results[0].metric == 20.0
+
+
 def test_patch_results_format_as_transformerlens_metric_grid_and_index_table() -> None:
     model = ToyWrapper([0, 0, 0])
     clean_cache = ActivationCache({"layer_0": [10, 20, 30]})
@@ -1963,15 +3400,43 @@ def test_patch_results_format_as_transformerlens_metric_grid_and_index_table() -
         {"layer": 0, "pos": 0},
         {"layer": 0, "pos": 2},
     ]
-    assert format_patch_results(
+    metric_output, index_df = format_patch_results(
         results,
         ("layer", "pos"),
         return_details=False,
         return_index_df=True,
-    ) == (
-        [[10.0, 30.0]],
-        [{"layer": 0, "pos": 0}, {"layer": 0, "pos": 2}],
     )
+    assert metric_output == [[10.0, 30.0]]
+    assert _index_records(index_df) == [{"layer": 0, "pos": 0}, {"layer": 0, "pos": 2}]
+
+
+def test_return_index_df_uses_pandas_dataframe_when_available() -> None:
+    pd = pytest.importorskip("pandas")
+    results = [
+        PatchResult(PatchSpec(layer=0, target_index=(0, 0)), 1.0, {}, {}),
+        PatchResult(PatchSpec(layer=0, target_index=(0, 1)), 2.0, {}, {}),
+    ]
+
+    index_df = patch_results_to_index_df(results, ("layer", "pos"))
+
+    assert isinstance(index_df, pd.DataFrame)
+    assert list(index_df.columns) == ["layer", "pos"]
+    assert _index_records(index_df) == [{"layer": 0, "pos": 0}, {"layer": 0, "pos": 1}]
+
+
+def test_metric_output_helpers_accept_tuple_backed_metrics() -> None:
+    from SafeLens.core.patching import (
+        _move_axis,
+        _pad_metric_last_dim,
+        _stack_named_metric_outputs,
+    )
+
+    assert _stack_named_metric_outputs([("q", ((1, 2),)), ("k", ((3, 4),))]) == [
+        [[1, 2]],
+        [[3, 4]],
+    ]
+    assert _pad_metric_last_dim(((1, 2),), 4) == [[1, 2, 0.0, 0.0]]
+    assert _move_axis(((1, 2), (3, 4)), 0, 1) == [[1, 3], [2, 4]]
 
 
 def test_generic_activation_patch_accepts_transformerlens_style_call() -> None:
@@ -2002,7 +3467,38 @@ def test_generic_activation_patch_accepts_transformerlens_style_call() -> None:
     )
 
     assert grid == [[1.0, 2.0]]
-    assert index_table == [{"layer": 0, "pos": 0}, {"layer": 0, "pos": 1}]
+    assert _index_records(index_table) == [{"layer": 0, "pos": 0}, {"layer": 0, "pos": 1}]
+
+
+def test_generic_activation_patch_accepts_transformerlens_positional_signature() -> None:
+    model = ComponentWrapper([[[0], [0]]])
+    model.n_layers = 1
+    clean_cache = ActivationCache({"blocks.0.hook_resid_pre": [[[1], [2]]]})
+
+    def tl_layer_pos_setter(
+        corrupted_activation: Any,
+        index: Sequence[int],
+        clean_activation: Any,
+    ) -> Any:
+        patched = deepcopy(corrupted_activation)
+        _layer, pos = index
+        patched[0][pos] = clean_activation[0][pos]
+        return patched
+
+    grid, index_table = generic_activation_patch(
+        model,
+        {"activation": [[[0], [0]]]},
+        clean_cache,
+        lambda output: _nested_sum(output["activation"]),
+        tl_layer_pos_setter,
+        "resid_pre",
+        ("layer", "pos"),
+        None,
+        True,
+    )
+
+    assert grid == [[1.0, 2.0]]
+    assert _index_records(index_table) == [{"layer": 0, "pos": 0}, {"layer": 0, "pos": 1}]
 
 
 def test_generic_activation_patch_transformerlens_call_defaults_to_metric_grid() -> None:
@@ -2027,6 +3523,38 @@ def test_generic_activation_patch_transformerlens_call_defaults_to_metric_grid()
     )
 
     assert grid == [[1.0, 2.0]]
+
+
+def test_generic_activation_patch_clones_gradient_tracked_activation_for_tl_setters() -> None:
+    torch = pytest.importorskip("torch")
+    corrupted = torch.zeros(1, 2, 1, requires_grad=True)
+    model = ComponentWrapper(corrupted)
+    model.n_layers = 1
+    clean_cache = ActivationCache(
+        {"blocks.0.hook_resid_pre": torch.tensor([[[1.0], [2.0]]])}
+    )
+
+    def tl_inplace_setter(
+        corrupted_activation: Any,
+        index: Sequence[int],
+        clean_activation: Any,
+    ) -> Any:
+        _layer, pos = index
+        corrupted_activation[:, pos, :] = clean_activation[:, pos, :]
+        return corrupted_activation
+
+    grid = generic_activation_patch(
+        model,
+        {"activation": corrupted},
+        clean_cache,
+        patching_metric=lambda output: output["activation"].detach().sum(),
+        patch_setter=tl_inplace_setter,
+        activation_name="resid_pre",
+        index_axis_names=("layer", "pos"),
+    )
+
+    assert torch.equal(torch.as_tensor(grid), torch.tensor([[1.0, 2.0]]))
+    assert torch.equal(corrupted, torch.zeros_like(corrupted))
 
 
 def test_generic_activation_patch_propagates_internal_type_errors_from_tl_setter() -> None:
@@ -2061,7 +3589,7 @@ def test_generic_activation_patch_propagates_type_errors_from_ambiguous_setter()
 
     def ambiguous_setter(corrupted_activation: Any, second: Any, third: Any) -> Any:
         _ = third
-        if isinstance(second, tuple):
+        if isinstance(second, list):
             raise TypeError("ambiguous setter inner bug")
         return corrupted_activation
 
@@ -2100,7 +3628,118 @@ def test_generic_activation_patch_transformerlens_call_infers_layers_from_safele
     )
 
     assert grid == [[1.0, 2.0]]
-    assert index_table == [{"layer": 0, "pos": 0}, {"layer": 0, "pos": 1}]
+    assert _index_records(index_table) == [{"layer": 0, "pos": 0}, {"layer": 0, "pos": 1}]
+
+
+def test_generic_activation_patch_infers_layers_from_encoder_decoder_cache_names() -> None:
+    model = ComponentMapWrapper({"encoder.0.hook_q_input": [[[0], [0]]]})
+    clean_cache = ActivationCache(
+        {
+            "encoder.0.hook_q_input": [[[3], [4]]],
+            "decoder.0.attn.hook_q": [[[[5]]]],
+            "decoder.0.cross_attn.hook_q": [[[[6]]]],
+        }
+    )
+
+    def tl_layer_pos_setter(
+        corrupted_activation: Any,
+        index: Sequence[int],
+        clean_activation: Any,
+    ) -> Any:
+        patched = deepcopy(corrupted_activation)
+        _layer, pos = index
+        patched[0][pos] = clean_activation[0][pos]
+        return patched
+
+    grid, index_table = generic_activation_patch(
+        model,
+        {},
+        clean_cache,
+        patching_metric=lambda output: _nested_sum(output["activation"]),
+        patch_setter=tl_layer_pos_setter,
+        activation_name="encoder.0.hook_q_input",
+        index_axis_names=("layer", "pos"),
+        return_details=False,
+        return_index_df=True,
+    )
+
+    assert infer_layers(
+        model,
+        clean_cache,
+        "q_input",
+        name_style="transformer_lens",
+    ) == [0]
+    assert infer_layers(
+        model,
+        clean_cache,
+        "decoder_q",
+        name_style="transformer_lens",
+    ) == [0]
+    assert infer_layers(
+        model,
+        clean_cache,
+        "cross_q",
+        name_style="transformer_lens",
+    ) == [0]
+    assert grid == [[3.0, 4.0]]
+    assert _index_records(index_table) == [{"layer": 0, "pos": 0}, {"layer": 0, "pos": 1}]
+
+
+def test_generic_activation_patch_infers_decoder_layers_from_model_config() -> None:
+    class _Config:
+        n_layers = 1
+        num_decoder_layers = 2
+
+    class _Seq2SeqModel(ComponentMapWrapper):
+        cfg = _Config()
+
+    model = _Seq2SeqModel(
+        {
+            "decoder.0.cross_attn.hook_q": [[[[0]], [[0]]]],
+            "decoder.1.cross_attn.hook_q": [[[[0]], [[0]]]],
+        }
+    )
+    clean_cache = ActivationCache()
+
+    assert infer_layers(model, clean_cache, "resid_pre") == [0]
+    assert infer_layers(model, clean_cache, "decoder_q") == [0, 1]
+    assert infer_layers(model, clean_cache, "cross_q") == [0, 1]
+
+    grid, index_table = generic_activation_patch(
+        model,
+        {},
+        ActivationCache(
+            {
+                "decoder.0.cross_attn.hook_q": [[[[1]], [[2]]]],
+                "decoder.1.cross_attn.hook_q": [[[[3]], [[4]]]],
+            }
+        ),
+        patching_metric=lambda output: _nested_sum(output["activation"]),
+        patch_setter=layer_pos_head_vector_patch_setter,
+        activation_name="cross_q",
+        index_axis_names=("layer", "pos", "head"),
+        return_details=False,
+        return_index_df=True,
+    )
+
+    assert grid == [[[1.0], [2.0]], [[3.0], [4.0]]]
+    assert _index_records(index_table) == [
+        {"layer": 0, "pos": 0, "head": 0},
+        {"layer": 0, "pos": 1, "head": 0},
+        {"layer": 1, "pos": 0, "head": 0},
+        {"layer": 1, "pos": 1, "head": 0},
+    ]
+
+
+def test_infer_layers_reads_nested_decoder_config_for_decoder_components() -> None:
+    class _NestedConfigModel:
+        config = {"num_layers": 1, "decoder": {"num_decoder_layers": 3}}
+
+    model = _NestedConfigModel()
+
+    assert infer_layers(model, ActivationCache(), "resid_pre") == [0]
+    assert infer_layers(model, ActivationCache(), "decoder_resid_pre") == [0, 1, 2]
+    assert infer_layers(model, ActivationCache(), "cross_q") == [0, 1, 2]
 
 
 def test_generic_activation_patch_accepts_full_transformerlens_activation_name() -> None:
@@ -2126,7 +3765,7 @@ def test_generic_activation_patch_accepts_full_transformerlens_activation_name()
     )
 
     assert grid == [[1.0, 2.0]]
-    assert index_table == [{"layer": 0, "pos": 0}, {"layer": 0, "pos": 1}]
+    assert _index_records(index_table) == [{"layer": 0, "pos": 0}, {"layer": 0, "pos": 1}]
 
 
 def test_generic_activation_patch_accepts_full_safelens_activation_name() -> None:
@@ -2152,7 +3791,7 @@ def test_generic_activation_patch_accepts_full_safelens_activation_name() -> Non
     )
 
     assert grid == [[1.0, 2.0]]
-    assert index_table == [{"layer": 0, "pos": 0}, {"layer": 0, "pos": 1}]
+    assert _index_records(index_table) == [{"layer": 0, "pos": 0}, {"layer": 0, "pos": 1}]
 
 
 def test_generic_activation_patch_accepts_transformerlens_positional_call() -> None:
@@ -2180,7 +3819,7 @@ def test_generic_activation_patch_accepts_transformerlens_positional_call() -> N
     )
 
     assert grid == [[1.0, 2.0]]
-    assert index_table == [{"layer": 0, "pos": 0}, {"layer": 0, "pos": 1}]
+    assert _index_records(index_table) == [{"layer": 0, "pos": 0}, {"layer": 0, "pos": 1}]
 
 
 def test_generic_activation_patch_accepts_explicit_transformerlens_index_table() -> None:
@@ -2210,7 +3849,37 @@ def test_generic_activation_patch_accepts_explicit_transformerlens_index_table()
     )
 
     assert metrics == [30.0, 10.0]
-    assert index_table == [{"layer": 0, "pos": 2}, {"layer": 0, "pos": 0}]
+    assert _index_records(index_table) == [{"layer": 0, "pos": 2}, {"layer": 0, "pos": 0}]
+
+
+def test_component_patch_helper_accepts_transformerlens_partial_style_overrides() -> None:
+    model = ComponentWrapper([[[0], [0], [0]]])
+    clean_cache = ActivationCache({"blocks.0.hook_resid_pre": [[[10], [20], [30]]]})
+
+    def tl_layer_pos_setter(
+        corrupted_activation: Any,
+        index: Sequence[int],
+        clean_activation: Any,
+    ) -> Any:
+        patched = deepcopy(corrupted_activation)
+        _layer, pos = index
+        patched[0][pos] = clean_activation[0][pos]
+        return patched
+
+    metrics, index_table = get_act_patch_resid_pre(
+        model,
+        {"activation": [[[0], [0], [0]]]},
+        clean_cache,
+        patching_metric=lambda output: _nested_sum(output["activation"]),
+        patch_setter=tl_layer_pos_setter,
+        activation_name="resid_pre",
+        index_axis_names=("layer", "pos"),
+        index_df=[{"layer": 0, "pos": 2}, {"layer": 0, "pos": 0}],
+        return_index_df=True,
+    )
+
+    assert metrics == [30.0, 10.0]
+    assert _index_records(index_table) == [{"layer": 0, "pos": 2}, {"layer": 0, "pos": 0}]
 
 
 def test_generic_activation_patch_requires_layer_first_in_explicit_transformerlens_index_table() -> None:
@@ -2274,6 +3943,22 @@ def test_make_df_from_ranges_matches_transformerlens_index_table_shape() -> None
     ]
 
 
+def test_make_transformer_lens_patch_specs_accepts_dataframe_index_tables() -> None:
+    from SafeLens.core.patching import make_transformer_lens_patch_specs
+
+    specs = make_transformer_lens_patch_specs(
+        "resid_pre",
+        make_df_from_ranges((1, 2), ("layer", "pos")),
+        patch_setter=layer_pos_patch_setter,
+    )
+
+    assert [spec.layer for spec in specs] == [
+        "blocks.0.hook_resid_pre",
+        "blocks.0.hook_resid_pre",
+    ]
+    assert [spec.target_index for spec in specs] == [(0, 0), (0, 1)]
+
+
 def test_generic_activation_patch_accepts_make_df_from_ranges_output() -> None:
     model = ComponentWrapper([[[0], [0]]])
     clean_cache = ActivationCache({"blocks.0.hook_resid_pre": [[[3], [4]]]})
@@ -2300,7 +3985,7 @@ def test_generic_activation_patch_accepts_make_df_from_ranges_output() -> None:
     )
 
     assert metrics == [3.0, 4.0]
-    assert index_table == [{"layer": 0, "pos": 0}, {"layer": 0, "pos": 1}]
+    assert _index_records(index_table) == [{"layer": 0, "pos": 0}, {"layer": 0, "pos": 1}]
 
 
 def test_component_activation_patch_infers_index_shape_from_requested_layers() -> None:
@@ -2454,7 +4139,7 @@ def test_transformerlens_patch_setter_adapter_preserves_original_unknown_style_e
     class UnknownStyleSetter:
         def __call__(self, activation: Any, second: Any, third: Any) -> Any:
             _ = activation, third
-            if isinstance(second, tuple):
+            if isinstance(second, list):
                 raise TypeError("tl-style failure")
             raise TypeError("safelens-style failure")
 
@@ -2470,12 +4155,186 @@ def test_transformerlens_patch_setter_adapter_preserves_original_unknown_style_e
         )
 
 
+def test_transformerlens_patch_setter_adapter_passes_list_indices() -> None:
+    model = ComponentWrapper([[[0], [0]]])
+    clean_cache = ActivationCache({"blocks.0.hook_resid_pre": [[[1], [2]]]})
+    seen_indices: list[Any] = []
+
+    def tl_layer_pos_setter(
+        corrupted_activation: Any,
+        index: Sequence[int],
+        clean_activation: Any,
+    ) -> Any:
+        seen_indices.append(index)
+        assert isinstance(index, list)
+        patched = deepcopy(corrupted_activation)
+        _layer, pos = index
+        patched[0][pos] = clean_activation[0][pos]
+        return patched
+
+    grid = generic_activation_patch(
+        model,
+        {"activation": [[[0], [0]]]},
+        clean_cache,
+        patching_metric=lambda output: _nested_sum(output["activation"]),
+        patch_setter=tl_layer_pos_setter,
+        activation_name="resid_pre",
+        index_axis_names=("layer", "pos"),
+    )
+
+    assert grid == [[1.0, 2.0]]
+    assert seen_indices == [[0, 0], [0, 1]]
+
+
 def test_component_activation_names_support_transformerlens_style() -> None:
     assert activation_name_for_component("resid_pre", 0) == "layer_0.resid_pre"
     assert (
         activation_name_for_component("q", 1, name_style="transformer_lens")
         == "blocks.1.attn.hook_q"
     )
+    assert (
+        activation_name_for_component("post", 2, name_style="transformer_lens")
+        == "blocks.2.mlp.hook_post"
+    )
+    assert (
+        activation_name_for_component("pre_linear", 3, name_style="transformer_lens")
+        == "blocks.3.mlp.hook_pre_linear"
+    )
+    assert (
+        activation_name_for_component("decoder_q", 0, name_style="transformer_lens")
+        == "decoder.0.attn.hook_q"
+    )
+    assert (
+        activation_name_for_component("decoder_attn_in", 0, name_style="transformer_lens")
+        == "decoder.0.hook_attn_in"
+    )
+    assert (
+        activation_name_for_component("cross_q", 0, name_style="transformer_lens")
+        == "decoder.0.cross_attn.hook_q"
+    )
+    assert (
+        activation_name_for_component("cross_pattern", 0, name_style="transformer_lens")
+        == "decoder.0.cross_attn.hook_pattern"
+    )
+
+
+def test_component_activation_names_accept_explicit_layer_refs() -> None:
+    assert activation_name_for_component("resid_pre", ("resid_pre", 0)) == "layer_0.resid_pre"
+    assert (
+        activation_name_for_component("resid_pre", "blocks.0.hook_resid_pre")
+        == "blocks.0.hook_resid_pre"
+    )
+    assert activation_name_for_component("post", ("post", 2, "mlp")) == "layer_2.post"
+
+    with pytest.raises(ValueError, match="targets component"):
+        activation_name_for_component("resid_pre", ("z", 0))
+
+
+def test_generic_activation_patch_accepts_transformerlens_mlp_internal_names() -> None:
+    model = ComponentWrapper([[[0], [0]]])
+    model.n_layers = 1
+    clean_cache = ActivationCache({"blocks.0.mlp.hook_post": [[[3], [4]]]})
+
+    def tl_layer_pos_setter(
+        corrupted_activation: Any,
+        index: Sequence[int],
+        clean_activation: Any,
+    ) -> Any:
+        patched = deepcopy(corrupted_activation)
+        _layer, pos = index
+        patched[0][pos] = clean_activation[0][pos]
+        return patched
+
+    grid, index_table = generic_activation_patch(
+        model,
+        {"activation": [[[0], [0]]]},
+        clean_cache,
+        patching_metric=lambda output: _nested_sum(output["activation"]),
+        patch_setter=tl_layer_pos_setter,
+        activation_name="post",
+        index_axis_names=("layer", "pos"),
+        return_details=False,
+        return_index_df=True,
+    )
+
+    assert grid == [[3.0, 4.0]]
+    assert _index_records(index_table) == [{"layer": 0, "pos": 0}, {"layer": 0, "pos": 1}]
+
+
+def test_generic_activation_patch_targets_cross_attention_transformerlens_name() -> None:
+    model = ComponentMapWrapper({"decoder.0.cross_attn.hook_q": [[[[0], [0]], [[0], [0]]]]})
+    clean_cache = ActivationCache(
+        {"decoder.0.cross_attn.hook_q": [[[[1], [2]], [[3], [4]]]]}
+    )
+
+    grid, index_table = generic_activation_patch(
+        model,
+        {},
+        clean_cache,
+        patching_metric=lambda output: _nested_sum(output["activation"]),
+        patch_setter=layer_pos_head_vector_patch_setter,
+        activation_name="cross_q",
+        index_axis_names=("layer", "pos", "head"),
+        return_details=False,
+        return_index_df=True,
+    )
+
+    assert grid == [[[1.0, 2.0], [3.0, 4.0]]]
+    assert _index_records(index_table) == [
+        {"layer": 0, "pos": 0, "head": 0},
+        {"layer": 0, "pos": 0, "head": 1},
+        {"layer": 0, "pos": 1, "head": 0},
+        {"layer": 0, "pos": 1, "head": 1},
+    ]
+
+
+def test_generic_activation_patch_prefers_clean_cache_layers_over_model_config() -> None:
+    model = ComponentWrapper([[[0], [0]]])
+    model.n_layers = 2
+    clean_cache = ActivationCache({"blocks.0.hook_resid_pre": [[[1], [2]]]})
+
+    def tl_layer_pos_setter(
+        corrupted_activation: Any,
+        index: Sequence[int],
+        clean_activation: Any,
+    ) -> Any:
+        patched = deepcopy(corrupted_activation)
+        _layer, pos = index
+        patched[0][pos] = clean_activation[0][pos]
+        return patched
+
+    grid, index_table = generic_activation_patch(
+        model,
+        {"activation": [[[0], [0]]]},
+        clean_cache,
+        patching_metric=lambda output: _nested_sum(output["activation"]),
+        patch_setter=tl_layer_pos_setter,
+        activation_name="resid_pre",
+        index_axis_names=("layer", "pos"),
+        return_details=False,
+        return_index_df=True,
+    )
+
+    assert grid == [[1.0, 2.0]]
+    assert _index_records(index_table) == [{"layer": 0, "pos": 0}, {"layer": 0, "pos": 1}]
+
+
+def test_component_patch_helpers_accept_explicit_layer_refs() -> None:
+    model = ComponentWrapper([[[0], [0]]])
+    clean_cache = ActivationCache({"blocks.0.hook_resid_pre": [[[1], [2]]]})
+
+    results = get_act_patch_resid_pre(
+        model,
+        {"activation": [[[0], [0]]]},
+        clean_cache,
+        metric=lambda output: _nested_sum(output["activation"]),
+        layers=[("resid_pre", 0)],
+        return_details=True,
+    )
+
+    assert [result.spec.target_index for result in results] == [(0, 0), (0, 1)]
+    assert [result.spec.layer for result in results] == ["layer_0.resid_pre", "layer_0.resid_pre"]
+    assert [result.metric for result in results] == [1.0, 2.0]
 
 
 def test_residual_stream_patch_runs_by_position() -> None:
@@ -2511,6 +4370,37 @@ def test_residual_stream_patch_defaults_to_transformerlens_metric_grid() -> None
     )
 
     assert grid == [[1.0, 2.0]]
+
+
+def test_patch_helpers_accept_transformerlens_patching_metric_keyword() -> None:
+    model = ComponentWrapper([[[0], [0]]])
+    clean_cache = ActivationCache({"layer_0.resid_pre": [[[1], [2]]]})
+
+    grid = get_act_patch_resid_pre(
+        model,
+        {"activation": [[[0], [0]]]},
+        clean_cache,
+        patching_metric=lambda output: _nested_sum(output["activation"]),
+        layers=[0],
+        positions=[0, 1],
+    )
+
+    assert grid == [[1.0, 2.0]]
+
+
+def test_patch_helpers_reject_duplicate_metric_names() -> None:
+    model = ComponentWrapper([[[0]]])
+    clean_cache = ActivationCache({"layer_0.resid_pre": [[[1]]]})
+
+    with pytest.raises(TypeError, match="metric.*patching_metric"):
+        get_act_patch_resid_pre(
+            model,
+            {"activation": [[[0]]]},
+            clean_cache,
+            metric=lambda output: _nested_sum(output["activation"]),
+            patching_metric=lambda output: _nested_sum(output["activation"]),
+            layers=[0],
+        )
 
 
 def test_residual_stream_patch_infers_positions_from_cache_without_batch_dim() -> None:
@@ -2565,7 +4455,7 @@ def test_residual_stream_patch_can_return_metric_grid_and_index_table() -> None:
     )
 
     assert grid == [[1.0, 2.0]]
-    assert index_table == [{"layer": 0, "pos": 0}, {"layer": 0, "pos": 1}]
+    assert _index_records(index_table) == [{"layer": 0, "pos": 0}, {"layer": 0, "pos": 1}]
 
 
 def test_attention_head_vector_patch_runs_by_position() -> None:
@@ -2683,6 +4573,20 @@ def test_attention_head_vector_patch_runs_all_positions() -> None:
     assert patched == [[[[0], [20]], [[0], [40]]]]
 
 
+def test_attention_head_vector_patch_infers_no_batch_explicit_patch_values() -> None:
+    spec = PatchSpec(
+        layer="layer_0.z",
+        activation_name="layer_0.z",
+        target_index=(0, 1),
+        value=[[[10], [20]], [[30], [40]]],
+        setter=layer_head_vector_patch_setter,
+    )
+
+    patched = apply_patch([[[[0], [0]], [[0], [0]]]], spec, ActivationCache({}))
+
+    assert patched == [[[[0], [20]], [[0], [40]]]]
+
+
 def test_torch_patch_setter_accepts_list_clean_cache_values() -> None:
     torch = pytest.importorskip("torch")
     corrupted = torch.zeros(1, 2, 2, dtype=torch.float32)
@@ -2737,6 +4641,107 @@ def test_list_patch_setter_accepts_torch_clean_cache_values() -> None:
     assert patched == [[[0.0, 0.0], [3.0, 4.0]]]
 
 
+def test_patch_setter_infers_no_batch_explicit_patch_values_for_batched_targets() -> None:
+    spec = PatchSpec(
+        layer="layer_0.resid_pre",
+        activation_name="layer_0.resid_pre",
+        target_index=(0, 1),
+        value=[[1.0, 2.0], [3.0, 4.0]],
+        setter=layer_pos_patch_setter,
+    )
+
+    patched = apply_patch([[[0.0, 0.0], [0.0, 0.0]]], spec, ActivationCache({}))
+
+    assert patched == [[[0.0, 0.0], [3.0, 4.0]]]
+
+
+def test_patch_setter_respects_no_batch_cache_metadata_for_same_rank_explicit_values() -> None:
+    spec = PatchSpec(
+        layer="layer_0.resid_pre",
+        activation_name="layer_0.resid_pre",
+        target_index=(0, 1),
+        value=[[1.0, 2.0], [3.0, 4.0]],
+        setter=layer_pos_patch_setter,
+    )
+
+    patched = apply_patch(
+        [[0.0, 0.0], [0.0, 0.0]],
+        spec,
+        ActivationCache({}, has_batch_dim=False),
+    )
+
+    assert patched == [[0.0, 0.0], [3.0, 4.0]]
+
+
+def test_patch_setter_squeezes_singleton_batch_clean_values_for_no_batch_targets() -> None:
+    clean_cache = ActivationCache({"layer_0.resid_pre": [[[1.0, 2.0], [3.0, 4.0]]]})
+    spec = PatchSpec(
+        layer="layer_0.resid_pre",
+        activation_name="layer_0.resid_pre",
+        target_index=(0, 1),
+        setter=layer_pos_patch_setter,
+    )
+
+    patched = apply_patch([[0.0, 0.0], [0.0, 0.0]], spec, clean_cache)
+
+    assert patched == [[0.0, 0.0], [3.0, 4.0]]
+
+
+def test_patch_setter_accepts_tuple_clean_cache_values_without_tuple_leakage() -> None:
+    clean_cache = ActivationCache({"layer_0.resid_pre": (((1.0, 2.0), (3.0, 4.0)),)})
+    spec = PatchSpec(
+        layer="layer_0.resid_pre",
+        activation_name="layer_0.resid_pre",
+        target_index=(0, 1),
+        setter=layer_pos_patch_setter,
+    )
+
+    patched = apply_patch([[[0.0, 0.0], [0.0, 0.0]]], spec, clean_cache)
+
+    assert patched == [[[0.0, 0.0], [3.0, 4.0]]]
+    assert isinstance(patched[0][1], list)
+
+
+def test_tuple_backed_add_patch_setter_adds_elementwise() -> None:
+    clean_cache = ActivationCache({"layer_0.resid_pre": (((1.0, 2.0), (3.0, 4.0)),)})
+    spec = PatchSpec(
+        layer="layer_0.resid_pre",
+        activation_name="layer_0.resid_pre",
+        target_index=(0, 1),
+        mode="add",
+        scale=0.5,
+        setter=layer_pos_patch_setter,
+    )
+
+    patched = apply_patch([[[1.0, 1.0], [1.0, 1.0]]], spec, clean_cache)
+
+    assert patched == [[[1.0, 1.0], [2.5, 3.0]]]
+
+
+def test_patch_setter_converts_tuple_corrupted_activation_to_mutable_output() -> None:
+    clean_cache = ActivationCache({"layer_0.resid_pre": (((1.0, 2.0), (3.0, 4.0)),)})
+    spec = PatchSpec(
+        layer="layer_0.resid_pre",
+        activation_name="layer_0.resid_pre",
+        target_index=(0, 1),
+        setter=layer_pos_patch_setter,
+    )
+
+    patched = apply_patch((((0.0, 0.0), (0.0, 0.0)),), spec, clean_cache)
+
+    assert patched == [[[0.0, 0.0], [3.0, 4.0]]]
+
+
+def test_exported_patch_setter_direct_call_accepts_tuple_backed_inputs() -> None:
+    patched = layer_pos_patch_setter(
+        (((0.0, 0.0), (0.0, 0.0)),),
+        (0, 1),
+        (((1.0, 2.0), (3.0, 4.0)),),
+    )
+
+    assert patched == [[[0.0, 0.0], [3.0, 4.0]]]
+
+
 def test_exported_patch_setters_accept_transformerlens_call_shape() -> None:
     residual_clean = [[[10], [20]]]
     head_clean = [[[[1], [2]], [[3], [4]]]]
@@ -2768,6 +4773,57 @@ def test_exported_patch_setters_accept_transformerlens_call_shape() -> None:
         (0, 1, 0, 1),
         pattern_clean,
     ) == [[[[0, 0], [0, 0]], [[0, 6], [0, 0]]]]
+
+
+def test_exported_patch_setters_accept_transformerlens_no_batch_clean_activation() -> None:
+    residual_clean = [[10], [20]]
+    head_clean = [[[1], [2]], [[3], [4]]]
+    pattern_clean = [[[1, 2, 3], [4, 5, 6]]]
+
+    assert layer_pos_patch_setter([[[0], [0]]], (0, 1), residual_clean) == [[[0], [20]]]
+    assert layer_head_vector_patch_setter(
+        [[[[0], [0]], [[0], [0]]]],
+        (0, 1),
+        head_clean,
+    ) == [[[[0], [2]], [[0], [4]]]]
+    assert layer_head_dest_src_pos_pattern_patch_setter(
+        [[[[0, 0, 0], [0, 0, 0]]]],
+        (0, 0, 1, 2),
+        pattern_clean,
+    ) == [[[[0, 0, 0], [0, 0, 6]]]]
+
+
+def test_exported_patch_setters_accept_transformerlens_no_batch_direct_call() -> None:
+    assert layer_pos_patch_setter([[0], [0]], (0, 1), [[10], [20]]) == [[0], [20]]
+    assert layer_pos_head_vector_patch_setter(
+        [[[0], [0]], [[0], [0]]],
+        (0, 1, 0),
+        [[[1], [2]], [[3], [4]]],
+    ) == [[[0], [0]], [[3], [0]]]
+    assert layer_head_vector_patch_setter(
+        [[[0], [0]], [[0], [0]]],
+        (0, 1),
+        [[[1], [2]], [[3], [4]]],
+    ) == [[[0], [2]], [[0], [4]]]
+    assert layer_head_pattern_patch_setter(
+        [[[0, 0], [0, 0]], [[0, 0], [0, 0]]],
+        (0, 1),
+        [[[1, 2], [3, 4]], [[5, 6], [7, 8]]],
+    ) == [[[0, 0], [0, 0]], [[5, 6], [7, 8]]]
+    assert layer_head_pos_pattern_patch_setter(
+        [[[0, 0], [0, 0]], [[0, 0], [0, 0]]],
+        (0, 1, 0),
+        [[[1, 2], [3, 4]], [[5, 6], [7, 8]]],
+    ) == [[[0, 0], [0, 0]], [[5, 6], [0, 0]]]
+    assert layer_head_dest_src_pos_pattern_patch_setter(
+        [[[0, 0], [0, 0]], [[0, 0], [0, 0]]],
+        (0, 1, 0, 1),
+        [[[1, 2], [3, 4]], [[5, 6], [7, 8]]],
+    ) == [[[0, 0], [0, 0]], [[0, 6], [0, 0]]]
+
+
+def test_exported_patch_setters_squeeze_singleton_batch_clean_for_no_batch_targets() -> None:
+    assert layer_pos_patch_setter([[0], [0]], (0, 1), [[[10], [20]]]) == [[0], [20]]
 
 
 def test_attention_pattern_patch_runs_by_dest_and_source_position() -> None:
@@ -2874,8 +4930,40 @@ def test_attention_pattern_patch_can_return_transformerlens_metric_grid() -> Non
     )
 
     assert grid == [[[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]]]
-    assert index_table[0] == {"layer": 0, "head_index": 0, "dest_pos": 0, "src_pos": 0}
-    assert index_table[-1] == {"layer": 0, "head_index": 0, "dest_pos": 1, "src_pos": 2}
+    index_records = _index_records(index_table)
+    assert index_records[0] == {"layer": 0, "head_index": 0, "dest_pos": 0, "src_pos": 0}
+    assert index_records[-1] == {"layer": 0, "head_index": 0, "dest_pos": 1, "src_pos": 2}
+
+
+def test_cross_attention_pattern_patch_infers_head_dest_and_source_axes() -> None:
+    model = ComponentMapWrapper(
+        {"decoder.0.cross_attn.hook_pattern": [[[[0, 0, 0], [0, 0, 0]]]]}
+    )
+    clean_cache = ActivationCache(
+        {"decoder.0.cross_attn.hook_pattern": [[[[1, 2, 3], [4, 5, 6]]]]}
+    )
+
+    grid, index_table = generic_activation_patch(
+        model,
+        {},
+        clean_cache,
+        patching_metric=lambda output: _nested_sum(output["activation"]),
+        patch_setter=layer_head_dest_src_pos_pattern_patch_setter,
+        activation_name="cross_pattern",
+        index_axis_names=("layer", "head_index", "dest_pos", "src_pos"),
+        return_details=False,
+        return_index_df=True,
+    )
+
+    assert grid == [[[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]]]
+    assert _index_records(index_table) == [
+        {"layer": 0, "head_index": 0, "dest_pos": 0, "src_pos": 0},
+        {"layer": 0, "head_index": 0, "dest_pos": 0, "src_pos": 1},
+        {"layer": 0, "head_index": 0, "dest_pos": 0, "src_pos": 2},
+        {"layer": 0, "head_index": 0, "dest_pos": 1, "src_pos": 0},
+        {"layer": 0, "head_index": 0, "dest_pos": 1, "src_pos": 1},
+        {"layer": 0, "head_index": 0, "dest_pos": 1, "src_pos": 2},
+    ]
 
 
 def test_attention_scores_patch_helpers_share_pattern_index_semantics_for_list_backend() -> None:
@@ -3008,6 +5096,33 @@ def test_attention_head_every_defaults_to_transformerlens_metric_stacks() -> Non
 
     assert all_pos_stack == [[[1.0]], [[2.0]], [[3.0]], [[4.0]], [[5.0]]]
     assert by_pos_stack == [[[[1.0]]], [[[2.0]]], [[[3.0]]], [[[4.0]]], [[[5.0]]]]
+
+
+def test_attention_head_every_accepts_transformerlens_patching_metric_keyword() -> None:
+    model = ComponentWrapper([[[[0]]]])
+    clean_cache = ActivationCache(
+        {
+            "layer_0.z": [[[[1]]]],
+            "layer_0.q": [[[[2]]]],
+            "layer_0.k": [[[[3]]]],
+            "layer_0.v": [[[[4]]]],
+            "layer_0.pattern": [[[[5]]]],
+        }
+    )
+
+    all_pos_stack = get_act_patch_attn_head_all_pos_every(
+        model,
+        {"activation": [[[[0]]]]},
+        clean_cache,
+        patching_metric=lambda output: _nested_sum(output["activation"]),
+        layers=[0],
+        positions=[0],
+        heads=[0],
+        dest_positions=[0],
+        source_positions=[0],
+    )
+
+    assert all_pos_stack == [[[1.0]], [[2.0]], [[3.0]], [[4.0]], [[5.0]]]
 
 
 def test_attention_head_every_pads_grouped_key_value_heads_for_list_backend() -> None:
