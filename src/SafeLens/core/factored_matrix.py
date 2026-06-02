@@ -13,7 +13,7 @@ _BACKEND_MATMUL_NOT_AVAILABLE = object()
 
 
 def _is_sequence(value: Any) -> bool:
-    return isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray))
+    return isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray)
 
 
 @dataclass(frozen=True)
@@ -27,9 +27,14 @@ class FactoredMatrix:
         left_shape = shape_of(self.A)
         right_shape = shape_of(self.B)
         if len(left_shape) < 2 or len(right_shape) < 2:
-            raise ValueError(f"FactoredMatrix factors must be at least rank-2, got {left_shape} and {right_shape}.")
+            raise ValueError(
+                "FactoredMatrix factors must be at least rank-2, "
+                f"got {left_shape} and {right_shape}."
+            )
         if left_shape[-1] != right_shape[-2]:
-            raise ValueError(f"FactoredMatrix inner dimensions must match, got {left_shape} and {right_shape}.")
+            raise ValueError(
+                f"FactoredMatrix inner dimensions must match, got {left_shape} and {right_shape}."
+            )
         leading_shape = broadcast_leading_shape(left_shape[:-2], right_shape[:-2])
         object.__setattr__(self, "A", broadcast_to_shape(self.A, leading_shape + left_shape[-2:]))
         object.__setattr__(self, "B", broadcast_to_shape(self.B, leading_shape + right_shape[-2:]))
@@ -48,9 +53,7 @@ class FactoredMatrix:
     def BA(self) -> Any:
         """Return the reverse dense product `B @ A`."""
         if self.ldim != self.rdim:
-            raise ValueError(
-                f"Can only take BA if ldim == rdim, got dense shape {self.shape}."
-            )
+            raise ValueError(f"Can only take BA if ldim == rdim, got dense shape {self.shape}.")
         return matmul(self.B, self.A)
 
     @property
@@ -184,14 +187,18 @@ class FactoredMatrix:
             return FactoredMatrix(index_value(self.A, normalized), index_value(self.B, normalized))
         if indexed_dims == leading_dims + 1:
             row_index = convert_int_to_slice(normalized, -1)
-            return FactoredMatrix(index_value(self.A, row_index), index_value(self.B, row_index[:-1]))
+            return FactoredMatrix(
+                index_value(self.A, row_index), index_value(self.B, row_index[:-1])
+            )
         if indexed_dims == leading_dims + 2:
             row_col_index = convert_int_to_slice(convert_int_to_slice(normalized, -1), -2)
             return FactoredMatrix(
                 index_value(self.A, row_col_index[:-1]),
                 index_value(self.B, row_col_index[:-2] + (FULL_SLICE, row_col_index[-1])),
             )
-        raise ValueError(f"{normalized!r} is too long an index for a FactoredMatrix with shape {self.shape}.")
+        raise ValueError(
+            f"{normalized!r} is too long an index for a FactoredMatrix with shape {self.shape}."
+        )
 
     def __repr__(self) -> str:
         """Return a TransformerLens-style summary."""
@@ -207,15 +214,23 @@ class FactoredMatrix:
             import torch
 
             if isinstance(self.A, torch.Tensor) or isinstance(self.B, torch.Tensor):
-                a = self.A if isinstance(self.A, torch.Tensor) else torch.as_tensor(
-                    self.A,
-                    dtype=getattr(self.B, "dtype", None),
-                    device=getattr(self.B, "device", None),
+                a = (
+                    self.A
+                    if isinstance(self.A, torch.Tensor)
+                    else torch.as_tensor(
+                        self.A,
+                        dtype=getattr(self.B, "dtype", None),
+                        device=getattr(self.B, "device", None),
+                    )
                 )
-                b = self.B if isinstance(self.B, torch.Tensor) else torch.as_tensor(
-                    self.B,
-                    dtype=a.dtype,
-                    device=a.device,
+                b = (
+                    self.B
+                    if isinstance(self.B, torch.Tensor)
+                    else torch.as_tensor(
+                        self.B,
+                        dtype=a.dtype,
+                        device=a.device,
+                    )
                 )
                 if not torch.is_floating_point(a) or a.dtype in {torch.bfloat16, torch.float16}:
                     a = a.to(torch.float32)
@@ -268,7 +283,9 @@ class FactoredMatrix:
         """Return the top-left dense corner."""
         left_index = expand_ellipsis((Ellipsis, slice(None, k), FULL_SLICE), len(shape_of(self.A)))
         right_index = expand_ellipsis((Ellipsis, FULL_SLICE, slice(None, k)), len(shape_of(self.B)))
-        return matrix_corner(matmul(index_value(self.A, left_index), index_value(self.B, right_index)), k)
+        return matrix_corner(
+            matmul(index_value(self.A, left_index), index_value(self.B, right_index)), k
+        )
 
     def unsqueeze(self, dim: int | None = None, *, k: int | None = None) -> FactoredMatrix:
         """Add a leading dimension to both factors."""
@@ -320,10 +337,7 @@ def matmul(left: Any, right: Any) -> Any:
         return sum(float(a) * float(b) for a, b in zip(left, right, strict=True))
     if len(left_shape) == 1 and len(right_shape) == 2:
         right_t = transpose(right)
-        return [
-            sum(float(a) * float(b) for a, b in zip(left, col, strict=True))
-            for col in right_t
-        ]
+        return [sum(float(a) * float(b) for a, b in zip(left, col, strict=True)) for col in right_t]
     left_rows = as_2d(left)
     right_rows = as_2d(right)
     if len(right_rows) == 1 and len(left_rows[0]) != 1:
@@ -365,7 +379,9 @@ def _try_torch_matmul(left: Any, right: Any) -> Any:
         if isinstance(right, torch.Tensor):
             right_tensor = right
         else:
-            right_tensor = torch.as_tensor(right, dtype=left_tensor.dtype, device=left_tensor.device)
+            right_tensor = torch.as_tensor(
+                right, dtype=left_tensor.dtype, device=left_tensor.device
+            )
         return left_tensor @ right_tensor
     except Exception:
         return _BACKEND_MATMUL_NOT_AVAILABLE
@@ -377,8 +393,16 @@ def _try_numpy_matmul(left: Any, right: Any) -> Any:
     try:
         import numpy as np
 
-        left_array = left if _is_numpy_backed(left) else np.asarray(left, dtype=getattr(right, "dtype", None))
-        right_array = right if _is_numpy_backed(right) else np.asarray(right, dtype=getattr(left_array, "dtype", None))
+        left_array = (
+            left
+            if _is_numpy_backed(left)
+            else np.asarray(left, dtype=getattr(right, "dtype", None))
+        )
+        right_array = (
+            right
+            if _is_numpy_backed(right)
+            else np.asarray(right, dtype=getattr(left_array, "dtype", None))
+        )
         return left_array @ right_array
     except Exception:
         return _BACKEND_MATMUL_NOT_AVAILABLE
@@ -493,7 +517,9 @@ def _try_torch_elementwise(left: Any, right: Any, *, op: str) -> Any:
         if isinstance(right, torch.Tensor):
             right_tensor = right
         else:
-            right_tensor = torch.as_tensor(right, dtype=left_tensor.dtype, device=left_tensor.device)
+            right_tensor = torch.as_tensor(
+                right, dtype=left_tensor.dtype, device=left_tensor.device
+            )
         if op == "multiply":
             return left_tensor * right_tensor
         if op == "divide":
@@ -509,8 +535,16 @@ def _try_numpy_elementwise(left: Any, right: Any, *, op: str) -> Any:
     try:
         import numpy as np
 
-        left_array = left if _is_numpy_backed(left) else np.asarray(left, dtype=getattr(right, "dtype", None))
-        right_array = right if _is_numpy_backed(right) else np.asarray(right, dtype=getattr(left_array, "dtype", None))
+        left_array = (
+            left
+            if _is_numpy_backed(left)
+            else np.asarray(left, dtype=getattr(right, "dtype", None))
+        )
+        right_array = (
+            right
+            if _is_numpy_backed(right)
+            else np.asarray(right, dtype=getattr(left_array, "dtype", None))
+        )
         if op == "multiply":
             return left_array * right_array
         if op == "divide":
@@ -614,7 +648,9 @@ def factored_frobenius_norm(left: Any, right: Any) -> Any:
             right_array = np.asarray(right)
             left_gram = np.swapaxes(left_array, -1, -2) @ left_array
             right_gram = right_array @ np.swapaxes(right_array, -1, -2)
-            return np.sqrt((left_gram * np.swapaxes(right_gram, -1, -2)).sum(axis=(-2, -1))).tolist()
+            return np.sqrt(
+                (left_gram * np.swapaxes(right_gram, -1, -2)).sum(axis=(-2, -1))
+            ).tolist()
     except Exception:
         pass
     left_shape = shape_of(left)
@@ -685,7 +721,11 @@ def _make_even_factors(u: Any, s: Any, v: Any) -> tuple[Any, Any]:
     try:
         import torch
 
-        if isinstance(u, torch.Tensor) or isinstance(s, torch.Tensor) or isinstance(v, torch.Tensor):
+        if (
+            isinstance(u, torch.Tensor)
+            or isinstance(s, torch.Tensor)
+            or isinstance(v, torch.Tensor)
+        ):
             if not isinstance(u, torch.Tensor):
                 u = torch.as_tensor(
                     u,
@@ -837,7 +877,9 @@ def broadcast_to_shape(value: Any, target_shape: tuple[int, ...]) -> Any:
     return _broadcast_nested(value, shape, target_shape)
 
 
-def _broadcast_nested(value: Any, source_shape: tuple[int, ...], target_shape: tuple[int, ...]) -> Any:
+def _broadcast_nested(
+    value: Any, source_shape: tuple[int, ...], target_shape: tuple[int, ...]
+) -> Any:
     if source_shape == target_shape:
         return value
     if len(source_shape) < len(target_shape):
@@ -849,7 +891,9 @@ def _broadcast_nested(value: Any, source_shape: tuple[int, ...], target_shape: t
     return _broadcast_nested_axis(value, source_shape, target_shape)
 
 
-def _broadcast_nested_axis(value: Any, source_shape: tuple[int, ...], target_shape: tuple[int, ...]) -> Any:
+def _broadcast_nested_axis(
+    value: Any, source_shape: tuple[int, ...], target_shape: tuple[int, ...]
+) -> Any:
     if not target_shape:
         return value
     source_dim = source_shape[0]
@@ -857,10 +901,7 @@ def _broadcast_nested_axis(value: Any, source_shape: tuple[int, ...], target_sha
     if source_dim == target_dim:
         if not _is_sequence(value):
             return value
-        return [
-            _broadcast_nested_axis(item, source_shape[1:], target_shape[1:])
-            for item in value
-        ]
+        return [_broadcast_nested_axis(item, source_shape[1:], target_shape[1:]) for item in value]
     if source_dim == 1:
         item = value[0] if _is_sequence(value) else value
         broadcast_item = _broadcast_nested_axis(item, source_shape[1:], target_shape[1:])

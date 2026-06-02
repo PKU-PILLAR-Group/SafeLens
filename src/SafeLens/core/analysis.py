@@ -2,15 +2,14 @@
 
 from __future__ import annotations
 
-import math
 import logging
+import math
 import random
 import re
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 from SafeLens.core.hooks import ActivationCache, HookPoint, clone_activation
-
 
 HEAD_NAMES = ("previous_token_head", "duplicate_token_head", "induction_head")
 ERROR_MEASURES = ("abs", "mul")
@@ -358,9 +357,7 @@ def _test_prompt_structured(
                 "incorrect_logit": _index_last_dim_float(final_logits, incorrect_token_id),
             }
         )
-        result["logit_diff"] = (
-            float(result["correct_logit"]) - float(result["incorrect_logit"])
-        )
+        result["logit_diff"] = float(result["correct_logit"]) - float(result["incorrect_logit"])
     if print_details:
         _print_test_prompt_result(result)
     return result
@@ -638,7 +635,9 @@ def detect_head(
     ``[n_layers, n_heads]`` and unselected heads are set to ``-1``.
     """
     if error_measure not in ERROR_MEASURES:
-        raise ValueError(f"Invalid error_measure={error_measure!r}; valid values are {ERROR_MEASURES}")
+        raise ValueError(
+            f"Invalid error_measure={error_measure!r}; valid values are {ERROR_MEASURES}"
+        )
     if isinstance(detection_pattern, str) and _is_string_sequence(seq) and cache is None:
         scores = [
             detect_head(
@@ -712,7 +711,9 @@ def get_previous_token_head_detection_pattern(tokens: Any) -> Any:
         if isinstance(tokens, torch.Tensor):
             pattern = torch.zeros((seq_len, seq_len), dtype=torch.float32, device=tokens.device)
             if seq_len > 1:
-                pattern[1:, :-1] = torch.eye(seq_len - 1, dtype=pattern.dtype, device=pattern.device)
+                pattern[1:, :-1] = torch.eye(
+                    seq_len - 1, dtype=pattern.dtype, device=pattern.device
+                )
             return torch.tril(pattern)
     except Exception:
         pass
@@ -726,10 +727,7 @@ def get_previous_token_head_detection_pattern(tokens: Any) -> Any:
             return np.tril(pattern)
     except Exception:
         pass
-    return [
-        [1.0 if dest == src + 1 else 0.0 for src in range(seq_len)]
-        for dest in range(seq_len)
-    ]
+    return [[1.0 if dest == src + 1 else 0.0 for src in range(seq_len)] for dest in range(seq_len)]
 
 
 def get_duplicate_token_head_detection_pattern(tokens: Any) -> Any:
@@ -757,10 +755,7 @@ def get_duplicate_token_head_detection_pattern(tokens: Any) -> Any:
     except Exception:
         pass
     return [
-        [
-            1.0 if dest > src and values[dest] == values[src] else 0.0
-            for src in range(seq_len)
-        ]
+        [1.0 if dest > src and values[dest] == values[src] else 0.0 for src in range(seq_len)]
         for dest in range(seq_len)
     ]
 
@@ -813,12 +808,16 @@ def compute_head_attention_similarity_score(
 ) -> float:
     """Compute similarity between a single head pattern and a detector pattern."""
     if error_measure not in ERROR_MEASURES:
-        raise ValueError(f"Invalid error_measure={error_measure!r}; valid values are {ERROR_MEASURES}")
+        raise ValueError(
+            f"Invalid error_measure={error_measure!r}; valid values are {ERROR_MEASURES}"
+        )
     _validate_square_attention_pattern(attention_pattern)
     try:
         import torch
 
-        if isinstance(attention_pattern, torch.Tensor) or isinstance(detection_pattern, torch.Tensor):
+        if isinstance(attention_pattern, torch.Tensor) or isinstance(
+            detection_pattern, torch.Tensor
+        ):
             attention = _as_torch_float_tensor(attention_pattern, like=detection_pattern).clone()
             detection = _as_torch_float_tensor(detection_pattern, like=attention)
             if error_measure == "mul":
@@ -829,7 +828,9 @@ def compute_head_attention_similarity_score(
                 return float(((attention * detection).sum() / attention.sum()).item())
             abs_diff = (attention - detection).abs()
             if not torch.allclose(abs_diff, torch.tril(abs_diff)):
-                raise AssertionError("Attention pattern and detection pattern differ above the diagonal.")
+                raise AssertionError(
+                    "Attention pattern and detection pattern differ above the diagonal."
+                )
             if exclude_bos:
                 abs_diff[:, 0] = 0
             if exclude_current_token:
@@ -849,10 +850,14 @@ def compute_head_attention_similarity_score(
                 if exclude_current_token:
                     np.fill_diagonal(attention, 0)
                 denominator = attention.sum()
-                return float(np.nan if denominator == 0 else (attention * detection).sum() / denominator)
+                return float(
+                    np.nan if denominator == 0 else (attention * detection).sum() / denominator
+                )
             abs_diff = np.abs(attention - detection)
             if not np.allclose(abs_diff, np.tril(abs_diff)):
-                raise AssertionError("Attention pattern and detection pattern differ above the diagonal.")
+                raise AssertionError(
+                    "Attention pattern and detection pattern differ above the diagonal."
+                )
             if exclude_bos:
                 abs_diff[:, 0] = 0
             if exclude_current_token:
@@ -882,7 +887,9 @@ def compute_head_attention_similarity_score(
         for src, value in enumerate(row):
             diff = abs(value - detection[dest][src])
             if src > dest and diff:
-                raise AssertionError("Attention pattern and detection pattern differ above the diagonal.")
+                raise AssertionError(
+                    "Attention pattern and detection pattern differ above the diagonal."
+                )
             if exclude_bos and src == 0:
                 diff = 0.0
             if exclude_current_token and src == dest:
@@ -1085,7 +1092,9 @@ def _is_lower_triangular(pattern: Any) -> bool:
     except Exception:
         pass
     matrix = _nested_float_matrix(pattern)
-    return all(abs(value) == 0 for row_index, row in enumerate(matrix) for value in row[row_index + 1 :])
+    return all(
+        abs(value) == 0 for row_index, row in enumerate(matrix) for value in row[row_index + 1 :]
+    )
 
 
 def _pattern_values_are_binary(pattern: Any) -> bool:
@@ -1094,20 +1103,22 @@ def _pattern_values_are_binary(pattern: Any) -> bool:
 
         if isinstance(pattern, torch.Tensor):
             unique_values = set(pattern.detach().cpu().unique().tolist())
-            return unique_values.issubset({0, 1, 0.0, 1.0})
+            return unique_values.issubset({0, 1})
     except Exception:
         pass
     try:
         import numpy as np
 
         if hasattr(pattern, "shape"):
-            return set(np.asarray(pattern).reshape(-1).tolist()).issubset({0, 1, 0.0, 1.0})
+            return set(np.asarray(pattern).reshape(-1).tolist()).issubset({0, 1})
     except Exception:
         pass
     return set(float(value) for value in flatten(pattern)).issubset({0.0, 1.0})
 
 
-def _ensure_activation_cache(cache: ActivationCache | Mapping[Any, Any], model: Any) -> ActivationCache:
+def _ensure_activation_cache(
+    cache: ActivationCache | Mapping[Any, Any], model: Any
+) -> ActivationCache:
     if isinstance(cache, ActivationCache):
         if cache.model is None:
             cache.model = model
@@ -1199,8 +1210,7 @@ def _normalize_head_selection(
         return {layer: list(range(n_heads)) for layer in range(n_layers)}
     if isinstance(heads, Mapping):
         layer_to_heads = {
-            int(layer): [int(head) for head in layer_heads]
-            for layer, layer_heads in heads.items()
+            int(layer): [int(head) for head in layer_heads] for layer, layer_heads in heads.items()
         }
     else:
         layer_to_heads: dict[int, list[int]] = {}
@@ -1311,7 +1321,8 @@ def _normalize_cached_layer_attention_pattern(pattern: Any, *, n_heads: int, seq
     if len(shape) == 4:
         if shape[0] != 1:
             raise ValueError(
-                "detect_head expects cached attention patterns without batch dim or with batch size 1; "
+                "detect_head expects cached attention patterns without batch dim "
+                "or with batch size 1; "
                 f"got shape {shape!r}."
             )
         return pattern[0]
@@ -1463,7 +1474,11 @@ def _concat_second_dim(left: Any, right: Any) -> Any:
     try:
         import torch
 
-        if hasattr(left, "shape") and hasattr(right, "shape") and type(left).__module__.split(".")[0] == "torch":
+        if (
+            hasattr(left, "shape")
+            and hasattr(right, "shape")
+            and type(left).__module__.split(".")[0] == "torch"
+        ):
             return torch.cat((left, right), dim=1)
     except Exception:
         pass
@@ -1478,7 +1493,10 @@ def _concat_second_dim(left: Any, right: Any) -> Any:
     right_rows = _rows(right)
     if len(left_rows) != len(right_rows):
         raise ValueError("Cannot concatenate token batches with different batch sizes.")
-    return [list(left_row) + list(right_row) for left_row, right_row in zip(left_rows, right_rows, strict=True)]
+    return [
+        list(left_row) + list(right_row)
+        for left_row, right_row in zip(left_rows, right_rows, strict=True)
+    ]
 
 
 def _select_second_dim(value: Any, index: int) -> Any:
@@ -1673,7 +1691,9 @@ def _sample_logits_torch(
 
     logits_for_sampling = logits_for_sampling / temperature
     if freq_penalty > 0:
-        assert token_history is not None, "Must provide input_tokens if applying a frequency penalty"
+        assert (
+            token_history is not None
+        ), "Must provide input_tokens if applying a frequency penalty"
         assert (
             len(token_history.shape) == 2
         ), "Frequency penalty do not support input in the form of embeddings"
@@ -1778,7 +1798,9 @@ def _sample_logits_python(
             continue
         row = [value / temperature for value in row]
         if freq_penalty > 0:
-            assert row_tokens is not None, "Must provide input_tokens if applying a frequency penalty"
+            assert (
+                row_tokens is not None
+            ), "Must provide input_tokens if applying a frequency penalty"
             counts = _token_counts(row_tokens, len(row))
             row = [value - freq_penalty * counts[index] for index, value in enumerate(row)]
         if top_k is not None:
@@ -1790,7 +1812,9 @@ def _sample_logits_python(
 
 
 def _ensure_batch_logits(final_logits: Any) -> list[list[float]]:
-    value = final_logits.tolist() if callable(getattr(final_logits, "tolist", None)) else final_logits
+    value = (
+        final_logits.tolist() if callable(getattr(final_logits, "tolist", None)) else final_logits
+    )
     if not _is_sequence(value):
         raise ValueError("final_logits must be a vector or a batch of vectors.")
     if value and _is_sequence(value[0]):
@@ -1813,7 +1837,9 @@ def _ensure_batch_tokens(tokens: Any, batch_size: int) -> list[list[int]]:
     raise ValueError("tokens batch dimension must match final_logits batch dimension.")
 
 
-def _apply_repetition_penalty_to_row(row: list[float], tokens: Sequence[int], penalty: float) -> list[float]:
+def _apply_repetition_penalty_to_row(
+    row: list[float], tokens: Sequence[int], penalty: float
+) -> list[float]:
     output = row.copy()
     for token_id in set(int(token) for token in tokens if 0 <= int(token) < len(output)):
         score = output[token_id]
@@ -1851,7 +1877,9 @@ def _filter_logits_top_p(row: list[float], top_p: float) -> list[float]:
 
 def _sample_from_logits_row(row: list[float]) -> int:
     max_value = max(row)
-    weights = [0.0 if math.isinf(value) and value < 0 else math.exp(value - max_value) for value in row]
+    weights = [
+        0.0 if math.isinf(value) and value < 0 else math.exp(value - max_value) for value in row
+    ]
     total = sum(weights)
     if total <= 0:
         return _argmax_list(row)
@@ -1913,14 +1941,10 @@ def _print_transformerlens_test_prompt_result(result: dict[str, Any]) -> None:
         ranks = item.get("answer_ranks", [])
         if len(tokens) == 1:
             rank = ranks[0] if ranks else "unknown"
-            print(
-                f"Answer token at position {item['position']}: "
-                f"{tokens[0]!r}, rank {rank}"
-            )
+            print(f"Answer token at position {item['position']}: " f"{tokens[0]!r}, rank {rank}")
         else:
             rank_details = ", ".join(
-                f"{token!r}: rank {rank}"
-                for token, rank in zip(tokens, ranks, strict=False)
+                f"{token!r}: rank {rank}" for token, rank in zip(tokens, ranks, strict=False)
             )
             print(f"Answer tokens at position {item['position']}: {rank_details}")
         top_tokens_by_answer = item.get("top_tokens_by_answer")
@@ -1973,7 +1997,9 @@ def gather_last_dim(values: Any, indices: Any) -> Any:
             index_array = np.asarray(indices)
             if index_array.ndim == 0:
                 return values_array[..., int(index_array.item())]
-            return np.take_along_axis(values_array, np.expand_dims(index_array, -1), axis=-1).squeeze(-1)
+            return np.take_along_axis(
+                values_array, np.expand_dims(index_array, -1), axis=-1
+            ).squeeze(-1)
     except Exception:
         pass
     if _is_sequence(indices):
@@ -2058,7 +2084,10 @@ def mask_values(values: Any, mask: Any) -> Any:
     except Exception:
         pass
     if _is_sequence(values) and _is_sequence(mask):
-        return [mask_values(value_item, mask_item) for value_item, mask_item in zip(values, mask)]
+        return [
+            mask_values(value_item, mask_item)
+            for value_item, mask_item in zip(values, mask, strict=False)
+        ]
     return values if bool(mask) else None
 
 
@@ -2085,7 +2114,7 @@ def zero_mask_values(values: Any, mask: Any) -> Any:
     if _is_sequence(values) and _is_sequence(mask):
         return [
             zero_mask_values(value_item, mask_item)
-            for value_item, mask_item in zip(values, mask)
+            for value_item, mask_item in zip(values, mask, strict=False)
         ]
     return values if bool(mask) else 0.0
 
@@ -2134,7 +2163,10 @@ def equal_values(left: Any, right: Any) -> Any:
     except Exception:
         pass
     if _is_sequence(left) and _is_sequence(right):
-        return [equal_values(left_item, right_item) for left_item, right_item in zip(left, right)]
+        return [
+            equal_values(left_item, right_item)
+            for left_item, right_item in zip(left, right, strict=False)
+        ]
     return 1.0 if left == right else 0.0
 
 
@@ -2253,7 +2285,9 @@ def _dot_nested(left: Any, right: Any) -> Any:
         if len(left_shape) < len(right_shape) and right_shape[-len(left_shape) :] == left_shape:
             return [_dot_nested(left, r_item) for r_item in right]
         if len(left) == len(right):
-            return [_dot_nested(l_item, r_item) for l_item, r_item in zip(left, right)]
+            return [
+                _dot_nested(l_item, r_item) for l_item, r_item in zip(left, right, strict=False)
+            ]
         return [_dot_nested(l_item, right) for l_item in left]
     return left
 
@@ -2467,5 +2501,8 @@ def and_values(left: Any, right: Any) -> Any:
     except Exception:
         pass
     if _is_sequence(left) and _is_sequence(right):
-        return [and_values(left_item, right_item) for left_item, right_item in zip(left, right)]
+        return [
+            and_values(left_item, right_item)
+            for left_item, right_item in zip(left, right, strict=False)
+        ]
     return bool(left) and bool(right)

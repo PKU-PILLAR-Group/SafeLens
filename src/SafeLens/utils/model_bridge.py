@@ -97,8 +97,7 @@ _UNSUPPORTED_ATTENTION_REASON = (
     "this fallback adapter has no known attention module path for softmax instrumentation"
 )
 _UNSUPPORTED_RESULT_REASON = (
-    "TransformerLens result vectors are derived from z @ W_O for HuggingFace "
-    "projection modules"
+    "TransformerLens result vectors are derived from z @ W_O for HuggingFace " "projection modules"
 )
 _UNSUPPORTED_SSM_ATTENTION_REASON = "state-space model adapters do not expose attention activations"
 _ATTENTION_SOFTMAX_STATE_ATTR = "_safelens_attention_softmax_hook_state"
@@ -551,9 +550,7 @@ class ArchitectureAdapter:
         if spec is None and fallback_component is not None:
             spec = self._specs.get(fallback_component)
         if spec is None:
-            raise KeyError(
-                f"{self.name!r} does not declare MLP component {canonical_component!r}."
-            )
+            raise KeyError(f"{self.name!r} does not declare MLP component {canonical_component!r}.")
         if not spec.supported:
             reason = spec.unsupported_reason or f"component {spec.component!r} is not supported"
             raise NotImplementedError(f"{self.name} does not expose {spec.component!r}: {reason}.")
@@ -731,9 +728,7 @@ def zeros_like_last_dim(value: Any, *, axis: int = -1) -> Any:
     return [0 for _ in range(nested_shape[axis])]
 
 
-_ATTENTION_HOOK_COMPONENTS = frozenset(
-    {"q", "k", "v", "z", "pattern", "attn_scores", "result"}
-)
+_ATTENTION_HOOK_COMPONENTS = frozenset({"q", "k", "v", "z", "pattern", "attn_scores", "result"})
 _ATTENTION_INPUT_COMPONENTS = frozenset({"q_input", "k_input", "v_input", "attn_in"})
 _ATTENTION_PREFIXES = ("decoder", "cross")
 
@@ -857,9 +852,8 @@ def architecture_adapter_for_name(
     """Select an architecture adapter from a model name and optional HF model_type."""
     resolved_model_name = resolve_transformer_lens_compatible_model_name(model_name)
     lowered_model_type = (model_type or "").lower()
-    if (
-        lowered_model_type in {"", "qwen2_moe", "qwen3_moe"}
-        and is_qwen_routed_moe_model_name(resolved_model_name)
+    if lowered_model_type in {"", "qwen2_moe", "qwen3_moe"} and is_qwen_routed_moe_model_name(
+        resolved_model_name
     ):
         return ROUTED_MOE_ADAPTER
     for adapter in SUPPORTED_ARCHITECTURE_ADAPTERS:
@@ -1021,7 +1015,9 @@ def _try_register_t5_attention_input_patch(
             hook_context=hook_context,
         )
         for projection_component in projection_components:
-            state.setdefault(projection_component, []).append(activation if patched is None else patched)
+            state.setdefault(projection_component, []).append(
+                activation if patched is None else patched
+            )
         return None
 
     def make_projection_hook(projection_component: str) -> Callable[[Any, Any, Any], Any]:
@@ -1191,7 +1187,9 @@ def _make_attention_result_output_hook(
     return hook
 
 
-def _set_hook_contexts(hook: Callable[..., Any], contexts: tuple[ComponentHookContext, ...]) -> None:
+def _set_hook_contexts(
+    hook: Callable[..., Any], contexts: tuple[ComponentHookContext, ...]
+) -> None:
     setattr(hook, _HOOK_CONTEXTS_ATTR, contexts)
 
 
@@ -1252,7 +1250,9 @@ def extract_component_activation(output: Any, spec: ComponentHookSpec, model: An
     if spec.value == "norm_scale":
         scale = norm_scale_from_input(model, inputs=(), output=output)
         if scale is None:
-            raise RuntimeError(f"Could not compute normalization scale for component {spec.component!r}.")
+            raise RuntimeError(
+                f"Could not compute normalization scale for component {spec.component!r}."
+            )
         return scale
     return output
 
@@ -1440,7 +1440,10 @@ def add_values(left: Any, right: Any) -> Any:
     except Exception:
         pass
     if _is_sequence(left) and _is_sequence(right):
-        return [add_values(left_item, right_item) for left_item, right_item in zip(left, right)]
+        return [
+            add_values(left_item, right_item)
+            for left_item, right_item in zip(left, right, strict=False)
+        ]
     return left + right
 
 
@@ -1453,7 +1456,7 @@ def subtract_values(left: Any, right: Any) -> Any:
     if _is_sequence(left) and _is_sequence(right):
         return [
             subtract_values(left_item, right_item)
-            for left_item, right_item in zip(left, right)
+            for left_item, right_item in zip(left, right, strict=False)
         ]
     return left - right
 
@@ -1497,7 +1500,9 @@ def merge_component_activation(
     return activation
 
 
-def norm_scale_from_input(module: Any, inputs: Sequence[Any] = (), output: Any | None = None) -> Any | None:
+def norm_scale_from_input(
+    module: Any, inputs: Sequence[Any] = (), output: Any | None = None
+) -> Any | None:
     """Return TransformerLens-style norm scale `[batch, pos, 1]` for a norm module input."""
     source = inputs[0] if inputs else output
     if source is None:
@@ -1576,7 +1581,9 @@ def normalized_output_from_scale(module: Any, source: Any, scale: Any | None = N
     return _divide_by_scale_nested(source, scale, centered=module_uses_centered_layer_norm(module))
 
 
-def norm_module_output_from_scale(module: Any, source: Any, scale: Any, reference_output: Any) -> Any:
+def norm_module_output_from_scale(
+    module: Any, source: Any, scale: Any, reference_output: Any
+) -> Any:
     """Recompute a norm module output from a patched TL-style scale."""
     normalized = normalized_output_from_scale(module, source, scale)
     return apply_norm_affine(module, normalized, reference_output)
@@ -1674,8 +1681,7 @@ def _multiply_last_dim_nested(value: Any, weights: Any) -> Any:
     if _nested_shape(value) and len(_nested_shape(value)) == 1:
         weight_values = weights.tolist() if hasattr(weights, "tolist") else weights
         return [
-            float(item) * float(weight)
-            for item, weight in zip(value, weight_values, strict=True)
+            float(item) * float(weight) for item, weight in zip(value, weight_values, strict=True)
         ]
     return [_multiply_last_dim_nested(item, weights) for item in value]
 
@@ -2048,16 +2054,12 @@ def _split_nested_grouped_query_heads(value: Any, kv_heads: int, q_per_group: in
     if len(shape) == 2:
         expected_heads = kv_heads * q_per_group
         if len(value) != expected_heads:
-            raise ValueError(
-                f"Expected {expected_heads} query heads, got {len(value)}."
-            )
+            raise ValueError(f"Expected {expected_heads} query heads, got {len(value)}.")
         return [
             [list(head) for head in value[group * q_per_group : (group + 1) * q_per_group]]
             for group in range(kv_heads)
         ]
-    return [
-        _split_nested_grouped_query_heads(item, kv_heads, q_per_group) for item in value
-    ]
+    return [_split_nested_grouped_query_heads(item, kv_heads, q_per_group) for item in value]
 
 
 def _replace_nested_grouped_query_heads(value: Any, replacement: Any, q_per_group: int) -> Any:
@@ -2205,7 +2207,9 @@ def _permute_nested(value: Any, order: tuple[int, ...]) -> Any:
     )
 
 
-def _build_nested_from_shape(shape: tuple[int, ...], value_fn: Callable[[tuple[int, ...]], Any]) -> Any:
+def _build_nested_from_shape(
+    shape: tuple[int, ...], value_fn: Callable[[tuple[int, ...]], Any]
+) -> Any:
     def build(prefix: tuple[int, ...], remaining: tuple[int, ...]) -> Any:
         if not remaining:
             return value_fn(prefix)
@@ -2467,7 +2471,9 @@ def extract_interleaved_qkv_bias(
         q_per_group = qkv_group_size(q_heads=q_heads, kv_heads=kv_heads)
         view = _reshape_flat_list(list(bias), (kv_heads, q_per_group + 2, head_dim))
         if component == "q":
-            return _flatten_nested(_select_nested_axis_slice(view, 1, slice(0, q_per_group))), q_heads
+            return _flatten_nested(
+                _select_nested_axis_slice(view, 1, slice(0, q_per_group))
+            ), q_heads
         offset = -2 if component == "k" else -1
         return _flatten_nested(_select_nested_axis(view, 1, offset)), kv_heads
     if q_heads == kv_heads:
@@ -2848,9 +2854,7 @@ def extract_interleaved_qkv_weight_columns(
         if q_heads == kv_heads:
             component_index = {"q": 0, "k": 1, "v": 2}[component]
             view = _reshape_flat_list(_flatten_nested(weight), (d_model, q_heads, 3, head_dim))
-            return _flatten_nested_last_dims(
-                _select_nested_axis(view, 2, component_index)
-            ), q_heads
+            return _flatten_nested_last_dims(_select_nested_axis(view, 2, component_index)), q_heads
 
         q_per_group = qkv_group_size(q_heads=q_heads, kv_heads=kv_heads)
         view = _reshape_flat_list(
@@ -3574,9 +3578,7 @@ APERTUS_ADAPTER = ArchitectureAdapter(
     ),
 )
 
-GPT_OSS_MOE_MLP_REASON = (
-    "GPT-OSS uses routed MoE experts rather than a single dense MLP matrix."
-)
+GPT_OSS_MOE_MLP_REASON = "GPT-OSS uses routed MoE experts rather than a single dense MLP matrix."
 ROUTED_MOE_MLP_REASON = (
     "routed MoE layers use multiple experts rather than a single dense MLP matrix"
 )
@@ -4005,7 +4007,9 @@ PHI_ADAPTER = ArchitectureAdapter(
             "model.layers.{layer}.self_attn.o_proj",
             activation="split_heads",
         ),
-        _result_spec("model.layers.{layer}.self_attn.dense", "model.layers.{layer}.self_attn.o_proj"),
+        _result_spec(
+            "model.layers.{layer}.self_attn.dense", "model.layers.{layer}.self_attn.o_proj"
+        ),
         _pattern_spec("model.layers.{layer}.self_attn"),
         _scores_spec("model.layers.{layer}.self_attn"),
     ),
@@ -4124,7 +4128,10 @@ BERT_ADAPTER = ArchitectureAdapter(
             "bert.encoder.layer.{layer}.attention.output.dense",
             activation="split_heads",
         ),
-        _result_spec("encoder.layer.{layer}.attention.output.dense", "bert.encoder.layer.{layer}.attention.output.dense"),
+        _result_spec(
+            "encoder.layer.{layer}.attention.output.dense",
+            "bert.encoder.layer.{layer}.attention.output.dense",
+        ),
         _pattern_spec(
             "encoder.layer.{layer}.attention.self",
             "bert.encoder.layer.{layer}.attention.self",

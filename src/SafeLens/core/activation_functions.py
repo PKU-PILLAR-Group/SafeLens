@@ -23,10 +23,14 @@ def gelu_new(input: Any) -> Any:
     """GPT-2 GeLU approximation used by TransformerLens."""
 
     if _is_torch_tensor(input):
-        return 0.5 * input * (
-            1.0
-            + _torch.tanh(
-                math.sqrt(2.0 / math.pi) * (input + 0.044715 * _torch.pow(input, 3.0))
+        return (
+            0.5
+            * input
+            * (
+                1.0
+                + _torch.tanh(
+                    math.sqrt(2.0 / math.pi) * (input + 0.044715 * _torch.pow(input, 3.0))
+                )
             )
         )
     return _elementwise(input, _gelu_new_scalar)
@@ -36,8 +40,10 @@ def gelu_fast(input: Any) -> Any:
     """Fast GeLU approximation used by several TransformerLens checkpoints."""
 
     if _is_torch_tensor(input):
-        return 0.5 * input * (
-            1.0 + _torch.tanh(input * 0.7978845608 * (1.0 + 0.044715 * input * input))
+        return (
+            0.5
+            * input
+            * (1.0 + _torch.tanh(input * 0.7978845608 * (1.0 + 0.044715 * input * input)))
         )
     return _elementwise(input, _gelu_fast_scalar)
 
@@ -138,8 +144,7 @@ if _nn is not None:
             return _torch.where(
                 input > 0,
                 alpha_p * input * input + self.beta * input,
-                (_torch.expm1(_torch.min(input, self.eps)) - input) * alpha_n
-                + self.beta * input,
+                (_torch.expm1(_torch.min(input, self.eps)) - input) * alpha_n + self.beta * input,
             )
 
 else:
@@ -165,15 +170,13 @@ SUPPORTED_ACTIVATIONS: dict[str, ActivationFunction] = {
 
 
 def _gelu_new_scalar(value: float) -> float:
-    return 0.5 * value * (
-        1.0 + math.tanh(math.sqrt(2.0 / math.pi) * (value + 0.044715 * value**3.0))
+    return (
+        0.5 * value * (1.0 + math.tanh(math.sqrt(2.0 / math.pi) * (value + 0.044715 * value**3.0)))
     )
 
 
 def _gelu_fast_scalar(value: float) -> float:
-    return 0.5 * value * (
-        1.0 + math.tanh(value * 0.7978845608 * (1.0 + 0.044715 * value * value))
-    )
+    return 0.5 * value * (1.0 + math.tanh(value * 0.7978845608 * (1.0 + 0.044715 * value * value)))
 
 
 def _xielu_scalar(value: float) -> float:

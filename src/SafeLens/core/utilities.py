@@ -86,9 +86,9 @@ class LocallyOverridenDefaults:
             if info["skip_overriding"]:
                 continue
             valid_values = info["valid_values"]
-            assert override in valid_values, (
-                f"{property_name} must be one of {valid_values}, but got {override}."
-            )
+            assert (
+                override in valid_values
+            ), f"{property_name} must be one of {valid_values}, but got {override}."
             default_location = info["default_location"]
             default_value = get_nested_attr(self, default_location)
             info["default_value_to_restore"] = deepcopy(default_value)
@@ -272,8 +272,7 @@ def call_hf_with_retry(
                 wait = min(base_delay * (2**attempt), _HF_RETRY_MAX_DELAY_SECONDS)
                 wait *= 0.8 + 0.4 * random.random()
             logger.warning(
-                "HuggingFace Hub rate-limited (HTTP 429); retrying in %.1fs "
-                "(attempt %d/%d)",
+                "HuggingFace Hub rate-limited (HTTP 429); retrying in %.1fs " "(attempt %d/%d)",
                 wait,
                 attempt + 1,
                 max_attempts,
@@ -479,7 +478,9 @@ def get_matrix_corner(matrix: Any, n: int = 3) -> Any:
     return get_corner(dense if dense is not None else matrix, n)
 
 
-def get_input_with_manually_prepended_bos(bos_token: str, input: str | list[str]) -> str | list[str]:
+def get_input_with_manually_prepended_bos(
+    bos_token: str, input: str | list[str]
+) -> str | list[str]:
     """Prepend a BOS token string to one string or a list of strings."""
 
     if isinstance(input, str):
@@ -514,7 +515,7 @@ def get_tokenizer_with_bos(tokenizer: Any) -> Any:
 
     tokenizer = deepcopy(tokenizer)
     try:
-        setattr(tokenizer, "add_bos_token", True)
+        tokenizer.add_bos_token = True
     except Exception:
         pass
     return tokenizer
@@ -625,7 +626,7 @@ def tokenize_and_concatenate(
         if not text:
             return {"tokens": []}
         encoded = tokenizer(text, add_special_tokens=False)["input_ids"]
-        if encoded and not isinstance(encoded[0], (list, tuple)):
+        if encoded and not isinstance(encoded[0], list | tuple):
             encoded = [encoded]
         pieces: list[int] = []
         for index, row in enumerate(encoded):
@@ -680,7 +681,7 @@ def get_best_available_cuda_device(max_devices: int | None = None) -> Any:
     max_devices = torch.cuda.device_count() if max_devices is None else max_devices
     devices = determine_available_memory_for_available_devices(max_devices)
     if not devices:
-        raise EnvironmentError(
+        raise OSError(
             "TransformerLens has been configured to use CUDA, but no available devices are present"
         )
     return torch.device("cuda", sort_devices_based_on_available_memory(devices)[0][0])
@@ -733,7 +734,9 @@ def resolve_device_map(
         raise ValueError(
             f"n_devices={n_devices} but only {torch.cuda.device_count()} CUDA devices present."
         )
-    resolved_max_memory = dict(max_memory) if max_memory else {index: "auto" for index in range(n_devices)}
+    resolved_max_memory = (
+        dict(max_memory) if max_memory else {index: "auto" for index in range(n_devices)}
+    )
     return "balanced", resolved_max_memory
 
 

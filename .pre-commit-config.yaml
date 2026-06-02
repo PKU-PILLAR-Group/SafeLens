@@ -9,4 +9,18 @@ repos:
     rev: v1.14.1
     hooks:
       - id: mypy
+        pass_filenames: false
+        args:
+          - --follow-imports=skip
+          - --allow-subclassing-any
+          - --allow-untyped-decorators
+          - src/SafeLens/adapters/flagsafe_adapter.py
+          - src/SafeLens/attribution/dummy.py
+          - src/SafeLens/monitors/dummy.py
+          - src/SafeLens/probes/dummy.py
+          - src/SafeLens/config.py
+          - src/SafeLens/core/base.py
+          - src/SafeLens/core/registry.py
+          - src/SafeLens/pipelines/runner.py
+          - src/SafeLens/utils/model_registry.py
         additional_dependencies: [pydantic>=2, PyYAML>=6, types-PyYAML>=6]

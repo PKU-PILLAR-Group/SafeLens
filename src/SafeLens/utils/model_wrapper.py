@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import re
 import math
+import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
@@ -25,8 +25,6 @@ from SafeLens.core.factored_matrix import (
     shape_of,
     transpose,
 )
-from SafeLens.core.kv_cache import KeyValueCacheEntry
-from SafeLens.core.utilities import get_rotary_pct_from_config
 from SafeLens.core.hook_call import call_user_hook
 from SafeLens.core.hooks import (
     ActivationCache,
@@ -35,16 +33,21 @@ from SafeLens.core.hooks import (
     make_cache_hook,
     matches_names_filter,
 )
+from SafeLens.core.kv_cache import KeyValueCacheEntry
+from SafeLens.core.utilities import get_rotary_pct_from_config
 from SafeLens.utils.model_bridge import (
     ComponentHookContext,
     ComponentRef,
+    _is_transformers_conv1d_module,
+    _register_module_forward_hook,
+    _register_module_forward_pre_hook,
     architecture_adapter_for_model,
     architecture_adapter_for_name,
     call_component_hook,
-    extract_qkv_bias,
     extract_component_activation,
-    head_count_for_component,
+    extract_qkv_bias,
     first_output,
+    head_count_for_component,
     is_qwen_routed_moe_model_name,
     key_value_head_count,
     list_architecture_adapters,
@@ -53,18 +56,15 @@ from SafeLens.utils.model_bridge import (
     preferred_qkv_weight_packed_axis,
     qkv_group_size,
     qkv_weight_bounds,
-    _is_transformers_conv1d_module,
-    _register_module_forward_hook,
-    _register_module_forward_pre_hook,
     reshape_attention_bias,
+    reshape_attention_weight,
     reshape_joint_qkv_attention_bias,
     reshape_joint_qkv_attention_weight,
-    reshape_attention_weight,
     resolve_module_path,
     supported_transformer_component_names,
-    transpose_2d_weight,
     transform_component_activation,
     transformer_lens_component_name,
+    transpose_2d_weight,
     zeros_for_attention_bias,
     zeros_like_last_dim,
 )
@@ -478,9 +478,7 @@ class DummyModelWrapper(ModelWrapper):
             [activation_name_for_layer(layer) for layer in candidate_layers],
             names_filter,
         )
-        cache = {
-            name: {"batch": dict(batch)} for name in selected_layers
-        }
+        cache = {name: {"batch": dict(batch)} for name in selected_layers}
         model_output = {
             "text": batch.get("text") or batch.get("prompt") or "",
             "risk_score": float(batch.get("risk_score", 0.0)),
@@ -688,24 +686,22 @@ class HuggingFaceModelWrapper(ModelWrapper):
     ) -> None:
         """Validate TransformerLens runtime-hook flags before adding hooks."""
         _ = hook_point, hook, dir, is_permanent, prepend
-        if hook_point_name.endswith("attn.hook_result") or hook_point_name.endswith(
-            "hook_result"
-        ):
-            assert self.cfg.use_attn_result, (
-                f"Cannot add hook {hook_point_name} if use_attn_result_hook is False"
-            )
+        if hook_point_name.endswith("attn.hook_result") or hook_point_name.endswith("hook_result"):
+            assert (
+                self.cfg.use_attn_result
+            ), f"Cannot add hook {hook_point_name} if use_attn_result_hook is False"
         if hook_point_name.endswith(("hook_q_input", "hook_k_input", "hook_v_input")):
-            assert self.cfg.use_split_qkv_input, (
-                f"Cannot add hook {hook_point_name} if use_split_qkv_input is False"
-            )
+            assert (
+                self.cfg.use_split_qkv_input
+            ), f"Cannot add hook {hook_point_name} if use_split_qkv_input is False"
         if hook_point_name.endswith("mlp_in"):
-            assert self.cfg.use_hook_mlp_in, (
-                f"Cannot add hook {hook_point_name} if use_hook_mlp_in is False"
-            )
+            assert (
+                self.cfg.use_hook_mlp_in
+            ), f"Cannot add hook {hook_point_name} if use_hook_mlp_in is False"
         if hook_point_name.endswith("attn_in"):
-            assert self.cfg.use_attn_in, (
-                f"Cannot add hook {hook_point_name} if use_attn_in is False"
-            )
+            assert (
+                self.cfg.use_attn_in
+            ), f"Cannot add hook {hook_point_name} if use_attn_in is False"
 
     def get_pos_offset(self, past_kv_cache: Any, batch_size: int) -> int:
         """Return the positional offset implied by a TransformerLens KV cache."""
@@ -714,7 +710,6 @@ class HuggingFaceModelWrapper(ModelWrapper):
         cached_batch_size = _past_kv_cache_batch_size(past_kv_cache)
         if cached_batch_size is not None:
             assert int(cached_batch_size) == int(batch_size)
-        cfg = self.cfg
         return _past_kv_cache_length(past_kv_cache)
 
     def get_residual(
@@ -733,7 +728,9 @@ class HuggingFaceModelWrapper(ModelWrapper):
         if tokens is None:
             tokens = _ones_token_batch_like_embedding(embed, device=resolved_device)
         else:
-            tokens = _coerce_token_model_input(_ensure_token_batch_dim(tokens), device=resolved_device)
+            tokens = _coerce_token_model_input(
+                _ensure_token_batch_dim(tokens), device=resolved_device
+            )
 
         position_type = _infer_positional_embedding_type(model)
         if position_type == "standard":
@@ -822,10 +819,7 @@ class HuggingFaceModelWrapper(ModelWrapper):
             effective_padding_side = str(
                 padding_side or getattr(self.tokenizer, "padding_side", "right")
             )
-            needs_mask = (
-                effective_padding_side == "left"
-                or past_kv_cache is not None
-            )
+            needs_mask = effective_padding_side == "left" or past_kv_cache is not None
             if needs_mask and self.tokenizer is not None:
                 resolved_prepend_bos = _resolve_default_prepend_bos(self, prepend_bos)
                 attention_mask = _attention_mask_from_tokens(
@@ -849,7 +843,9 @@ class HuggingFaceModelWrapper(ModelWrapper):
             if callable(append_attention_mask):
                 attention_mask = append_attention_mask(attention_mask)
             elif past_kv_cache is not None:
-                attention_mask = _extend_attention_mask_for_past_cache(attention_mask, past_kv_cache)
+                attention_mask = _extend_attention_mask_for_past_cache(
+                    attention_mask, past_kv_cache
+                )
 
         pos_offset = self.get_pos_offset(past_kv_cache, _token_batch_size(tokens))
         embed_module = _input_embeddings_module(model)
@@ -871,8 +867,7 @@ class HuggingFaceModelWrapper(ModelWrapper):
         """Set the tokenizer used by TransformerLens-style token helpers."""
         if default_padding_side not in {"right", "left", None}:
             raise AssertionError(
-                "padding_side must be 'right', 'left' or None, "
-                f"got {default_padding_side!r}"
+                "padding_side must be 'right', 'left' or None, " f"got {default_padding_side!r}"
             )
         self.tokenizer = tokenizer
         if default_padding_side is not None:
@@ -958,7 +953,9 @@ class HuggingFaceModelWrapper(ModelWrapper):
         model = self._require_model()
         normalization_type = self.cfg.normalization_type or "LN"
         is_rms_norm = normalization_type in {"RMS", "RMSPre"}
-        fold_biases = (not is_rms_norm) if fold_biases_override is None else bool(fold_biases_override)
+        fold_biases = (
+            (not is_rms_norm) if fold_biases_override is None else bool(fold_biases_override)
+        )
         center_weights = (
             (not is_rms_norm) if center_weights_override is None else bool(center_weights_override)
         )
@@ -988,20 +985,16 @@ class HuggingFaceModelWrapper(ModelWrapper):
 
         native_w_o = getattr(model, "W_O", None)
         if native_w_o is not None:
-            setattr(model, "W_O", _center_residual_stream_weight(native_w_o, d_model=self.cfg.d_model))
+            model.W_O = _center_residual_stream_weight(native_w_o, d_model=self.cfg.d_model)
         native_b_o = getattr(model, "b_O", None)
         if native_b_o is not None:
-            setattr(model, "b_O", _center_residual_stream_bias(native_b_o))
+            model.b_O = _center_residual_stream_bias(native_b_o)
         native_w_out = getattr(model, "W_out", None)
         if native_w_out is not None:
-            setattr(
-                model,
-                "W_out",
-                _center_residual_stream_weight(native_w_out, d_model=self.cfg.d_model),
-            )
+            model.W_out = _center_residual_stream_weight(native_w_out, d_model=self.cfg.d_model)
         native_b_out = getattr(model, "b_out", None)
         if native_b_out is not None:
-            setattr(model, "b_out", _center_residual_stream_bias(native_b_out))
+            model.b_out = _center_residual_stream_bias(native_b_out)
 
         adapter = architecture_adapter_for_model(model, model_name=self.name)
         for layer in range(_infer_model_layers(model)):
@@ -1038,13 +1031,13 @@ class HuggingFaceModelWrapper(ModelWrapper):
         if native_weight is not None:
             centered = _center_unembed_weight(native_weight, weight_layout="d_model_vocab")
             try:
-                setattr(model, "W_U", centered)
+                model.W_U = centered
             except Exception as exc:
                 raise RuntimeError("Could not update native TransformerLens W_U.") from exc
             native_bias = getattr(model, "b_U", None)
             if native_bias is not None:
                 try:
-                    setattr(model, "b_U", _center_bias_like(native_bias))
+                    model.b_U = _center_bias_like(native_bias)
                 except Exception as exc:
                     raise RuntimeError("Could not update native TransformerLens b_U.") from exc
             return self
@@ -1056,17 +1049,17 @@ class HuggingFaceModelWrapper(ModelWrapper):
         centered = _center_unembed_weight(weight, weight_layout="vocab_d_model")
         updated = False
         try:
-            setattr(embeddings, "weight", centered)
+            embeddings.weight = centered
             updated = True
-        except Exception:
+        except Exception as exc:
             data = getattr(weight, "data", None)
             if data is None:
-                raise RuntimeError("Could not update output embedding weight.")
+                raise RuntimeError("Could not update output embedding weight.") from exc
             data.copy_(centered)
             updated = True
         if updated and hasattr(model, "_weight"):
             try:
-                setattr(model, "_weight", centered)
+                model._weight = centered
             except Exception:
                 pass
         bias = getattr(embeddings, "bias", None)
@@ -1075,7 +1068,7 @@ class HuggingFaceModelWrapper(ModelWrapper):
             _set_module_bias(embeddings, centered_bias)
             if hasattr(model, "_bias"):
                 try:
-                    setattr(model, "_bias", centered_bias)
+                    model._bias = centered_bias
                 except Exception:
                     pass
         return self
@@ -1094,15 +1087,13 @@ class HuggingFaceModelWrapper(ModelWrapper):
                 native_b_o,
                 target_heads=self.cfg.n_heads,
             )
-            setattr(model, "b_O", folded_bias)
-            setattr(model, "b_V", zero_b_v)
+            model.b_O = folded_bias
+            model.b_V = zero_b_v
 
         adapter = architecture_adapter_for_model(model, model_name=self.name)
         for layer in range(_infer_model_layers(model)):
             try:
-                value_ref = adapter.parse_component_ref(
-                    transformer_lens_component_name("v", layer)
-                )
+                value_ref = adapter.parse_component_ref(transformer_lens_component_name("v", layer))
                 output_ref = adapter.parse_component_ref(
                     transformer_lens_component_name("z", layer)
                 )
@@ -1147,12 +1138,12 @@ class HuggingFaceModelWrapper(ModelWrapper):
                 native_w_k,
                 native_b_k,
             )
-            setattr(model, "W_Q", refactored_w_q)
-            setattr(model, "W_K", refactored_w_k)
+            model.W_Q = refactored_w_q
+            model.W_K = refactored_w_k
             if native_b_q is not None:
-                setattr(model, "b_Q", refactored_b_q)
+                model.b_Q = refactored_b_q
             if native_b_k is not None:
-                setattr(model, "b_K", refactored_b_k)
+                model.b_K = refactored_b_k
             refactored = True
         native_w_v = getattr(model, "W_V", None)
         native_w_o = getattr(model, "W_O", None)
@@ -1166,11 +1157,11 @@ class HuggingFaceModelWrapper(ModelWrapper):
                     native_b_o,
                     target_heads=self.cfg.n_heads,
                 )
-                setattr(model, "b_O", folded_bias)
-                setattr(model, "b_V", zero_b_v)
+                model.b_O = folded_bias
+                model.b_V = zero_b_v
             refactored_w_v, refactored_w_o = _refactor_ov_matrices(native_w_v, native_w_o)
-            setattr(model, "W_V", refactored_w_v)
-            setattr(model, "W_O", refactored_w_o)
+            model.W_V = refactored_w_v
+            model.W_O = refactored_w_o
             refactored = True
         adapter = architecture_adapter_for_model(model, model_name=self.name)
         for layer in range(_infer_model_layers(model)):
@@ -1204,7 +1195,9 @@ class HuggingFaceModelWrapper(ModelWrapper):
             unexpected = ", ".join(sorted(kwargs))
             raise TypeError(f"Unexpected process_weights_ keyword argument(s): {unexpected}.")
         model = self._require_model()
-        has_shortformer_positional_embeddings = _infer_positional_embedding_type(model) == "shortformer"
+        has_shortformer_positional_embeddings = (
+            _infer_positional_embedding_type(model) == "shortformer"
+        )
         has_olmo2_post_norm = _is_olmo2_post_norm_model(model)
         center_writing_weights_by_default = _can_center_writing_weights_by_default(model)
         should_center_writing_weights = (
@@ -1236,7 +1229,7 @@ class HuggingFaceModelWrapper(ModelWrapper):
         model = self._require_model()
         native_b_o = getattr(model, "b_O", None)
         if native_b_o is not None:
-            setattr(model, "b_O", _center_residual_stream_bias(native_b_o))
+            model.b_O = _center_residual_stream_bias(native_b_o)
 
         adapter = architecture_adapter_for_model(model, model_name=self.name)
         for layer in range(_infer_model_layers(model)):
@@ -1715,9 +1708,7 @@ class HuggingFaceModelWrapper(ModelWrapper):
             handles: list[Any] = []
             try:
                 for expanded_layer, _hook_fn in self._expand_hook_specs(((layer, hook_fn),)):
-                    handles.append(
-                        self._register_hook(expanded_layer, hook_fn, prepend=prepend)
-                    )
+                    handles.append(self._register_hook(expanded_layer, hook_fn, prepend=prepend))
             except Exception:
                 _remove_wrapper_handles(handles)
                 raise
@@ -1858,7 +1849,8 @@ class HuggingFaceModelWrapper(ModelWrapper):
             )
         if shortformer_pos_embed is not None:
             raise NotImplementedError(
-                "SafeLens' Transformers wrapper does not synthesize shortformer positional embeddings."
+                "SafeLens' Transformers wrapper does not synthesize "
+                "shortformer positional embeddings."
             )
         batch = input
         extra_kwargs: dict[str, Any] = {}
@@ -1921,7 +1913,9 @@ class HuggingFaceModelWrapper(ModelWrapper):
             _assert_residual_stream_input(input)
             residual = input
             if tokens is not None:
-                tokens = _coerce_token_model_input(_ensure_token_batch_dim(tokens), device=self.device)
+                tokens = _coerce_token_model_input(
+                    _ensure_token_batch_dim(tokens), device=self.device
+                )
             if attention_mask is not None:
                 attention_mask = _coerce_token_model_input(
                     _ensure_token_batch_dim(attention_mask),
@@ -1950,11 +1944,12 @@ class HuggingFaceModelWrapper(ModelWrapper):
             else None
         )
 
-        with _grad_context(
-            enabled=self._has_active_backward_hooks()
-        ), _temporary_eager_attention(
-            model,
-            enabled=self._run_requires_output_attentions or self._attention_hook_count > 0,
+        with (
+            _grad_context(enabled=self._has_active_backward_hooks()),
+            _temporary_eager_attention(
+                model,
+                enabled=self._run_requires_output_attentions or self._attention_hook_count > 0,
+            ),
         ):
             try:
                 for layer_index, block in indexed_blocks[start_at_layer:stop_at_layer]:
@@ -1969,8 +1964,7 @@ class HuggingFaceModelWrapper(ModelWrapper):
                         past_kv_cache_entry=_past_kv_cache_entry_at(past_kv_cache, layer_index),
                         shortformer_pos_embed=shortformer_pos_embed,
                         output_attentions=(
-                            self._run_requires_output_attentions
-                            or self._attention_hook_count > 0
+                            self._run_requires_output_attentions or self._attention_hook_count > 0
                         ),
                     )
             finally:
@@ -2390,9 +2384,7 @@ class HuggingFaceModelWrapper(ModelWrapper):
             for layer, hook_fn in self._expand_hook_specs(fwd_hooks):
                 handles.append(self._add_managed_hook(layer, hook_fn, prepend=prepend))
             for layer, hook_fn in self._expand_hook_specs(bwd_hook_specs):
-                handles.append(
-                    self._add_managed_backward_hook(layer, hook_fn, prepend=prepend)
-                )
+                handles.append(self._add_managed_backward_hook(layer, hook_fn, prepend=prepend))
             if forward_options:
                 resolved_return_type = _resolve_return_type(batch, forward_return_type)
                 with self._temporary_backward_hook_context(enabled=bool(bwd_hook_specs)):
@@ -2431,9 +2423,7 @@ class HuggingFaceModelWrapper(ModelWrapper):
             for layer, hook_fn in self._expand_hook_specs(fwd_hooks):
                 handles.append(self._add_managed_hook(layer, hook_fn, prepend=prepend))
             for layer, hook_fn in self._expand_hook_specs(bwd_hooks):
-                handles.append(
-                    self._add_managed_backward_hook(layer, hook_fn, prepend=prepend)
-                )
+                handles.append(self._add_managed_backward_hook(layer, hook_fn, prepend=prepend))
             yield self
         finally:
             if reset_hooks_end:
@@ -2459,11 +2449,12 @@ class HuggingFaceModelWrapper(ModelWrapper):
         if past_kv_cache is not None:
             model_inputs, cache_bridge = self._bridge_past_kv_cache(model_inputs, past_kv_cache)
         try:
-            with _grad_context(
-                enabled=enable_grad or self._has_active_backward_hooks()
-            ), _temporary_eager_attention(
-                model,
-                enabled=self._run_requires_output_attentions or self._attention_hook_count > 0,
+            with (
+                _grad_context(enabled=enable_grad or self._has_active_backward_hooks()),
+                _temporary_eager_attention(
+                    model,
+                    enabled=self._run_requires_output_attentions or self._attention_hook_count > 0,
+                ),
             ):
                 raw_output = model(**model_inputs)
                 formatted_output = _format_model_output(
@@ -2662,8 +2653,7 @@ class HuggingFaceModelWrapper(ModelWrapper):
         if self.tokenizer is None and (input_is_text or normalized_return_type == "str"):
             detail = _tokenizer_error_detail(self._tokenizer_load_error)
             raise RuntimeError(
-                "Tokenizer is not loaded, so streaming text generation is unavailable. "
-                f"{detail}"
+                "Tokenizer is not loaded, so streaming text generation is unavailable. " f"{detail}"
             )
 
         if input_is_text:
@@ -2896,7 +2886,9 @@ class HuggingFaceModelWrapper(ModelWrapper):
             return combined_tokens
         if return_type == "embeds":
             return _tokens_to_input_embeddings(self._require_model(), combined_tokens)
-        raise ValueError("generate_stream return_type must be 'input', 'str', 'tokens', or 'embeds'.")
+        raise ValueError(
+            "generate_stream return_type must be 'input', 'str', 'tokens', or 'embeds'."
+        )
 
     def to_tokens(
         self,
@@ -3011,8 +3003,8 @@ class HuggingFaceModelWrapper(ModelWrapper):
             and not isinstance(text_or_tokens, str | bytes)
             and text_or_tokens
             and isinstance(
-            text_or_tokens[0],
-            Sequence | str,
+                text_or_tokens[0],
+                Sequence | str,
             )
         ):
             return [
@@ -3038,7 +3030,9 @@ class HuggingFaceModelWrapper(ModelWrapper):
             if len(shape_tuple) == 2 and shape_tuple[0] == 1:
                 tokens = tokens[0]
             elif len(shape_tuple) > 1:
-                raise ValueError(f"Invalid token shape for token string conversion: {shape_tuple!r}.")
+                raise ValueError(
+                    f"Invalid token shape for token string conversion: {shape_tuple!r}."
+                )
         token_list = _single_token_list(tokens)
         batch_decode = getattr(tokenizer, "batch_decode", None)
         if callable(batch_decode):
@@ -3249,9 +3243,7 @@ class HuggingFaceModelWrapper(ModelWrapper):
         n_layers = _infer_model_layers(model)
         if n_layers <= 0:
             raise RuntimeError(f"Could not infer layer count for b_{component.upper()}.")
-        biases = [
-            adapter.get_attention_bias(model, component, layer) for layer in range(n_layers)
-        ]
+        biases = [adapter.get_attention_bias(model, component, layer) for layer in range(n_layers)]
         return _stack_tensor_like(biases)
 
     def _stack_mlp_weights(self, component: str) -> Any:
@@ -3705,7 +3697,12 @@ class HuggingFaceModelWrapper(ModelWrapper):
                 )
             return modules[layer]
 
-        for path in ("model.layers", "model.language_model.layers", "transformer.h", "gpt_neox.layers"):
+        for path in (
+            "model.layers",
+            "model.language_model.layers",
+            "transformer.h",
+            "gpt_neox.layers",
+        ):
             target = model
             try:
                 for part in path.split("."):
@@ -4342,7 +4339,10 @@ class Qwen3DenseModelWrapper(HuggingFaceModelWrapper):
             if handle is None:
                 raise KeyError(f"Could not resolve Qwen3 attention component {component!r}.")
             return handle
-        if component not in _QWEN3_PATCHABLE_COMPONENTS and component not in _QWEN3_EXPLICIT_COMPONENTS:
+        if (
+            component not in _QWEN3_PATCHABLE_COMPONENTS
+            and component not in _QWEN3_EXPLICIT_COMPONENTS
+        ):
             supported = ", ".join(qwen3_supported_hook_components(include_attention=True))
             examples = ", ".join(_QWEN3_COMPONENT_EXAMPLES[:4])
             raise KeyError(
@@ -4765,7 +4765,11 @@ def _call_qwen3_component_hook(
     return call_user_hook(
         hook_fn,
         hook_kwargs,
-        positional_arg_options=((activation, hook_context), (None, None, activation), (activation,)),
+        positional_arg_options=(
+            (activation, hook_context),
+            (None, None, activation),
+            (activation,),
+        ),
         uninspectable="kwargs",
     )
 
@@ -4837,7 +4841,7 @@ def _temporary_eager_attention(model: Any, *, enabled: bool) -> Any:
         return
     config = getattr(model, "config", None)
     original = (
-        getattr(config, "_attn_implementation")
+        config._attn_implementation
         if config is not None and hasattr(config, "_attn_implementation")
         else _MISSING_ATTENTION_IMPLEMENTATION
     )
@@ -4873,7 +4877,7 @@ def _restore_attention_implementation(config: Any, set_attention: Any, original:
     try:
         set_attention(original)
     except Exception:
-        setattr(config, "_attn_implementation", original)
+        config._attn_implementation = original
 
 
 def _tokenizer_error_detail(error: Exception | None) -> str:
@@ -4915,12 +4919,12 @@ def _temporary_tokenizer_padding_side(tokenizer: Any, padding_side: str | None) 
     if padding_side is None or not hasattr(tokenizer, "padding_side"):
         yield
         return
-    previous = getattr(tokenizer, "padding_side")
-    setattr(tokenizer, "padding_side", padding_side)
+    previous = tokenizer.padding_side
+    tokenizer.padding_side = padding_side
     try:
         yield
     finally:
-        setattr(tokenizer, "padding_side", previous)
+        tokenizer.padding_side = previous
 
 
 @contextmanager
@@ -4942,24 +4946,28 @@ def _temporary_tokenizer_pad_token(tokenizer: Any, *, enabled: bool) -> Any:
     changed_token = hasattr(tokenizer, "pad_token")
     changed_token_id = hasattr(tokenizer, "pad_token_id")
     if changed_token:
-        setattr(tokenizer, "pad_token", fallback_token)
+        tokenizer.pad_token = fallback_token
     if changed_token_id:
-        setattr(tokenizer, "pad_token_id", fallback_token_id)
+        tokenizer.pad_token_id = fallback_token_id
     try:
         yield
     finally:
         if changed_token:
-            setattr(tokenizer, "pad_token", previous_token)
+            tokenizer.pad_token = previous_token
         if changed_token_id:
-            setattr(tokenizer, "pad_token_id", previous_token_id)
+            tokenizer.pad_token_id = previous_token_id
 
 
 def _tokenizer_needs_pad_token(tokenizer: Any) -> bool:
-    return getattr(tokenizer, "pad_token", None) is None and getattr(
-        tokenizer,
-        "pad_token_id",
-        None,
-    ) is None
+    return (
+        getattr(tokenizer, "pad_token", None) is None
+        and getattr(
+            tokenizer,
+            "pad_token_id",
+            None,
+        )
+        is None
+    )
 
 
 def _call_tokenizer_with_supported_kwargs(
@@ -5034,8 +5042,7 @@ def _managed_handle_matches_direction(
 
 def _wrapper_has_active_permanent_cache_hooks(handles: Iterable[Any]) -> bool:
     return any(
-        not bool(getattr(handle, "_removed", False))
-        and bool(getattr(handle, "is_cache", False))
+        not bool(getattr(handle, "_removed", False)) and bool(getattr(handle, "is_cache", False))
         for handle in handles
     )
 
@@ -5487,7 +5494,7 @@ def _past_kv_cache_entries(cache: Any) -> list[Any]:
     if cache is None:
         return []
     if hasattr(cache, "layers"):
-        layers = getattr(cache, "layers")
+        layers = cache.layers
         try:
             return list(layers)
         except TypeError:
@@ -5495,12 +5502,12 @@ def _past_kv_cache_entries(cache: Any) -> list[Any]:
     entries = getattr(cache, "entries", None)
     if isinstance(entries, Mapping):
         return [entries[index] for index in sorted(entries)]
-    if isinstance(entries, Sequence) and not isinstance(entries, (str, bytes, bytearray)):
+    if isinstance(entries, Sequence) and not isinstance(entries, str | bytes | bytearray):
         try:
             return list(entries)
         except TypeError:
             pass
-    if isinstance(cache, Sequence) and not isinstance(cache, (str, bytes, bytearray)):
+    if isinstance(cache, Sequence) and not isinstance(cache, str | bytes | bytearray):
         try:
             return list(cache)
         except TypeError:
@@ -5569,7 +5576,7 @@ def _past_kv_cache_entry_at(cache: Any, layer_index: int) -> Any | None:
         return None
     if hasattr(cache, "layers"):
         try:
-            layers = list(getattr(cache, "layers"))
+            layers = list(cache.layers)
             if 0 <= layer_index < len(layers):
                 return layers[layer_index]
         except Exception:
@@ -5577,12 +5584,12 @@ def _past_kv_cache_entry_at(cache: Any, layer_index: int) -> Any | None:
     entries = getattr(cache, "entries", None)
     if isinstance(entries, Mapping):
         return entries.get(layer_index)
-    if isinstance(entries, Sequence) and not isinstance(entries, (str, bytes, bytearray)):
+    if isinstance(entries, Sequence) and not isinstance(entries, str | bytes | bytearray):
         try:
             return entries[layer_index]
         except Exception:
             return None
-    if isinstance(cache, Sequence) and not isinstance(cache, (str, bytes, bytearray)):
+    if isinstance(cache, Sequence) and not isinstance(cache, str | bytes | bytearray):
         try:
             return cache[layer_index]
         except Exception:
@@ -5658,7 +5665,7 @@ def _entry_cache_index(cache: Any, entry: Any) -> Any:
         for index, candidate in entries.items():
             if candidate is entry:
                 return index
-    if isinstance(cache, Sequence) and not isinstance(cache, (str, bytes, bytearray)):
+    if isinstance(cache, Sequence) and not isinstance(cache, str | bytes | bytearray):
         try:
             for index, candidate in enumerate(cache):
                 if candidate is entry:
@@ -5689,13 +5696,13 @@ def _sync_past_kv_cache_from_transformers_cache(
             keys = _transpose_cache_sequence_axis(layer_cache.keys)
             values = _transpose_cache_sequence_axis(layer_cache.values)
             if hasattr(entry, "past_keys"):
-                setattr(entry, "past_keys", keys)
+                entry.past_keys = keys
             else:
-                setattr(entry, "keys", keys)
+                entry.keys = keys
             if hasattr(entry, "past_values"):
-                setattr(entry, "past_values", values)
+                entry.past_values = values
             else:
-                setattr(entry, "values", values)
+                entry.values = values
         return
     cache_entries = getattr(original_cache, "entries", None)
     if isinstance(cache_entries, list):
@@ -5708,13 +5715,13 @@ def _sync_past_kv_cache_from_transformers_cache(
             keys = _transpose_cache_sequence_axis(layer_cache.keys)
             values = _transpose_cache_sequence_axis(layer_cache.values)
             if hasattr(entry, "past_keys"):
-                setattr(entry, "past_keys", keys)
+                entry.past_keys = keys
             else:
-                setattr(entry, "keys", keys)
+                entry.keys = keys
             if hasattr(entry, "past_values"):
-                setattr(entry, "past_values", values)
+                entry.past_values = values
             else:
-                setattr(entry, "values", values)
+                entry.values = values
         return
     for entry, entry_index, needs_transpose in metadata:
         if entry_index is None:
@@ -5730,13 +5737,13 @@ def _sync_past_kv_cache_from_transformers_cache(
             keys = _transpose_cache_sequence_axis(keys)
             values = _transpose_cache_sequence_axis(values)
         if hasattr(entry, "past_keys"):
-            setattr(entry, "past_keys", keys)
+            entry.past_keys = keys
         if hasattr(entry, "past_values"):
-            setattr(entry, "past_values", values)
+            entry.past_values = values
         if hasattr(entry, "keys") and not hasattr(entry, "past_keys"):
-            setattr(entry, "keys", keys)
+            entry.keys = keys
         if hasattr(entry, "values") and not hasattr(entry, "past_values"):
-            setattr(entry, "values", values)
+            entry.values = values
 
 
 def _sync_past_kv_cache_from_model_output(
@@ -5780,7 +5787,10 @@ def _extend_attention_mask_for_past_cache(attention_mask: Any, past_kv_cache: An
     if _is_sequence(attention_mask):
         if attention_mask and _is_sequence(attention_mask[0]):
             prefix = [[1] * past_length for _ in attention_mask]
-            return [prefix_row + list(row) for prefix_row, row in zip(prefix, attention_mask, strict=True)]
+            return [
+                prefix_row + list(row)
+                for prefix_row, row in zip(prefix, attention_mask, strict=True)
+            ]
         return [1] * past_length + list(attention_mask)
     return attention_mask
 
@@ -5842,8 +5852,6 @@ def _position_ids_for_forward(
     if attention_mask is None:
         return _position_ids_like_tokens(tokens, pos_offset=pos_offset, device=device)
     try:
-        import torch
-
         if hasattr(attention_mask, "shape"):
             mask = attention_mask.to(device=device)
             position_ids = (mask.long().cumsum(-1) - 1).masked_fill(mask == 0, 0)
@@ -5857,7 +5865,9 @@ def _position_ids_for_forward(
     return _position_ids_like_tokens(tokens, pos_offset=pos_offset, device=device)
 
 
-def _past_kv_position_offset_for_partial_forward(past_kv_cache: Any, attention_mask: Any | None) -> int:
+def _past_kv_position_offset_for_partial_forward(
+    past_kv_cache: Any, attention_mask: Any | None
+) -> int:
     past_length = _past_kv_cache_length(past_kv_cache)
     if past_length <= 0:
         return 0
@@ -5911,14 +5921,14 @@ def _call_decoder_block(
         {
             key: value
             for key, value in common_kwargs.items()
-            if value is not None
-            and key not in {"past_kv_cache_entry", "shortformer_pos_embed"}
+            if value is not None and key not in {"past_kv_cache_entry", "shortformer_pos_embed"}
         },
         {
             key: value
             for key, value in common_kwargs.items()
             if value is not None
-            and key not in {
+            and key
+            not in {
                 "past_kv_cache_entry",
                 "shortformer_pos_embed",
                 "cache_position",
@@ -6253,8 +6263,7 @@ def _attention_mask_from_tokens(
     if _is_sequence(tokens):
         if tokens and _is_sequence(tokens[0]):
             mask_rows = [
-                [0 if int(token) == int(pad_token_id) else 1 for token in row]
-                for row in tokens
+                [0 if int(token) == int(pad_token_id) else 1 for token in row] for row in tokens
             ]
             if prepend_bos:
                 for row in mask_rows:
@@ -6268,7 +6277,9 @@ def _attention_mask_from_tokens(
                             for index, token in enumerate(row_tokens)
                             if int(token) != int(pad_token_id)
                         ]
-                        bos_index = (non_pad_indices[0] - 1) if non_pad_indices else len(row_tokens) - 1
+                        bos_index = (
+                            (non_pad_indices[0] - 1) if non_pad_indices else len(row_tokens) - 1
+                        )
                         if bos_index >= 0:
                             row_mask[bos_index] = 1
                     else:
@@ -7440,7 +7451,7 @@ def _extract_output_field(output: Any, field: str) -> Any:
 
 
 def _looks_like_scalar_loss(value: Any) -> bool:
-    if isinstance(value, (str, bytes, Mapping, tuple, list)):
+    if isinstance(value, str | bytes | Mapping | tuple | list):
         return False
     ndim = getattr(value, "ndim", None)
     if ndim is not None:
@@ -7460,7 +7471,7 @@ def _looks_like_scalar_loss(value: Any) -> bool:
             return len(shape) == 0
         except TypeError:
             pass
-    return isinstance(value, (int, float, complex, bool))
+    return isinstance(value, int | float | complex | bool)
 
 
 def _make_transformer_lens_config_view(
@@ -7486,8 +7497,12 @@ def _make_transformer_lens_config_view(
         names=("num_attention_heads", "n_head", "n_heads", "num_heads"),
     )
     n_key_value_heads = key_value_head_count(model)
-    d_model = _first_int_attr(core_config, config, model, names=("hidden_size", "n_embd", "d_model", "dim"))
-    d_head = _first_int_attr(core_config, config, model, names=("head_dim", "d_head", "kv_channels"))
+    d_model = _first_int_attr(
+        core_config, config, model, names=("hidden_size", "n_embd", "d_model", "dim")
+    )
+    d_head = _first_int_attr(
+        core_config, config, model, names=("head_dim", "d_head", "kv_channels")
+    )
     if d_head is None and d_model is not None and n_heads:
         d_head = d_model // n_heads
     d_vocab = _first_int_attr(core_config, config, model, names=("vocab_size", "d_vocab"))
@@ -7518,8 +7533,7 @@ def _make_transformer_lens_config_view(
         names=("hidden_act", "activation_function", "activation", "act_fn"),
     )
     attn_only = bool(
-        _first_bool_attr(core_config, config, model, names=("attn_only", "attention_only"))
-        or False
+        _first_bool_attr(core_config, config, model, names=("attn_only", "attention_only")) or False
     )
     parallel_attn_mlp = bool(
         _first_bool_attr(
@@ -7532,8 +7546,7 @@ def _make_transformer_lens_config_view(
     )
     return TransformerLensConfigView(
         model_name=model_name,
-        model_type=_config_attr(core_config, "model_type")
-        or _config_attr(config, "model_type"),
+        model_type=_config_attr(core_config, "model_type") or _config_attr(config, "model_type"),
         n_layers=n_layers,
         n_heads=n_heads,
         n_key_value_heads=n_key_value_heads,
@@ -8023,11 +8036,15 @@ def _fold_layer_norm_weights_in_model(
     adapter = architecture_adapter_for_model(model, model_name=model_name)
     for layer in range(_infer_model_layers(model)):
         try:
-            ln1_module = _norm_module_for_layer(model, adapter=adapter, layer=layer, component="ln1_scale")
+            ln1_module = _norm_module_for_layer(
+                model, adapter=adapter, layer=layer, component="ln1_scale"
+            )
         except (KeyError, NotImplementedError, ValueError):
             ln1_module = None
         try:
-            ln2_module = _norm_module_for_layer(model, adapter=adapter, layer=layer, component="ln2_scale")
+            ln2_module = _norm_module_for_layer(
+                model, adapter=adapter, layer=layer, component="ln2_scale"
+            )
         except (KeyError, NotImplementedError, ValueError):
             ln2_module = None
 
@@ -8126,7 +8143,9 @@ def _fold_split_attention_layer_norm(
 ) -> bool:
     try:
         modules_and_specs = {
-            component: _attention_module_and_spec(model, adapter=adapter, component=component, layer=layer)
+            component: _attention_module_and_spec(
+                model, adapter=adapter, component=component, layer=layer
+            )
             for component in ("q", "k", "v")
         }
     except (KeyError, NotImplementedError, ValueError):
@@ -8183,9 +8202,15 @@ def _fold_joint_qkv_attention_layer_norm(
     rmsnorm_uses_offset: bool,
 ) -> bool:
     try:
-        q_module, q_spec = _attention_module_and_spec(model, adapter=adapter, component="q", layer=layer)
-        k_module, k_spec = _attention_module_and_spec(model, adapter=adapter, component="k", layer=layer)
-        v_module, v_spec = _attention_module_and_spec(model, adapter=adapter, component="v", layer=layer)
+        q_module, q_spec = _attention_module_and_spec(
+            model, adapter=adapter, component="q", layer=layer
+        )
+        k_module, k_spec = _attention_module_and_spec(
+            model, adapter=adapter, component="k", layer=layer
+        )
+        v_module, v_spec = _attention_module_and_spec(
+            model, adapter=adapter, component="v", layer=layer
+        )
     except (KeyError, NotImplementedError, ValueError):
         return False
     if not (q_module is k_module is v_module):
@@ -8450,7 +8475,10 @@ def _reader_weight_bias_contribution(weight: Any, norm_bias: Any, *, reader_axis
 
             bias = np.asarray(norm_bias)
             return np.sum(
-                weight * bias.reshape(_broadcast_shape_for_axis(len(weight.shape), reader_axis, bias.shape[0])),
+                weight
+                * bias.reshape(
+                    _broadcast_shape_for_axis(len(weight.shape), reader_axis, bias.shape[0])
+                ),
                 axis=reader_axis,
             )
         except Exception:
@@ -8472,10 +8500,7 @@ def _multiply_nested_axis(value: Any, scales: Sequence[Any], *, axis: int) -> An
     if axis < 0:
         axis = len(shape_of(value)) + axis
     if axis == 0:
-        return [
-            _multiply_nested_scalars(item, scales[index])
-            for index, item in enumerate(value)
-        ]
+        return [_multiply_nested_scalars(item, scales[index]) for index, item in enumerate(value)]
     return [_multiply_nested_axis(item, scales, axis=axis - 1) for item in value]
 
 
@@ -8484,14 +8509,10 @@ def _sum_nested_weighted_axis(value: Any, weights: Sequence[Any], *, axis: int) 
         axis = len(shape_of(value)) + axis
     if axis == 0:
         weighted = [
-            _multiply_nested_scalars(item, weights[index])
-            for index, item in enumerate(value)
+            _multiply_nested_scalars(item, weights[index]) for index, item in enumerate(value)
         ]
         return _sum_nested_values(weighted)
-    return [
-        _sum_nested_weighted_axis(item, weights, axis=axis - 1)
-        for item in value
-    ]
+    return [_sum_nested_weighted_axis(item, weights, axis=axis - 1) for item in value]
 
 
 def _multiply_nested_scalars(value: Any, scalar: Any) -> Any:
@@ -8559,10 +8580,14 @@ def _fold_final_layer_norm_into_unembed(
     rmsnorm_uses_offset: bool = False,
 ) -> bool:
     norm_module = _final_norm_module_for_weight_processing(model)
-    if norm_module is None or _norm_affine_weight(
-        norm_module,
-        rmsnorm_uses_offset=rmsnorm_uses_offset,
-    ) is None:
+    if (
+        norm_module is None
+        or _norm_affine_weight(
+            norm_module,
+            rmsnorm_uses_offset=rmsnorm_uses_offset,
+        )
+        is None
+    ):
         return False
     native_weight = getattr(model, "W_U", None)
     if native_weight is not None:
@@ -8573,7 +8598,7 @@ def _fold_final_layer_norm_into_unembed(
         )
         if center_weights:
             folded_weight = _center_tensor_like(folded_weight, axis=0)
-        setattr(model, "W_U", folded_weight)
+        model.W_U = folded_weight
         native_norm_bias_folded = False
         if fold_biases:
             native_bias = getattr(model, "b_U", None)
@@ -8583,8 +8608,10 @@ def _fold_final_layer_norm_into_unembed(
                 norm_module,
             )
             if final_bias is not None:
-                setattr(model, "b_U", final_bias)
-                native_norm_bias_folded = native_bias is not None and _norm_affine_bias(norm_module) is not None
+                model.b_U = final_bias
+                native_norm_bias_folded = (
+                    native_bias is not None and _norm_affine_bias(norm_module) is not None
+                )
         _set_norm_module_to_identity(
             norm_module,
             fold_biases=native_norm_bias_folded,
@@ -8606,7 +8633,7 @@ def _fold_final_layer_norm_into_unembed(
     _set_module_weight(embeddings, folded_weight)
     if hasattr(model, "_weight"):
         try:
-            setattr(model, "_weight", folded_weight)
+            model._weight = folded_weight
         except Exception:
             pass
     hf_norm_bias_folded = False
@@ -8619,10 +8646,12 @@ def _fold_final_layer_norm_into_unembed(
         )
         if final_bias is not None:
             _set_module_bias(embeddings, final_bias)
-            hf_norm_bias_folded = embeddings_bias is not None and _norm_affine_bias(norm_module) is not None
+            hf_norm_bias_folded = (
+                embeddings_bias is not None and _norm_affine_bias(norm_module) is not None
+            )
             if hasattr(model, "_bias"):
                 try:
-                    setattr(model, "_bias", final_bias)
+                    model._bias = final_bias
                 except Exception:
                     pass
     _set_norm_module_to_identity(
@@ -8759,7 +8788,9 @@ def _fold_value_bias_modules(
             output_weight,
             axis=_output_bias_axis(output_module, architecture=architecture),
         )
-    b_v = _value_bias_to_tl_shape(model, value_module, value_bias, value_spec, architecture=architecture)
+    b_v = _value_bias_to_tl_shape(
+        model, value_module, value_bias, value_spec, architecture=architecture
+    )
     w_o = reshape_attention_weight(
         output_weight,
         component="z",
@@ -8783,7 +8814,9 @@ def _fold_value_bias_modules(
 def _refactor_split_attention_layer(model: Any, *, adapter: Any, layer: int) -> bool:
     try:
         modules_and_specs = {
-            component: _attention_module_and_spec(model, adapter=adapter, component=component, layer=layer)
+            component: _attention_module_and_spec(
+                model, adapter=adapter, component=component, layer=layer
+            )
             for component in ("q", "k", "v", "z")
         }
     except (KeyError, NotImplementedError, ValueError):
@@ -8826,15 +8859,19 @@ def _refactor_split_attention_layer(model: Any, *, adapter: Any, layer: int) -> 
             architecture=adapter.name,
         ),
     )
-    _set_module_bias(q_module, _tl_attention_bias_to_module(b_q_refactored, q_module, component="q"))
-    _set_module_bias(k_module, _tl_attention_bias_to_module(b_k_refactored, k_module, component="k"))
+    _set_module_bias(
+        q_module, _tl_attention_bias_to_module(b_q_refactored, q_module, component="q")
+    )
+    _set_module_bias(
+        k_module, _tl_attention_bias_to_module(b_k_refactored, k_module, component="k")
+    )
 
     b_v = _module_bias_to_tl(model, v_module, component="v")
     w_o = _module_weight_to_tl(model, o_module, component="z", architecture=adapter.name)
     output_bias = getattr(o_module, "bias", None)
     if output_bias is None:
         output_bias = zeros_like_last_dim(
-            getattr(o_module, "weight"),
+            o_module.weight,
             axis=_output_bias_axis(o_module, architecture=adapter.name),
         )
     folded_bias, zero_b_v = _fold_value_bias_tensor_like(
@@ -8871,10 +8908,18 @@ def _refactor_split_attention_layer(model: Any, *, adapter: Any, layer: int) -> 
 
 def _refactor_joint_qkv_attention_layer(model: Any, *, adapter: Any, layer: int) -> bool:
     try:
-        q_module, q_spec = _attention_module_and_spec(model, adapter=adapter, component="q", layer=layer)
-        k_module, k_spec = _attention_module_and_spec(model, adapter=adapter, component="k", layer=layer)
-        v_module, v_spec = _attention_module_and_spec(model, adapter=adapter, component="v", layer=layer)
-        o_module, o_spec = _attention_module_and_spec(model, adapter=adapter, component="z", layer=layer)
+        q_module, q_spec = _attention_module_and_spec(
+            model, adapter=adapter, component="q", layer=layer
+        )
+        k_module, k_spec = _attention_module_and_spec(
+            model, adapter=adapter, component="k", layer=layer
+        )
+        v_module, v_spec = _attention_module_and_spec(
+            model, adapter=adapter, component="v", layer=layer
+        )
+        o_module, o_spec = _attention_module_and_spec(
+            model, adapter=adapter, component="z", layer=layer
+        )
     except (KeyError, NotImplementedError, ValueError):
         return False
     if not (q_module is k_module is v_module):
@@ -8894,7 +8939,7 @@ def _refactor_joint_qkv_attention_layer(model: Any, *, adapter: Any, layer: int)
     packed_axis = preferred_qkv_weight_packed_axis(q_module, architecture=adapter.name)
     if packed_axis is None:
         try:
-            qkv_weight_shape = shape_of(getattr(q_module, "weight"))
+            qkv_weight_shape = shape_of(q_module.weight)
             total_heads = q_heads + 2 * kv_heads
             if len(qkv_weight_shape) == 2:
                 if int(qkv_weight_shape[0]) % total_heads == 0:
@@ -8954,7 +8999,9 @@ def _refactor_joint_qkv_attention_layer(model: Any, *, adapter: Any, layer: int)
         qkv_layout=qkv_layout,
     )
 
-    if not _qkv_ov_shapes_are_refactorable(model, w_q, w_k, w_v, o_module, architecture=adapter.name):
+    if not _qkv_ov_shapes_are_refactorable(
+        model, w_q, w_k, w_v, o_module, architecture=adapter.name
+    ):
         return False
     w_q_refactored, b_q_refactored, w_k_refactored, b_k_refactored = _refactor_qk_matrices(
         w_q,
@@ -8966,7 +9013,7 @@ def _refactor_joint_qkv_attention_layer(model: Any, *, adapter: Any, layer: int)
     output_bias = getattr(o_module, "bias", None)
     if output_bias is None:
         output_bias = zeros_like_last_dim(
-            getattr(o_module, "weight"),
+            o_module.weight,
             axis=_output_bias_axis(o_module, architecture=adapter.name),
         )
     folded_bias, zero_b_v = _fold_value_bias_tensor_like(
@@ -9044,7 +9091,9 @@ def _qkv_ov_shapes_are_refactorable(
     )
 
 
-def _attention_module_and_spec(model: Any, *, adapter: Any, component: str, layer: int) -> tuple[Any, Any]:
+def _attention_module_and_spec(
+    model: Any, *, adapter: Any, component: str, layer: int
+) -> tuple[Any, Any]:
     component_ref = adapter.parse_component_ref(transformer_lens_component_name(component, layer))
     if component_ref is None:
         raise KeyError(f"Unknown attention component {component!r}.")
@@ -9247,7 +9296,9 @@ def _merge_interleaved_joint_qkv_weights(
                     (n_heads * 3 * d_head, d_model),
                 )
             if packed_axis == 1:
-                return np.reshape(np.stack([w_q, w_k, w_v], axis=2), (d_model, n_heads * 3 * d_head))
+                return np.reshape(
+                    np.stack([w_q, w_k, w_v], axis=2), (d_model, n_heads * 3 * d_head)
+                )
         except Exception:
             pass
     if packed_axis == 0:
@@ -9255,10 +9306,7 @@ def _merge_interleaved_joint_qkv_weights(
         k_values = _to_python_sequence_container(w_k)
         v_values = _to_python_sequence_container(w_v)
         return [
-            [
-                source[head][model_dim][head_dim]
-                for model_dim in range(d_model)
-            ]
+            [source[head][model_dim][head_dim] for model_dim in range(d_model)]
             for head in range(n_heads)
             for source in (q_values, k_values, v_values)
             for head_dim in range(d_head)
@@ -9276,7 +9324,9 @@ def _merge_interleaved_joint_qkv_weights(
             ]
             for model_dim in range(d_model)
         ]
-    raise ValueError(f"packed_axis must be 0 or 1 for interleaved QKV weights, got {packed_axis!r}.")
+    raise ValueError(
+        f"packed_axis must be 0 or 1 for interleaved QKV weights, got {packed_axis!r}."
+    )
 
 
 def _merge_interleaved_joint_qkv_biases(b_q: Any, b_k: Any, b_v: Any) -> Any:
@@ -9413,11 +9463,7 @@ def _reshape_tl_o_weight_for_rows(weight: Any) -> Any:
         except Exception:
             pass
     values = _to_python_sequence_container(weight)
-    return [
-        list(values[head][head_dim])
-        for head in range(n_heads)
-        for head_dim in range(d_head)
-    ]
+    return [list(values[head][head_dim]) for head in range(n_heads) for head_dim in range(d_head)]
 
 
 def _reshape_tl_o_weight_for_columns(weight: Any) -> Any:
@@ -9472,10 +9518,14 @@ def _refactor_qk_matrices(
     """Return an equivalent TL QK factorization, preserving optional biases."""
     effective_w_q = _append_attention_bias_as_input(w_q, b_q)
     effective_w_k = _append_attention_bias_as_input(w_k, b_k)
-    refactored_q, refactored_k_t = FactoredMatrix(
-        effective_w_q,
-        transpose(effective_w_k),
-    ).make_even().pair
+    refactored_q, refactored_k_t = (
+        FactoredMatrix(
+            effective_w_q,
+            transpose(effective_w_k),
+        )
+        .make_even()
+        .pair
+    )
     refactored_k = transpose(refactored_k_t)
     return (
         _slice_penultimate_dim(refactored_q, slice(None, -1)),
@@ -9808,16 +9858,15 @@ def _repeat_value_bias_heads(value: Any, *, repeats: int) -> Any:
 
 def _repeat_nested_axis(value: Any, *, axis: int, repeats: int) -> Any:
     if axis == 0:
-        return [
-            _clone_tensor_like(item)
-            for item in value
-            for _repeat_index in range(repeats)
-        ]
+        return [_clone_tensor_like(item) for item in value for _repeat_index in range(repeats)]
     return [_repeat_nested_axis(item, axis=axis - 1, repeats=repeats) for item in value]
 
 
 def _value_bias_output_contribution(b_v: Any, w_o: Any) -> Any:
-    if type(b_v).__module__.split(".")[0] == "torch" or type(w_o).__module__.split(".")[0] == "torch":
+    if (
+        type(b_v).__module__.split(".")[0] == "torch"
+        or type(w_o).__module__.split(".")[0] == "torch"
+    ):
         try:
             import torch
 
@@ -9836,7 +9885,10 @@ def _value_bias_output_contribution(b_v: Any, w_o: Any) -> Any:
             return torch.einsum("...hd,...hdm->...m", b_v, w_o)
         except Exception:
             pass
-    if type(b_v).__module__.split(".")[0] == "numpy" or type(w_o).__module__.split(".")[0] == "numpy":
+    if (
+        type(b_v).__module__.split(".")[0] == "numpy"
+        or type(w_o).__module__.split(".")[0] == "numpy"
+    ):
         try:
             import numpy as np
 
@@ -9859,7 +9911,10 @@ def _value_bias_output_contribution_nested(b_v: Any, w_o: Any) -> list[float]:
             for b_item, w_item in zip(b_v_values, w_o_values, strict=True)
         ]
     if len(shape_b) != 2 or len(shape_w) != 3:
-        raise ValueError(f"Expected b_V [head, d_head] and W_O [head, d_head, d_model], got {shape_b} and {shape_w}.")
+        raise ValueError(
+            "Expected b_V [head, d_head] and W_O [head, d_head, d_model], "
+            f"got {shape_b} and {shape_w}."
+        )
     if shape_b[0] != shape_w[0] or shape_b[1] != shape_w[1]:
         raise ValueError(f"Cannot fold b_V shape {shape_b} with W_O shape {shape_w}.")
     d_model = int(shape_w[2])
@@ -9974,8 +10029,7 @@ def _nested_mean_same_shape(values: Sequence[Any]) -> Any:
         if any(not _is_sequence(value) or len(value) != width for value in values):
             raise ValueError("Cannot center ragged nested values.")
         return [
-            _nested_mean_same_shape([value[index] for value in values])
-            for index in range(width)
+            _nested_mean_same_shape([value[index] for value in values]) for index in range(width)
         ]
     return sum(float(value) for value in values) / len(values)
 
@@ -9983,8 +10037,7 @@ def _nested_mean_same_shape(values: Sequence[Any]) -> Any:
 def _subtract_nested(value: Any, mean: Any) -> Any:
     if _is_sequence(value) and _is_sequence(mean):
         return [
-            _subtract_nested(item, mean_item)
-            for item, mean_item in zip(value, mean, strict=True)
+            _subtract_nested(item, mean_item) for item, mean_item in zip(value, mean, strict=True)
         ]
     return float(value) - float(mean)
 
@@ -10042,11 +10095,11 @@ def _set_module_tensor_attr(module: Any, attr: str, value: Any) -> None:
     try:
         setattr(module, attr, value)
         return
-    except Exception:
+    except Exception as exc:
         if current is None and _module_accepts_registered_parameter(module):
             _register_module_parameter(module, attr, value)
             return
-        raise RuntimeError(f"Could not update module {attr}.")
+        raise RuntimeError(f"Could not update module {attr}.") from exc
 
 
 def _module_accepts_registered_parameter(module: Any) -> bool:
@@ -10095,10 +10148,7 @@ def _center_vocab_d_model_nested(weight: Sequence[Any]) -> list[list[float]]:
     if any(len(row) != width for row in rows):
         raise ValueError("Cannot center ragged unembedding weight.")
     means = [sum(float(row[col]) for row in rows) / len(rows) for col in range(width)]
-    return [
-        [float(value) - means[col] for col, value in enumerate(row)]
-        for row in rows
-    ]
+    return [[float(value) - means[col] for col, value in enumerate(row)] for row in rows]
 
 
 def _center_vector_nested(vector: Sequence[Any]) -> list[float]:
@@ -10135,7 +10185,9 @@ def _coerce_sequence_to_tensor_like(value: Sequence[Any], like: Any) -> Any | No
 def _mask_composition_scores_to_future_layers(scores: Any) -> Any:
     shape = shape_of(scores)
     if len(shape) < 4:
-        raise ValueError(f"Composition scores must have shape [layer, head, layer, head], got {shape}.")
+        raise ValueError(
+            f"Composition scores must have shape [layer, head, layer, head], got {shape}."
+        )
     left_layers, right_layers = int(shape[0]), int(shape[2])
 
     if type(scores).__module__.split(".")[0] == "torch":
@@ -10172,9 +10224,7 @@ def _mask_composition_scores_to_future_layers(scores: Any) -> Any:
             ]
             for left_layer, left_layer_scores in enumerate(scores)
         ]
-    raise TypeError(
-        f"Cannot mask composition scores for value type {type(scores).__name__}."
-    )
+    raise TypeError(f"Cannot mask composition scores for value type {type(scores).__name__}.")
 
 
 def _zero_like_tensor_value(value: Any) -> Any:
@@ -10799,9 +10849,7 @@ def _inspect_transformer_lens_compatible_model(
     if local_target:
         warnings.append("Static inspection does not verify that the local path exists.")
     architecture_adapter = (
-        None
-        if native_checkpoint
-        else architecture_adapter_for_name(model_name=resolved_model)
+        None if native_checkpoint else architecture_adapter_for_name(model_name=resolved_model)
     )
     bridge_components = (
         supported_transformer_component_names(include_attention=True)

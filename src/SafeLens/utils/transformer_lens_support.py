@@ -304,9 +304,7 @@ TRANSFORMER_LENS_NATIVE_CHECKPOINT_ALIASES: dict[str, str] = {
     "redwood_attn_2l": "ArthurConmy/redwood_attn_2l",
     "othello-gpt": "Baidicoot/Othello-GPT-Transformer-Lens",
     "attn-only-2l-demo": "NeelNanda/Attn-Only-2L512W-Shortformer-6B-big-lr",
-    "attn-only-2l-shortformer-6b-big-lr": (
-        "NeelNanda/Attn-Only-2L512W-Shortformer-6B-big-lr"
-    ),
+    "attn-only-2l-shortformer-6b-big-lr": ("NeelNanda/Attn-Only-2L512W-Shortformer-6B-big-lr"),
     "attn-only-2l-induction-demo": "NeelNanda/Attn-Only-2L512W-Shortformer-6B-big-lr",
     "attn-only-demo": "NeelNanda/Attn-Only-2L512W-Shortformer-6B-big-lr",
     "attn-only-1l": "NeelNanda/Attn_Only_1L512W_C4_Code",
@@ -693,7 +691,9 @@ TRANSFORMER_LENS_OFFICIAL_MODEL_ALIASES: dict[str, str] = {
     "mixtral-8x7b": "mistralai/Mixtral-8x7B-v0.1",
     "mixtral-8x7b-instruct": "mistralai/Mixtral-8x7B-Instruct-v0.1",
     "mixtral-instruct": "mistralai/Mixtral-8x7B-Instruct-v0.1",
-    "neelnanda/attn-only-2l512w-shortformer-6b-big-lr": "NeelNanda/Attn-Only-2L512W-Shortformer-6B-big-lr",
+    "neelnanda/attn-only-2l512w-shortformer-6b-big-lr": (
+        "NeelNanda/Attn-Only-2L512W-Shortformer-6B-big-lr"
+    ),
     "neelnanda/attn_only_1l512w_c4_code": "NeelNanda/Attn_Only_1L512W_C4_Code",
     "neelnanda/attn_only_2l512w_c4_code": "NeelNanda/Attn_Only_2L512W_C4_Code",
     "neelnanda/attn_only_3l512w_c4_code": "NeelNanda/Attn_Only_3L512W_C4_Code",
@@ -1115,11 +1115,7 @@ def is_transformer_lens_official_model_name(model_name: str) -> bool:
     lowered = model_name.lower()
     official = {name.lower() for name in TRANSFORMER_LENS_OFFICIAL_MODEL_NAMES}
     official_alias = TRANSFORMER_LENS_OFFICIAL_MODEL_ALIASES.get(lowered)
-    return (
-        lowered in official
-        or official_alias is not None
-        and official_alias.lower() in official
-    )
+    return lowered in official or official_alias is not None and official_alias.lower() in official
 
 
 def is_transformer_lens_supported_model_name(model_name: str) -> bool:
@@ -1127,14 +1123,8 @@ def is_transformer_lens_supported_model_name(model_name: str) -> bool:
     lowered = model_name.lower()
     official = {name.lower() for name in TRANSFORMER_LENS_OFFICIAL_MODEL_NAMES}
     aliases = {name.lower() for name in TRANSFORMER_LENS_COMMON_ALIASES}
-    compatible_aliases = {
-        name.lower() for name in TRANSFORMER_LENS_COMPATIBLE_MODEL_ALIASES
-    }
-    return (
-        lowered in official
-        or lowered in aliases
-        or lowered in compatible_aliases
-    )
+    compatible_aliases = {name.lower() for name in TRANSFORMER_LENS_COMPATIBLE_MODEL_ALIASES}
+    return lowered in official or lowered in aliases or lowered in compatible_aliases
 
 
 def transformer_lens_model_kind(model_name: str) -> str:

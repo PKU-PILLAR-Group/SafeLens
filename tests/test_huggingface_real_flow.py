@@ -7,9 +7,13 @@ from typing import Any
 
 import pytest
 
-from SafeLens.core.base import PipelineConfig
-from SafeLens.core.analysis import compute_head_results_from_z, detect_head, direct_logit_attribution
+from SafeLens.core.analysis import (
+    compute_head_results_from_z,
+    detect_head,
+    direct_logit_attribution,
+)
 from SafeLens.core.analysis import test_prompt as run_test_prompt
+from SafeLens.core.base import PipelineConfig
 from SafeLens.core.hooks import ActivationCache
 from SafeLens.pipelines.runner import PipelineRunner
 from SafeLens.utils import HuggingFaceModelWrapper, build_model_wrapper
@@ -135,7 +139,10 @@ def test_huggingface_wrapper_real_model_forward_cache_and_generate() -> None:
             pad_token_id=wrapper.tokenizer.eos_token_id,
             return_type="tokens",
         )
-        assert torch.equal(generated_tokens[:, : wrapper.to_tokens("SafeLens").shape[1]], wrapper.to_tokens("SafeLens"))
+        assert torch.equal(
+            generated_tokens[:, : wrapper.to_tokens("SafeLens").shape[1]],
+            wrapper.to_tokens("SafeLens"),
+        )
         generated_embeds = wrapper.generate(
             "SafeLens",
             max_new_tokens=1,
@@ -160,7 +167,9 @@ def test_huggingface_wrapper_real_model_forward_cache_and_generate() -> None:
             pad_token_id=wrapper.tokenizer.eos_token_id,
         )
         assert generated_embeds_from_embeds.shape[1] == input_embeds.shape[1] + 1
-        assert torch.allclose(generated_embeds_from_embeds[:, : input_embeds.shape[1]], input_embeds)
+        assert torch.allclose(
+            generated_embeds_from_embeds[:, : input_embeds.shape[1]], input_embeds
+        )
         stream_chunks = list(
             wrapper.generate_stream(
                 "SafeLens",

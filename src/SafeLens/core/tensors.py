@@ -38,7 +38,7 @@ def _is_torch_tensor(value: Any) -> bool:
     torch = _torch_module()
     if torch is None:
         return False
-    return isinstance(value, (torch.Tensor, torch.nn.parameter.Parameter))
+    return isinstance(value, torch.Tensor | torch.nn.parameter.Parameter)
 
 
 def _is_numpy_array(value: Any) -> bool:
@@ -52,11 +52,11 @@ def to_numpy(tensor: Any) -> Any:
     np = _require_numpy()
     if isinstance(tensor, np.ndarray):
         return tensor
-    if isinstance(tensor, (list, tuple, range)):
+    if isinstance(tensor, list | tuple | range):
         return np.array(tensor)
     if _is_torch_tensor(tensor):
         return tensor.detach().cpu().numpy()
-    if isinstance(tensor, (int, float, bool, str)):
+    if isinstance(tensor, int | float | bool | str):
         return np.array(tensor)
     raise ValueError(f"Input to to_numpy has invalid type: {type(tensor)}")
 
@@ -95,7 +95,7 @@ class Slice:
 
     @staticmethod
     def _is_array_input(value: Any) -> bool:
-        return isinstance(value, (list, range)) or _is_numpy_array(value) or _is_torch_tensor(value)
+        return isinstance(value, list | range) or _is_numpy_array(value) or _is_torch_tensor(value)
 
     @staticmethod
     def _array_index(value: Any) -> Any:
@@ -316,7 +316,9 @@ def repeat_along_head_dimension(tensor: Any, n_heads: int, clone_tensor: bool = 
 
     shape = _shape_of(tensor)
     if not shape:
-        raise ValueError("repeat_along_head_dimension expects a tensor with at least one dimension.")
+        raise ValueError(
+            "repeat_along_head_dimension expects a tensor with at least one dimension."
+        )
 
     unsqueeze = getattr(tensor, "unsqueeze", None)
     if callable(unsqueeze):
@@ -445,7 +447,10 @@ def _cumsum_nested(value: Any, dim: int, *, reverse: bool) -> Any:
 
 def _add_nested(left: Any, right: Any) -> Any:
     if isinstance(left, Sequence) and not isinstance(left, str | bytes):
-        return [_add_nested(left_item, right_item) for left_item, right_item in zip(left, right)]
+        return [
+            _add_nested(left_item, right_item)
+            for left_item, right_item in zip(left, right, strict=False)
+        ]
     return left + right
 
 

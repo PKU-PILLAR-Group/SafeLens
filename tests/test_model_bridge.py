@@ -5,12 +5,12 @@ from typing import Any
 
 import pytest
 
-from SafeLens.core.factored_matrix import FactoredMatrix, matmul, transpose
 from SafeLens.core.analysis import (
     detect_head,
-    lm_cross_entropy_loss,
     get_previous_token_head_detection_pattern,
+    lm_cross_entropy_loss,
 )
+from SafeLens.core.factored_matrix import FactoredMatrix, matmul, transpose
 from SafeLens.core.hooks import ActivationCache
 from SafeLens.core.kv_cache import KeyValueCache
 from SafeLens.core.patching import PatchSpec, run_activation_patch
@@ -25,8 +25,8 @@ from SafeLens.utils import (
 )
 from SafeLens.utils.model_bridge import (
     ComponentHookContext,
-    ComponentRef,
     ComponentHookSpec,
+    ComponentRef,
     apply_attention_result_patch,
     attention_head_count,
     attention_head_dim,
@@ -40,10 +40,6 @@ from SafeLens.utils.model_bridge import (
     reshape_joint_qkv_attention_weight,
     transformer_lens_component_name,
 )
-from SafeLens.utils.transformer_lens_support import (
-    is_transformer_lens_native_checkpoint,
-    transformer_lens_official_model_names,
-)
 from SafeLens.utils.model_wrapper import (
     _append_sequence_values,
     _attention_mask_from_tokens,
@@ -51,10 +47,14 @@ from SafeLens.utils.model_wrapper import (
     _concat_token_chunks,
     _default_cache_hook_names,
     _past_kv_cache_to_transformers_cache,
-    _single_token_list,
     _prepend_bos_token,
+    _single_token_list,
     _slice_generated_suffix,
     _wrapper_looks_like_local_path,
+)
+from SafeLens.utils.transformer_lens_support import (
+    is_transformer_lens_native_checkpoint,
+    transformer_lens_official_model_names,
 )
 
 
@@ -594,7 +594,12 @@ class _FakeListWeightedLayer(_FakeLayer):
             [8, 9, 10, 11],
         )
         self.self_attn.o_proj = _FakeModule(
-            [[120, 121, 122, 123], [130, 131, 132, 133], [140, 141, 142, 143], [150, 151, 152, 153]],
+            [
+                [120, 121, 122, 123],
+                [130, 131, 132, 133],
+                [140, 141, 142, 143],
+                [150, 151, 152, 153],
+            ],
             [12, 13, 14, 15],
         )
         self.mlp = type(
@@ -616,9 +621,7 @@ class _FakeListWeightedLayer(_FakeLayer):
 
 class _FakeListWeightedBackbone:
     def __init__(self) -> None:
-        self.embed_tokens = _FakeModule(
-            [[0, 1, 2, 3], [10, 11, 12, 13], [20, 21, 22, 23]]
-        )
+        self.embed_tokens = _FakeModule([[0, 1, 2, 3], [10, 11, 12, 13], [20, 21, 22, 23]])
         self.wte = self.embed_tokens
         self.wpe = _FakeModule([[30, 31, 32, 33], [40, 41, 42, 43]])
         self.layers = [_FakeListWeightedLayer()]
@@ -728,7 +731,9 @@ class _FakeGpt2EmbeddingTransformer(_FakeGpt2Transformer):
         torch = pytest.importorskip("torch")
         super().__init__()
         self.wte = _FakeHookableEmbedding(torch.arange(60, dtype=torch.float32).reshape(10, 6))
-        self.wpe = _FakeHookableEmbedding(torch.arange(600, 660, dtype=torch.float32).reshape(10, 6))
+        self.wpe = _FakeHookableEmbedding(
+            torch.arange(600, 660, dtype=torch.float32).reshape(10, 6)
+        )
         self.ln_f = torch.nn.LayerNorm(6, elementwise_affine=False)
 
 
@@ -775,8 +780,12 @@ class _CallableGpt2Block(_FakeModule):
         past_key_values = kwargs.get("past_key_values")
         if past_key_values is not None:
             torch = pytest.importorskip("torch")
-            cache_keys = torch.full((hidden_states.shape[0], 2, hidden_states.shape[1], 3), self.delta)
-            cache_values = torch.full((hidden_states.shape[0], 2, hidden_states.shape[1], 3), -self.delta)
+            cache_keys = torch.full(
+                (hidden_states.shape[0], 2, hidden_states.shape[1], 3), self.delta
+            )
+            cache_values = torch.full(
+                (hidden_states.shape[0], 2, hidden_states.shape[1], 3), -self.delta
+            )
             past_key_values.update(cache_keys, cache_values, self.layer_index)
         return self.run_forward(hidden_states + self.delta, inputs=(hidden_states,))
 
@@ -1595,7 +1604,7 @@ class _FakeSeq2SeqGenerateModel:
 
     def generate(self, **kwargs: Any) -> Any:
         self.calls.append(kwargs)
-        torch = pytest.importorskip("torch")
+        pytest.importorskip("torch")
         reference = kwargs.get("input_ids", kwargs.get("inputs_embeds"))
         sequences = self.sequences
         if hasattr(reference, "device"):
@@ -1677,10 +1686,7 @@ class _FakeTextTokenizer:
         if padding:
             max_length = max((len(row) for row in rows), default=0)
             if self.padding_side == "left":
-                rows = [
-                    [self.eos_token_id] * (max_length - len(row)) + row
-                    for row in rows
-                ]
+                rows = [[self.eos_token_id] * (max_length - len(row)) + row for row in rows]
             else:
                 rows = [row + [self.eos_token_id] * (max_length - len(row)) for row in rows]
         return _FakeTokenizerOutput({"input_ids": torch.tensor(rows)})
@@ -1798,10 +1804,7 @@ class _TinyTextTokenizer(_FakeTextTokenizer):
         if padding:
             max_length = max((len(row) for row in rows), default=0)
             if self.padding_side == "left":
-                rows = [
-                    [self.pad_token_id] * (max_length - len(row)) + row
-                    for row in rows
-                ]
+                rows = [[self.pad_token_id] * (max_length - len(row)) + row for row in rows]
             else:
                 rows = [row + [self.pad_token_id] * (max_length - len(row)) for row in rows]
         return _FakeTokenizerOutput({"input_ids": torch.tensor(rows)})
@@ -1855,10 +1858,13 @@ def test_architecture_adapter_maps_mamba_ssm_components() -> None:
     adapter = architecture_adapter_for_model(model, model_name="state-spaces/mamba-130m-hf")
 
     assert adapter.name == "mamba_ssm"
-    assert architecture_adapter_for_name(
-        model_name="state-spaces/mamba-130m-hf",
-        model_type="mamba",
-    ).name == "mamba_ssm"
+    assert (
+        architecture_adapter_for_name(
+            model_name="state-spaces/mamba-130m-hf",
+            model_type="mamba",
+        ).name
+        == "mamba_ssm"
+    )
     assert transformer_lens_component_name("ssm_in", 0) == "blocks.0.ssm.hook_in"
     assert adapter.parse_component_ref("blocks.0.ssm.hook_in").safelens_name == "layer_0.ssm_in"  # type: ignore[union-attr]
     assert adapter.parse_component_ref("blocks.0.ssm.hook_dt").safelens_name == "layer_0.ssm_dt"  # type: ignore[union-attr]
@@ -1905,11 +1911,17 @@ def test_architecture_adapter_maps_mamba2_ssm_components() -> None:
     adapter = architecture_adapter_for_model(model, model_name="state-spaces/mamba2-130m")
 
     assert adapter.name == "mamba2_ssm"
-    assert architecture_adapter_for_name(
-        model_name="state-spaces/mamba2-130m",
-        model_type="mamba2",
-    ).name == "mamba2_ssm"
-    assert adapter.parse_component_ref("blocks.0.ssm.hook_inner_norm").safelens_name == "layer_0.ssm_inner_norm"  # type: ignore[union-attr]
+    assert (
+        architecture_adapter_for_name(
+            model_name="state-spaces/mamba2-130m",
+            model_type="mamba2",
+        ).name
+        == "mamba2_ssm"
+    )
+    assert (
+        adapter.parse_component_ref("blocks.0.ssm.hook_inner_norm").safelens_name
+        == "layer_0.ssm_inner_norm"
+    )  # type: ignore[union-attr]
 
     adapter.register_component_hook(
         model,
@@ -2057,15 +2069,35 @@ def test_t5_architecture_adapter_supports_decoder_and_cross_attention_paths() ->
     assert adapter.parse_component_ref("encoder.0.attn.hook_q").safelens_name == "layer_0.q"  # type: ignore[union-attr]
     assert adapter.parse_component_ref("encoder.0.hook_mlp_in").safelens_name == "layer_0.mlp_in"  # type: ignore[union-attr]
     assert adapter.parse_component_ref("encoder.0.mlp.hook_post").safelens_name == "layer_0.post"  # type: ignore[union-attr]
-    assert adapter.parse_component_ref("decoder.0.hook_q_input").safelens_name == "layer_0.decoder_q_input"  # type: ignore[union-attr]
-    assert adapter.parse_component_ref("decoder.0.hook_attn_in").safelens_name == "layer_0.decoder_attn_in"  # type: ignore[union-attr]
+    assert (
+        adapter.parse_component_ref("decoder.0.hook_q_input").safelens_name
+        == "layer_0.decoder_q_input"
+    )  # type: ignore[union-attr]
+    assert (
+        adapter.parse_component_ref("decoder.0.hook_attn_in").safelens_name
+        == "layer_0.decoder_attn_in"
+    )  # type: ignore[union-attr]
     assert adapter.parse_component_ref("decoder.0.attn.hook_q").safelens_name == "layer_0.decoder_q"  # type: ignore[union-attr]
-    assert adapter.parse_component_ref("decoder.0.cross_attn.hook_q").safelens_name == "layer_0.cross_q"  # type: ignore[union-attr]
-    assert adapter.parse_component_ref("decoder.0.hook_mlp_in").safelens_name == "layer_0.decoder_mlp_in"  # type: ignore[union-attr]
-    assert adapter.parse_component_ref("blocks.0.cross_attn.hook_q").safelens_name == "layer_0.cross_q"  # type: ignore[union-attr]
-    assert adapter.parse_component_ref("layer_0.q_input").transformer_lens_name == "encoder.0.hook_q_input"  # type: ignore[union-attr]
+    assert (
+        adapter.parse_component_ref("decoder.0.cross_attn.hook_q").safelens_name
+        == "layer_0.cross_q"
+    )  # type: ignore[union-attr]
+    assert (
+        adapter.parse_component_ref("decoder.0.hook_mlp_in").safelens_name
+        == "layer_0.decoder_mlp_in"
+    )  # type: ignore[union-attr]
+    assert (
+        adapter.parse_component_ref("blocks.0.cross_attn.hook_q").safelens_name == "layer_0.cross_q"
+    )  # type: ignore[union-attr]
+    assert (
+        adapter.parse_component_ref("layer_0.q_input").transformer_lens_name
+        == "encoder.0.hook_q_input"
+    )  # type: ignore[union-attr]
     assert adapter.parse_component_ref("layer_0.q").transformer_lens_name == "encoder.0.attn.hook_q"  # type: ignore[union-attr]
-    assert adapter.parse_component_ref("layer_0.mlp_in").transformer_lens_name == "encoder.0.hook_mlp_in"  # type: ignore[union-attr]
+    assert (
+        adapter.parse_component_ref("layer_0.mlp_in").transformer_lens_name
+        == "encoder.0.hook_mlp_in"
+    )  # type: ignore[union-attr]
     assert transformer_lens_component_name("q_input", 0) == "blocks.0.hook_q_input"
     assert transformer_lens_component_name("attn_in", 0) == "blocks.0.hook_attn_in"
     assert transformer_lens_component_name("decoder_q", 0) == "decoder.0.attn.hook_q"
@@ -2073,7 +2105,10 @@ def test_t5_architecture_adapter_supports_decoder_and_cross_attention_paths() ->
     assert transformer_lens_component_name("decoder_attn_in", 0) == "decoder.0.hook_attn_in"
     assert transformer_lens_component_name("cross_attn_in", 0) == "decoder.0.hook_cross_attn_in"
     assert transformer_lens_component_name("cross_q", 0) == "decoder.0.cross_attn.hook_q"
-    assert transformer_lens_component_name("decoder_resid_mid_cross", 0) == "decoder.0.hook_resid_mid_cross"
+    assert (
+        transformer_lens_component_name("decoder_resid_mid_cross", 0)
+        == "decoder.0.hook_resid_mid_cross"
+    )
     assert transformer_lens_component_name("decoder_mlp_in", 0) == "decoder.0.hook_mlp_in"
 
     adapter.register_component_hook(
@@ -2148,7 +2183,9 @@ def test_t5_architecture_adapter_supports_decoder_and_cross_attention_paths() ->
         "decoder.0.hook_q_input",
         constant_patch("decoder_q_input", 4),
     )
-    assert torch.equal(isolated_decoder_block.layer[0].layer_norm.run_pre(input_tensor), input_tensor)
+    assert torch.equal(
+        isolated_decoder_block.layer[0].layer_norm.run_pre(input_tensor), input_tensor
+    )
     decoder_q = isolated_decoder_block.layer[0].SelfAttention.q(input_tensor)
     assert seen_shapes["decoder_q_input"] == (1, 1, 2, 4)
     assert tuple(decoder_q.shape) == (1, 1, 4)
@@ -2459,7 +2496,9 @@ def test_architecture_adapter_result_hook_preserves_structured_list_output() -> 
     def append_metadata_output(output: Any) -> list[Any]:
         return [output, {"present": True}]
 
-    attention.o_proj.register_forward_hook(lambda _module, _inputs, output: append_metadata_output(output))
+    attention.o_proj.register_forward_hook(
+        lambda _module, _inputs, output: append_metadata_output(output)
+    )
 
     def zero_first_head(**kwargs: Any) -> Any:
         patched = [[list(pos_heads) for pos_heads in batch] for batch in kwargs["activation"]]
@@ -2892,13 +2931,9 @@ def test_architecture_adapter_can_infer_from_model_name_without_loading_config()
         architecture_adapter_for_name(model_name="swiss-ai/Apertus-8B-2509").name
         == "apertus_decoder"
     )
+    assert architecture_adapter_for_name(model_name="openai/gpt-oss-20b").name == "gpt_oss_decoder"
     assert (
-        architecture_adapter_for_name(model_name="openai/gpt-oss-20b").name
-        == "gpt_oss_decoder"
-    )
-    assert (
-        architecture_adapter_for_name(model_name="bigcode/santacoder").name
-        == "gpt_bigcode_decoder"
+        architecture_adapter_for_name(model_name="bigcode/santacoder").name == "gpt_bigcode_decoder"
     )
     assert architecture_adapter_for_name(model_name="facebook/opt-125m").name == "opt_decoder"
 
@@ -3013,7 +3048,9 @@ def test_transformer_lens_compatible_wrapper_caches_top_level_embedding_hooks() 
     assert torch.equal(cache["hook_pos_embed"], expected_pos)
     assert torch.equal(cache["pos_embed"], expected_pos)
     assert torch.equal(cache[("resid_pre", 0)], expected_embed + expected_pos)
-    assert torch.equal(output["logits"], wrapper.model.transformer.ln_f(expected_embed + expected_pos))
+    assert torch.equal(
+        output["logits"], wrapper.model.transformer.ln_f(expected_embed + expected_pos)
+    )
 
 
 def test_transformer_lens_compatible_wrapper_caches_final_ln_scale_hook() -> None:
@@ -3076,9 +3113,7 @@ def test_transformer_lens_compatible_wrapper_prefers_decoder_final_norm_for_seq2
         return_cache_object=True,
     )
 
-    expected_decoder_scale = torch.sqrt(
-        torch.tensor([[[4.0], [16.0]]]) + 1e-5
-    )
+    expected_decoder_scale = torch.sqrt(torch.tensor([[[4.0], [16.0]]]) + 1e-5)
     assert torch.allclose(cache["ln_final.hook_scale"], expected_decoder_scale)
 
 
@@ -3142,7 +3177,9 @@ def test_transformer_lens_compatible_wrapper_patches_top_level_embedding_hook() 
 
     expected_embed = wrapper.model.transformer.wte.weight[torch.tensor([[1, 2]])] + 10
     expected_pos = wrapper.model.transformer.wpe.weight[torch.tensor([[0, 1]])]
-    assert torch.equal(output["logits"], wrapper.model.transformer.ln_f(expected_embed + expected_pos))
+    assert torch.equal(
+        output["logits"], wrapper.model.transformer.ln_f(expected_embed + expected_pos)
+    )
     assert seen == [("hook_embed", 0)]
     assert wrapper.model.transformer.wte.forward_hooks == []
     assert wrapper._hooks == []
@@ -3358,9 +3395,7 @@ def test_transformer_lens_compatible_wrapper_supports_detect_head_workflow() -> 
                 torch.tensor(20.0),
                 scores[1:, :-1],
             )
-            self.model.layers[0].self_attn.forward(
-                scores.unsqueeze(0).unsqueeze(0)
-            )
+            self.model.layers[0].self_attn.forward(scores.unsqueeze(0).unsqueeze(0))
             return {"logits": tokens}
 
     wrapper = TransformerLensCompatibleModelWrapper(name="Qwen/Qwen3-8B")
@@ -3379,7 +3414,9 @@ def test_transformer_lens_compatible_wrapper_supports_detect_head_workflow() -> 
     assert scores[0, 1] == -1
 
 
-def test_transformer_lens_compatible_wrapper_mapping_inputs_keep_legacy_empty_cache_default() -> None:
+def test_transformer_lens_compatible_wrapper_mapping_inputs_keep_legacy_empty_cache_default() -> (
+    None
+):
     wrapper = TransformerLensCompatibleModelWrapper(name="Qwen/Qwen3-8B")
     wrapper.model = _FakeQwenModel()
 
@@ -3562,7 +3599,9 @@ def test_transformer_lens_compatible_wrapper_is_caching_tracks_cache_lifecycle()
     assert wrapper.is_caching is False
 
 
-def test_transformer_lens_compatible_wrapper_run_with_cache_preserves_persistent_cache_state() -> None:
+def test_transformer_lens_compatible_wrapper_run_with_cache_preserves_persistent_cache_state() -> (
+    None
+):
     wrapper = TransformerLensCompatibleModelWrapper(name="Qwen/Qwen3-8B")
     wrapper.model = _FakeQwenModel()
 
@@ -3582,7 +3621,9 @@ def test_transformer_lens_compatible_wrapper_run_with_cache_preserves_persistent
     assert wrapper.is_caching is False
 
 
-def test_transformer_lens_compatible_wrapper_permanent_non_cache_hook_does_not_mark_caching() -> None:
+def test_transformer_lens_compatible_wrapper_permanent_non_cache_hook_does_not_mark_caching() -> (
+    None
+):
     wrapper = TransformerLensCompatibleModelWrapper(name="Qwen/Qwen3-8B")
     wrapper.model = _FakeQwenModel()
 
@@ -3600,7 +3641,9 @@ def test_transformer_lens_compatible_wrapper_permanent_non_cache_hook_does_not_m
     wrapper.reset_hooks(including_permanent=True)
 
 
-def test_transformer_lens_compatible_wrapper_add_caching_hooks_rolls_back_on_invalid_layer() -> None:
+def test_transformer_lens_compatible_wrapper_add_caching_hooks_rolls_back_on_invalid_layer() -> (
+    None
+):
     wrapper = TransformerLensCompatibleModelWrapper(name="Qwen/Qwen3-8B")
     wrapper.model = _FakeQwenModel()
     q_proj = wrapper.model.model.layers[0].self_attn.q_proj
@@ -3647,7 +3690,9 @@ def test_transformer_lens_compatible_wrapper_call_returns_logits_by_default() ->
     wrapper.model = _LogitQwenModel()
 
     assert wrapper([1, 2]) == "logit-value"
-    assert wrapper({"input_ids": [[1, 2]], "return_loss": True}, return_type="logits") == "logit-value"
+    assert (
+        wrapper({"input_ids": [[1, 2]], "return_loss": True}, return_type="logits") == "logit-value"
+    )
     assert wrapper({"input_ids": [[1, 2]], "return_loss": True}, return_type="loss") == "loss-value"
     assert wrapper({"input_ids": [[1, 2]], "return_loss": True}, return_type=None) is None
 
@@ -3676,16 +3721,15 @@ def test_transformer_lens_compatible_wrapper_forward_alias_accepts_tl_kwargs() -
         wrapper.forward(torch.tensor([[1, 2]]), start_at_layer=1)
 
 
-def test_transformer_lens_compatible_wrapper_forward_stop_at_layer_zero_returns_embedding_residual() -> None:
+def test_wrapper_forward_stop_at_layer_zero_returns_embedding_residual() -> None:
     torch = pytest.importorskip("torch")
     wrapper = TransformerLensCompatibleModelWrapper(name="gpt2")
     wrapper.model = _FakeGpt2EmbeddingModel()
     wrapper.tokenizer = _TinyTextTokenizer()
 
     tokens = torch.tensor([[1, 2]])
-    expected = (
-        wrapper.model.transformer.wte(tokens)
-        + wrapper.model.transformer.wpe(torch.tensor([[0, 1]]))
+    expected = wrapper.model.transformer.wte(tokens) + wrapper.model.transformer.wpe(
+        torch.tensor([[0, 1]])
     )
 
     assert torch.equal(wrapper.forward(tokens, stop_at_layer=0), expected)
@@ -3701,10 +3745,9 @@ def test_transformer_lens_compatible_wrapper_call_accepts_partial_forward_kwargs
     wrapper.model = _FakeGpt2EmbeddingModel()
     wrapper.tokenizer = _TinyTextTokenizer()
 
-    expected = (
-        wrapper.model.transformer.wte(torch.tensor([[1, 2]]))
-        + wrapper.model.transformer.wpe(torch.tensor([[0, 1]]))
-    )
+    expected = wrapper.model.transformer.wte(
+        torch.tensor([[1, 2]])
+    ) + wrapper.model.transformer.wpe(torch.tensor([[0, 1]]))
 
     output = wrapper("ab", prepend_bos=False, stop_at_layer=0, truncate=False)
 
@@ -3718,9 +3761,8 @@ def test_transformer_lens_compatible_wrapper_forward_runs_partial_layer_slice() 
     wrapper.tokenizer = _TinyTextTokenizer()
 
     tokens = torch.tensor([[1, 2]])
-    embedded = (
-        wrapper.model.transformer.wte(tokens)
-        + wrapper.model.transformer.wpe(torch.tensor([[0, 1]]))
+    embedded = wrapper.model.transformer.wte(tokens) + wrapper.model.transformer.wpe(
+        torch.tensor([[0, 1]])
     )
 
     assert torch.equal(wrapper.forward(tokens, stop_at_layer=1), embedded + 10.0)
@@ -3825,7 +3867,7 @@ def test_transformer_lens_compatible_wrapper_partial_forward_slices_cached_posit
     assert torch.equal(call["cache_position"], torch.tensor([2]))
 
 
-def test_transformer_lens_compatible_wrapper_forward_accepts_sparse_cache_after_partial_prefix() -> None:
+def test_wrapper_forward_accepts_sparse_cache_after_partial_prefix() -> None:
     torch = pytest.importorskip("torch")
     wrapper = TransformerLensCompatibleModelWrapper(name="gpt2")
     wrapper.model = _CallableGpt2Model()
@@ -3938,7 +3980,9 @@ def test_transformer_lens_compatible_run_with_cache_accepts_partial_forward_kwar
         stop_at_layer=0,
     )
 
-    assert torch.equal(residual, cache["hook_embed"] + wrapper.model.transformer.wpe(torch.tensor([[0, 1]])))
+    assert torch.equal(
+        residual, cache["hook_embed"] + wrapper.model.transformer.wpe(torch.tensor([[0, 1]]))
+    )
 
 
 def test_transformer_lens_compatible_run_with_hooks_accepts_partial_forward_kwargs() -> None:
@@ -4019,7 +4063,8 @@ def test_transformer_lens_compatible_wrapper_run_with_hooks_supports_backward_ho
         bwd_hooks=[
             (
                 "blocks.0.hook_resid_post",
-                lambda grad, hook: seen_grads.append((grad.detach().clone(), hook.name)) or grad * 3,
+                lambda grad, hook: seen_grads.append((grad.detach().clone(), hook.name))
+                or grad * 3,
             )
         ],
         return_type="logits",
@@ -4057,9 +4102,7 @@ def test_transformer_lens_compatible_wrapper_hooks_context_supports_backward_hoo
     wrapper.model = _DifferentiableModel()
     x = torch.ones(1, 1, 4, requires_grad=True)
 
-    with wrapper.hooks(
-        bwd_hooks=[("blocks.0.hook_resid_post", lambda grad, _hook: grad * 2)]
-    ):
+    with wrapper.hooks(bwd_hooks=[("blocks.0.hook_resid_post", lambda grad, _hook: grad * 2)]):
         loss = wrapper({"inputs_embeds": x})
         loss.backward()
 
@@ -4231,7 +4274,9 @@ def test_transformer_lens_compatible_run_with_cache_incl_bwd_requires_scalar_out
     assert wrapper._hooks == []
 
 
-def test_transformer_lens_compatible_wrapper_low_level_embed_helpers_match_transformerlens() -> None:
+def test_transformer_lens_compatible_wrapper_low_level_embed_helpers_match_transformerlens() -> (
+    None
+):
     torch = pytest.importorskip("torch")
     wrapper = TransformerLensCompatibleModelWrapper(name="gpt2")
     wrapper.model = _FakeGpt2EmbeddingModel()
@@ -4249,7 +4294,9 @@ def test_transformer_lens_compatible_wrapper_low_level_embed_helpers_match_trans
     expected_pos = wrapper.model.transformer.wpe(torch.tensor([[0, 1]]))
     expected_resid = expected_embed + expected_pos
 
-    residual, returned_tokens, shortformer_pos_embed, attention_mask = wrapper.input_to_embed(tokens)
+    residual, returned_tokens, shortformer_pos_embed, attention_mask = wrapper.input_to_embed(
+        tokens
+    )
 
     assert torch.equal(returned_tokens, tokens)
     assert shortformer_pos_embed is None
@@ -4286,7 +4333,9 @@ def test_transformer_lens_compatible_wrapper_low_level_embed_helpers_match_trans
     )
 
 
-def test_transformer_lens_compatible_wrapper_uses_kv_cache_sequence_axis_for_position_offset() -> None:
+def test_transformer_lens_compatible_wrapper_uses_kv_cache_sequence_axis_for_position_offset() -> (
+    None
+):
     torch = pytest.importorskip("torch")
     wrapper = TransformerLensCompatibleModelWrapper(name="gpt2")
     wrapper.model = _FakeGpt2EmbeddingModel()
@@ -4323,7 +4372,9 @@ def test_transformer_lens_compatible_wrapper_weight_processing_boundaries() -> N
     assert wrapper.sample_datapoint() == "row"
 
 
-def test_transformer_lens_compatible_wrapper_from_pretrained_loads_wrapper(monkeypatch: Any) -> None:
+def test_transformer_lens_compatible_wrapper_from_pretrained_loads_wrapper(
+    monkeypatch: Any,
+) -> None:
     created: list[TransformerLensCompatibleModelWrapper] = []
     process_calls: list[dict[str, Any]] = []
 
@@ -4466,9 +4517,19 @@ def test_transformer_lens_compatible_wrapper_load_model_processes_weights_once(
         model.eval = lambda: model
         return model
 
-    monkeypatch.setattr(TransformerLensCompatibleModelWrapper, "_is_supported_transformer_lens_target", fake_supported)
-    monkeypatch.setattr(TransformerLensCompatibleModelWrapper, "_resolve_pretrained_path", fake_resolve)
-    monkeypatch.setattr(TransformerLensCompatibleModelWrapper, "_raise_if_native_transformer_lens_checkpoint", fake_raise)
+    monkeypatch.setattr(
+        TransformerLensCompatibleModelWrapper,
+        "_is_supported_transformer_lens_target",
+        fake_supported,
+    )
+    monkeypatch.setattr(
+        TransformerLensCompatibleModelWrapper, "_resolve_pretrained_path", fake_resolve
+    )
+    monkeypatch.setattr(
+        TransformerLensCompatibleModelWrapper,
+        "_raise_if_native_transformer_lens_checkpoint",
+        fake_raise,
+    )
     monkeypatch.setattr(
         TransformerLensCompatibleModelWrapper,
         "_transformer_lens_model_kind",
@@ -4490,8 +4551,12 @@ def test_transformer_lens_compatible_wrapper_load_model_processes_weights_once(
     second_model = wrapper.load_model()
 
     assert model is not second_model
-    assert torch.equal(model.model.embed_tokens.weight, torch.arange(20, dtype=torch.float32).reshape(5, 4))
-    assert torch.equal(second_model.model.embed_tokens.weight, torch.arange(20, dtype=torch.float32).reshape(5, 4))
+    assert torch.equal(
+        model.model.embed_tokens.weight, torch.arange(20, dtype=torch.float32).reshape(5, 4)
+    )
+    assert torch.equal(
+        second_model.model.embed_tokens.weight, torch.arange(20, dtype=torch.float32).reshape(5, 4)
+    )
     assert torch.equal(model.model.layers[0].self_attn.v_proj.bias, torch.zeros(4))
     assert torch.equal(second_model.model.layers[0].self_attn.v_proj.bias, torch.zeros(4))
     assert wrapper._weights_processed is True
@@ -4515,7 +4580,9 @@ def test_transformer_lens_compatible_wrapper_call_uses_tokenization_kwargs_for_t
 
     logits = wrapper("ab", prepend_bos=False, padding_side="left", truncate=False)
 
-    assert torch.equal(logits, wrapper.to_tokens("ab", prepend_bos=False, padding_side="left", truncate=False))
+    assert torch.equal(
+        logits, wrapper.to_tokens("ab", prepend_bos=False, padding_side="left", truncate=False)
+    )
     call = wrapper.model.calls[0]
     assert "prepend_bos" not in call
     assert "padding_side" not in call
@@ -4540,11 +4607,15 @@ def test_transformer_lens_compatible_wrapper_call_tokenizes_tuple_text_batches()
 
     logits = wrapper(("a", "bc"), prepend_bos=False, padding_side="left")
 
-    assert torch.equal(logits, wrapper.to_tokens(("a", "bc"), prepend_bos=False, padding_side="left"))
+    assert torch.equal(
+        logits, wrapper.to_tokens(("a", "bc"), prepend_bos=False, padding_side="left")
+    )
     assert torch.equal(wrapper.model.calls[0]["attention_mask"], torch.tensor([[0, 1], [1, 1]]))
 
 
-def test_transformer_lens_compatible_wrapper_run_with_cache_uses_tokenization_kwargs_for_text() -> None:
+def test_transformer_lens_compatible_wrapper_run_with_cache_uses_tokenization_kwargs_for_text() -> (
+    None
+):
     torch = pytest.importorskip("torch")
 
     class _EchoInputModel(_FakeQwenModel):
@@ -4565,14 +4636,18 @@ def test_transformer_lens_compatible_wrapper_run_with_cache_uses_tokenization_kw
         return_type="logits",
     )
 
-    assert torch.equal(logits, wrapper.to_tokens("ab", prepend_bos=False, padding_side="left", truncate=False))
+    assert torch.equal(
+        logits, wrapper.to_tokens("ab", prepend_bos=False, padding_side="left", truncate=False)
+    )
     call = wrapper.model.calls[0]
     assert "prepend_bos" not in call
     assert "padding_side" not in call
     assert "truncate" not in call
 
 
-def test_transformer_lens_compatible_wrapper_run_with_hooks_uses_tokenization_kwargs_for_text() -> None:
+def test_transformer_lens_compatible_wrapper_run_with_hooks_uses_tokenization_kwargs_for_text() -> (
+    None
+):
     torch = pytest.importorskip("torch")
 
     class _EchoInputModel(_FakeQwenModel):
@@ -4813,7 +4888,9 @@ def test_transformer_lens_compatible_wrapper_tensorizes_tuple_token_model_inputs
             self.calls.append(kwargs)
             assert isinstance(kwargs["input_ids"], torch.Tensor)
             assert isinstance(kwargs["attention_mask"], torch.Tensor)
-            logits = torch.nn.functional.one_hot(kwargs["input_ids"], num_classes=3).to(torch.float32)
+            logits = torch.nn.functional.one_hot(kwargs["input_ids"], num_classes=3).to(
+                torch.float32
+            )
             return {"logits": logits}
 
     wrapper = TransformerLensCompatibleModelWrapper(name="Qwen/Qwen3-8B")
@@ -5222,9 +5299,7 @@ def test_transformer_lens_compatible_wrapper_int_pos_slice_preserves_position_di
     class _PosSliceQwenModel(_FakeQwenModel):
         def __call__(self, **kwargs: Any) -> dict[str, Any]:
             _ = kwargs
-            q_out = self.model.layers[0].self_attn.q_proj.run_forward(
-                [[["q0"], ["q1"], ["q2"]]]
-            )
+            q_out = self.model.layers[0].self_attn.q_proj.run_forward([[["q0"], ["q1"], ["q2"]]])
             return {"q": q_out}
 
     wrapper = TransformerLensCompatibleModelWrapper(name="Qwen/Qwen3-8B")
@@ -5482,9 +5557,7 @@ def test_run_activation_patch_with_wrapper_layers_preserves_cache() -> None:
 
     wrapper = TransformerLensCompatibleModelWrapper(name="Qwen/Qwen3-8B")
     wrapper.model = _PatchLogitsQwenModel()
-    clean_cache = ActivationCache(
-        {"blocks.0.attn.hook_q": torch.tensor([[[[5.0], [7.0]]]])}
-    )
+    clean_cache = ActivationCache({"blocks.0.attn.hook_q": torch.tensor([[[[5.0], [7.0]]]])})
 
     result = run_activation_patch(
         wrapper,
@@ -5524,9 +5597,7 @@ def test_run_activation_patch_with_wrapper_layers_preserves_encoder_model_output
 
     wrapper = TransformerLensCompatibleModelWrapper(name="bert-base-uncased")
     wrapper.model = _PatchEncoderQwenModel()
-    clean_cache = ActivationCache(
-        {"blocks.0.attn.hook_q": torch.tensor([[[[5.0], [7.0]]]])}
-    )
+    clean_cache = ActivationCache({"blocks.0.attn.hook_q": torch.tensor([[[[5.0], [7.0]]]])})
 
     result = run_activation_patch(
         wrapper,
@@ -5706,9 +5777,7 @@ def test_transformer_lens_compatible_wrapper_add_perma_hook_accepts_official_hoo
         "q": ["q", "permanent", "temporary"]
     }
     wrapper.reset_hooks()
-    assert wrapper.run_with_cache({"input_ids": [[1, 2]]})[0] == {
-        "q": ["q", "permanent"]
-    }
+    assert wrapper.run_with_cache({"input_ids": [[1, 2]]})[0] == {"q": ["q", "permanent"]}
 
 
 def test_transformer_lens_compatible_wrapper_add_hook_accepts_backward_direction() -> None:
@@ -5818,9 +5887,7 @@ def test_transformer_lens_compatible_wrapper_permanent_hooks_survive_default_res
     )
     wrapper.add_hook("blocks.0.attn.hook_q", lambda **kwargs: kwargs["activation"] + ["temp"])
 
-    assert wrapper.run_with_cache({"input_ids": [[1, 2]]})[0] == {
-        "q": ["q", "permanent", "temp"]
-    }
+    assert wrapper.run_with_cache({"input_ids": [[1, 2]]})[0] == {"q": ["q", "permanent", "temp"]}
 
     wrapper.reset_hooks()
 
@@ -6097,9 +6164,15 @@ def test_huggingface_wrapper_allows_tensor_inputs_when_tokenizer_is_missing() ->
     assert torch.equal(inputs["input_ids"], torch.tensor([[1, 2, 3]]))
     inputs = wrapper._prepare_model_inputs(torch.tensor([1, 2, 3]))
     assert torch.equal(inputs["input_ids"], torch.tensor([[1, 2, 3]]))
-    assert torch.equal(wrapper._prepare_model_inputs([1, 2, 3])["input_ids"], torch.tensor([[1, 2, 3]]))
-    assert torch.equal(wrapper._prepare_model_inputs((1, 2, 3))["input_ids"], torch.tensor([[1, 2, 3]]))
-    assert torch.equal(wrapper._prepare_model_inputs([])["input_ids"], torch.empty((1, 0), dtype=torch.long))
+    assert torch.equal(
+        wrapper._prepare_model_inputs([1, 2, 3])["input_ids"], torch.tensor([[1, 2, 3]])
+    )
+    assert torch.equal(
+        wrapper._prepare_model_inputs((1, 2, 3))["input_ids"], torch.tensor([[1, 2, 3]])
+    )
+    assert torch.equal(
+        wrapper._prepare_model_inputs([])["input_ids"], torch.empty((1, 0), dtype=torch.long)
+    )
     assert torch.equal(wrapper._prepare_model_inputs(7)["input_ids"], torch.tensor([[7]]))
     with pytest.raises(ValueError, match="did not load a tokenizer"):
         wrapper._prepare_model_inputs({"text": "needs tokenizer"})
@@ -6232,8 +6305,12 @@ def test_huggingface_generate_left_pads_text_batches() -> None:
     generated = wrapper.generate(["a", "bc"], max_new_tokens=1)
 
     assert generated == ["a!", "bc!"]
-    assert torch.equal(wrapper.model.calls[0]["input_ids"], torch.tensor([[999, 0, 97], [0, 98, 99]]))
-    assert torch.equal(wrapper.model.calls[0]["attention_mask"], torch.tensor([[0, 1, 1], [1, 1, 1]]))
+    assert torch.equal(
+        wrapper.model.calls[0]["input_ids"], torch.tensor([[999, 0, 97], [0, 98, 99]])
+    )
+    assert torch.equal(
+        wrapper.model.calls[0]["attention_mask"], torch.tensor([[0, 1, 1], [1, 1, 1]])
+    )
     assert wrapper.tokenizer.pad_token is None
     assert wrapper.tokenizer.pad_token_id is None
 
@@ -6331,7 +6408,9 @@ def test_huggingface_generate_tuple_token_inputs_are_tensorized() -> None:
     assert torch.equal(wrapper.model.calls[0]["input_ids"], torch.tensor([[97, 98]]))
 
 
-def test_huggingface_generate_token_inputs_include_attention_mask_when_tokenizer_available() -> None:
+def test_huggingface_generate_token_inputs_include_attention_mask_when_tokenizer_available() -> (
+    None
+):
     torch = pytest.importorskip("torch")
     wrapper = HuggingFaceModelWrapper(name="gpt2")
     wrapper.tokenizer = _PlainGpt2TokenizerWithoutPad()
@@ -6344,7 +6423,9 @@ def test_huggingface_generate_token_inputs_include_attention_mask_when_tokenizer
     )
 
     assert torch.equal(output_tokens, torch.tensor([[999, 0, 97, 33], [0, 98, 99, 33]]))
-    assert torch.equal(wrapper.model.calls[0]["attention_mask"], torch.tensor([[0, 1, 1], [1, 1, 1]]))
+    assert torch.equal(
+        wrapper.model.calls[0]["attention_mask"], torch.tensor([[0, 1, 1], [1, 1, 1]])
+    )
 
 
 def test_huggingface_generate_accepts_transformerlens_generation_kwargs() -> None:
@@ -6586,8 +6667,12 @@ def test_huggingface_generate_stream_token_inputs_extend_attention_mask() -> Non
 
     assert len(chunks) == 1
     assert torch.equal(chunks[0], torch.tensor([[33, 33], [33, 33]]))
-    assert torch.equal(wrapper.model.calls[0]["attention_mask"], torch.tensor([[0, 1, 1], [1, 1, 1]]))
-    assert torch.equal(wrapper.model.calls[1]["attention_mask"], torch.tensor([[0, 1, 1, 1], [1, 1, 1, 1]]))
+    assert torch.equal(
+        wrapper.model.calls[0]["attention_mask"], torch.tensor([[0, 1, 1], [1, 1, 1]])
+    )
+    assert torch.equal(
+        wrapper.model.calls[1]["attention_mask"], torch.tensor([[0, 1, 1, 1], [1, 1, 1, 1]])
+    )
 
 
 def test_huggingface_generate_stream_token_inputs_can_return_strings() -> None:
@@ -6978,7 +7063,7 @@ def test_transformer_lens_compatible_wrapper_residual_directions() -> None:
     assert torch.equal(directions, torch.tensor([[[1.0, 10.0], [3.0, 30.0]]]))
 
 
-def test_transformer_lens_compatible_wrapper_residual_directions_for_python_tokens_with_torch_weight() -> None:
+def test_wrapper_residual_directions_for_python_tokens_with_torch_weight() -> None:
     torch = pytest.importorskip("torch")
     wrapper = TransformerLensCompatibleModelWrapper(name="gpt2")
     weight = torch.tensor(
@@ -7003,7 +7088,7 @@ def test_transformer_lens_compatible_wrapper_residual_directions_for_python_toke
     assert torch.equal(tuple_directions, expected)
 
 
-def test_transformer_lens_compatible_wrapper_residual_directions_for_python_tokens_with_numpy_weight() -> None:
+def test_wrapper_residual_directions_for_python_tokens_with_numpy_weight() -> None:
     np = pytest.importorskip("numpy")
     wrapper = TransformerLensCompatibleModelWrapper(name="gpt2")
     weight = np.array(
@@ -7066,7 +7151,9 @@ def test_transformer_lens_compatible_wrapper_logit_attrs_uses_list_token_directi
     assert attrs == [[[11.0, 60.0], [22.0, 39.0]]]
 
 
-def test_transformer_lens_compatible_wrapper_logit_attrs_keeps_batch_tokens_with_pos_slice() -> None:
+def test_transformer_lens_compatible_wrapper_logit_attrs_keeps_batch_tokens_with_pos_slice() -> (
+    None
+):
     wrapper = TransformerLensCompatibleModelWrapper(name="gpt2")
     wrapper.model = _FakeUnembeddingModel([[1, 10], [2, 20], [3, 30]])
     cache = ActivationCache({}, model=wrapper)
@@ -7225,7 +7312,9 @@ def test_transformer_lens_compatible_wrapper_center_writing_weights_centers_list
     assert wrapper.b_out == [[-1.5, -0.5, 0.5, 1.5]]
 
 
-def test_transformer_lens_compatible_wrapper_center_writing_weights_centers_native_weights() -> None:
+def test_transformer_lens_compatible_wrapper_center_writing_weights_centers_native_weights() -> (
+    None
+):
     wrapper = TransformerLensCompatibleModelWrapper(name="gpt2")
     wrapper.model = type(
         "_NativeWritingWeights",
@@ -7316,12 +7405,20 @@ def test_transformer_lens_compatible_wrapper_fold_layer_norm_folds_rmsnorm_split
 
     assert wrapper.fold_layer_norm() is wrapper
 
-    assert torch.allclose(wrapper.W_Q[0], original_w_q * torch.tensor([1.0, 2.0, 3.0, 4.0])[None, :, None])
+    assert torch.allclose(
+        wrapper.W_Q[0], original_w_q * torch.tensor([1.0, 2.0, 3.0, 4.0])[None, :, None]
+    )
     assert torch.equal(layer.self_attn.q_proj.bias, original_q_bias)
-    assert torch.allclose(wrapper.W_K[0], original_w_k * torch.tensor([1.0, 2.0, 3.0, 4.0])[None, :, None])
+    assert torch.allclose(
+        wrapper.W_K[0], original_w_k * torch.tensor([1.0, 2.0, 3.0, 4.0])[None, :, None]
+    )
     assert layer.self_attn.k_proj.bias is None
-    assert torch.allclose(wrapper.W_in[0], original_w_in * torch.tensor([0.5, 1.5, 2.5, 3.5])[:, None])
-    assert torch.allclose(wrapper.W_gate[0], original_w_gate * torch.tensor([0.5, 1.5, 2.5, 3.5])[:, None])
+    assert torch.allclose(
+        wrapper.W_in[0], original_w_in * torch.tensor([0.5, 1.5, 2.5, 3.5])[:, None]
+    )
+    assert torch.allclose(
+        wrapper.W_gate[0], original_w_gate * torch.tensor([0.5, 1.5, 2.5, 3.5])[:, None]
+    )
     assert torch.equal(layer.input_layernorm.weight, torch.ones_like(layer.input_layernorm.weight))
     assert torch.equal(
         layer.post_attention_layernorm.weight,
@@ -7344,9 +7441,15 @@ def test_transformer_lens_compatible_wrapper_fold_layer_norm_uses_offset_rmsnorm
     assert wrapper.cfg.rmsnorm_uses_offset is True
     assert wrapper.fold_layer_norm() is wrapper
 
-    assert torch.allclose(wrapper.W_Q[0], original_w_q * torch.tensor([2.0, 3.0, 4.0, 5.0])[None, :, None])
-    assert torch.allclose(wrapper.W_in[0], original_w_in * torch.tensor([1.5, 2.5, 3.5, 4.5])[:, None])
-    assert torch.allclose(wrapper.W_gate[0], original_w_gate * torch.tensor([1.5, 2.5, 3.5, 4.5])[:, None])
+    assert torch.allclose(
+        wrapper.W_Q[0], original_w_q * torch.tensor([2.0, 3.0, 4.0, 5.0])[None, :, None]
+    )
+    assert torch.allclose(
+        wrapper.W_in[0], original_w_in * torch.tensor([1.5, 2.5, 3.5, 4.5])[:, None]
+    )
+    assert torch.allclose(
+        wrapper.W_gate[0], original_w_gate * torch.tensor([1.5, 2.5, 3.5, 4.5])[:, None]
+    )
     assert torch.equal(layer.input_layernorm.weight, torch.zeros_like(layer.input_layernorm.weight))
     assert torch.equal(
         layer.post_attention_layernorm.weight,
@@ -7354,7 +7457,9 @@ def test_transformer_lens_compatible_wrapper_fold_layer_norm_uses_offset_rmsnorm
     )
 
 
-def test_transformer_lens_compatible_wrapper_fold_value_biases_folds_split_projection_bias() -> None:
+def test_transformer_lens_compatible_wrapper_fold_value_biases_folds_split_projection_bias() -> (
+    None
+):
     torch = pytest.importorskip("torch")
     wrapper = TransformerLensCompatibleModelWrapper(name="Qwen/Qwen3-8B")
     wrapper.model = _FakeWeightedQwenModel()
@@ -7370,7 +7475,9 @@ def test_transformer_lens_compatible_wrapper_fold_value_biases_folds_split_proje
     assert torch.equal(wrapper.b_O[0], expected)
 
 
-def test_transformer_lens_compatible_wrapper_fold_value_biases_creates_missing_output_bias() -> None:
+def test_transformer_lens_compatible_wrapper_fold_value_biases_creates_missing_output_bias() -> (
+    None
+):
     torch = pytest.importorskip("torch")
     wrapper = TransformerLensCompatibleModelWrapper(name="Qwen/Qwen3-8B")
     wrapper.model = _FakeWeightedQwenModel()
@@ -7447,7 +7554,7 @@ def test_transformer_lens_compatible_wrapper_fold_value_biases_folds_native_weig
     assert wrapper.model.b_O == [[7.5, 11.5, 302.5]]
 
 
-def test_transformer_lens_compatible_wrapper_refactor_factored_attn_matrices_refactors_native_ov() -> None:
+def test_wrapper_refactor_factored_attn_matrices_refactors_native_ov() -> None:
     torch = pytest.importorskip("torch")
     wrapper = TransformerLensCompatibleModelWrapper(name="gpt2")
     wrapper.model = type(
@@ -7475,7 +7582,7 @@ def test_transformer_lens_compatible_wrapper_refactor_factored_attn_matrices_ref
     )
 
 
-def test_transformer_lens_compatible_wrapper_refactor_factored_attn_matrices_refactors_native_qk() -> None:
+def test_wrapper_refactor_factored_attn_matrices_refactors_native_qk() -> None:
     torch = pytest.importorskip("torch")
     wrapper = TransformerLensCompatibleModelWrapper(name="gpt2")
     wrapper.model = type(
@@ -7511,7 +7618,7 @@ def test_transformer_lens_compatible_wrapper_refactor_factored_attn_matrices_ref
     assert torch.allclose(refactored_qk, original_qk, atol=1e-4)
 
 
-def test_transformer_lens_compatible_wrapper_refactor_factored_attn_matrices_rejects_rotary_qk() -> None:
+def test_wrapper_refactor_factored_attn_matrices_rejects_rotary_qk() -> None:
     torch = pytest.importorskip("torch")
     wrapper = TransformerLensCompatibleModelWrapper(name="gpt2")
     wrapper.model = type(
@@ -7556,7 +7663,7 @@ def test_transformer_lens_compatible_wrapper_refactor_factored_attn_matrices_rej
         dict_wrapper.refactor_factored_attn_matrices()
 
 
-def test_transformer_lens_compatible_wrapper_refactor_factored_attn_matrices_refactors_hf_split_projections() -> None:
+def test_wrapper_refactor_factored_attn_matrices_refactors_hf_split_projections() -> None:
     torch = pytest.importorskip("torch")
     wrapper = TransformerLensCompatibleModelWrapper(name="Qwen/Qwen3-8B")
     wrapper.model = _FakeWeightedQwenModel()
@@ -7583,7 +7690,7 @@ def test_transformer_lens_compatible_wrapper_refactor_factored_attn_matrices_ref
     assert torch.equal(wrapper.b_V, torch.zeros_like(wrapper.b_V))
 
 
-def test_transformer_lens_compatible_wrapper_refactor_factored_attn_matrices_preserves_low_precision_module_dtypes() -> None:
+def test_wrapper_refactor_factored_attn_matrices_preserves_low_precision_dtypes() -> None:
     torch = pytest.importorskip("torch")
     wrapper = TransformerLensCompatibleModelWrapper(name="Qwen/Qwen3-8B")
     wrapper.model = _FakeWeightedQwenModel()
@@ -7603,14 +7710,18 @@ def test_transformer_lens_compatible_wrapper_refactor_factored_attn_matrices_pre
 
     original_qk = torch.matmul(
         torch.cat([wrapper.W_Q.float(), wrapper.b_Q.float().unsqueeze(-2)], dim=-2),
-        torch.cat([wrapper.W_K.float(), wrapper.b_K.float().unsqueeze(-2)], dim=-2).transpose(-1, -2),
+        torch.cat([wrapper.W_K.float(), wrapper.b_K.float().unsqueeze(-2)], dim=-2).transpose(
+            -1, -2
+        ),
     )
 
     assert wrapper.refactor_factored_attn_matrices() is wrapper
 
     refactored_qk = torch.matmul(
         torch.cat([wrapper.W_Q.float(), wrapper.b_Q.float().unsqueeze(-2)], dim=-2),
-        torch.cat([wrapper.W_K.float(), wrapper.b_K.float().unsqueeze(-2)], dim=-2).transpose(-1, -2),
+        torch.cat([wrapper.W_K.float(), wrapper.b_K.float().unsqueeze(-2)], dim=-2).transpose(
+            -1, -2
+        ),
     )
     assert attention.q_proj.weight.dtype == torch.float16
     assert attention.k_proj.weight.dtype == torch.float16
@@ -7621,7 +7732,7 @@ def test_transformer_lens_compatible_wrapper_refactor_factored_attn_matrices_pre
     assert torch.allclose(refactored_qk, original_qk, rtol=1e-3, atol=3e-1)
 
 
-def test_transformer_lens_compatible_wrapper_refactor_factored_attn_matrices_creates_missing_output_bias() -> None:
+def test_wrapper_refactor_factored_attn_matrices_creates_missing_output_bias() -> None:
     torch = pytest.importorskip("torch")
     wrapper = TransformerLensCompatibleModelWrapper(name="Qwen/Qwen3-8B")
     wrapper.model = _FakeWeightedQwenModel()
@@ -7657,7 +7768,7 @@ def test_transformer_lens_compatible_wrapper_refactor_factored_attn_matrices_cre
     assert torch.equal(wrapper.b_V, torch.zeros_like(wrapper.b_V))
 
 
-def test_transformer_lens_compatible_wrapper_refactor_factored_attn_matrices_refactors_gpt2_joint_qkv() -> None:
+def test_wrapper_refactor_factored_attn_matrices_refactors_gpt2_joint_qkv() -> None:
     torch = pytest.importorskip("torch")
     wrapper = TransformerLensCompatibleModelWrapper(name="gpt2")
     wrapper.model = _FakeGpt2Model()
@@ -7687,7 +7798,7 @@ def test_transformer_lens_compatible_wrapper_refactor_factored_attn_matrices_ref
     assert torch.equal(wrapper.b_V, torch.zeros_like(wrapper.b_V))
 
 
-def test_transformer_lens_compatible_wrapper_refactor_factored_attn_matrices_refactors_interleaved_joint_qkv() -> None:
+def test_wrapper_refactor_factored_attn_matrices_refactors_interleaved_joint_qkv() -> None:
     torch = pytest.importorskip("torch")
     wrapper = TransformerLensCompatibleModelWrapper(name="EleutherAI/pythia-70m")
     wrapper.model = _FakeGptNeoxModel()
@@ -7744,17 +7855,22 @@ def test_transformer_lens_compatible_wrapper_process_weights_can_request_native_
     )
     original_ov = torch.matmul(wrapper.model.W_V, wrapper.model.W_O)
 
-    assert wrapper.process_weights_(
-        center_writing_weights=False,
-        center_unembed=False,
-        fold_value_biases=False,
-        refactor_factored_attn_matrices=True,
-    ) is wrapper
+    assert (
+        wrapper.process_weights_(
+            center_writing_weights=False,
+            center_unembed=False,
+            fold_value_biases=False,
+            refactor_factored_attn_matrices=True,
+        )
+        is wrapper
+    )
 
     assert torch.allclose(
         torch.matmul(
             torch.cat([wrapper.model.W_Q, wrapper.model.b_Q.unsqueeze(-2)], dim=-2),
-            torch.cat([wrapper.model.W_K, wrapper.model.b_K.unsqueeze(-2)], dim=-2).transpose(-1, -2),
+            torch.cat([wrapper.model.W_K, wrapper.model.b_K.unsqueeze(-2)], dim=-2).transpose(
+                -1, -2
+            ),
         ),
         original_qk,
         atol=1e-4,
@@ -7803,7 +7919,7 @@ def test_transformer_lens_compatible_wrapper_process_weights_centers_ln_writing_
     assert torch.allclose(block.mlp.c_proj.bias.mean(), torch.tensor(0.0))
 
 
-def test_transformer_lens_compatible_wrapper_process_weights_recenters_ln_b_o_after_value_folding() -> None:
+def test_wrapper_process_weights_recenters_ln_b_o_after_value_folding() -> None:
     torch = pytest.importorskip("torch")
     wrapper = TransformerLensCompatibleModelWrapper(name="gpt2")
     wrapper.model = _FakeGpt2Model()
@@ -7827,18 +7943,23 @@ def test_transformer_lens_compatible_wrapper_process_weights_respects_disabled_p
     original_embedding = wrapper.model.model.embed_tokens.weight.clone()
     original_v_bias = wrapper.model.model.layers[0].self_attn.v_proj.bias.clone()
 
-    assert wrapper.process_weights_(
-        center_writing_weights=False,
-        center_unembed=False,
-        fold_value_biases=False,
-    ) is wrapper
+    assert (
+        wrapper.process_weights_(
+            center_writing_weights=False,
+            center_unembed=False,
+            fold_value_biases=False,
+        )
+        is wrapper
+    )
 
     assert torch.equal(unembed.weight, torch.tensor([[1.0, 10.0], [2.0, 20.0], [3.0, 30.0]]))
     assert torch.equal(wrapper.model.model.embed_tokens.weight, original_embedding)
     assert torch.equal(wrapper.model.model.layers[0].self_attn.v_proj.bias, original_v_bias)
 
 
-def test_transformer_lens_compatible_wrapper_process_weights_skips_olmo2_center_writing_pass() -> None:
+def test_transformer_lens_compatible_wrapper_process_weights_skips_olmo2_center_writing_pass() -> (
+    None
+):
     class Olmo2ForCausalLM:
         W_O = [[[[1.0, 2.0, 3.0]]]]
         b_O = [[1.0, 2.0, 3.0]]
@@ -7869,7 +7990,7 @@ def test_transformer_lens_compatible_wrapper_process_weights_skips_olmo2_center_
     assert wrapper.model.b_out == [[10.0, 20.0, 30.0]]
 
 
-def test_transformer_lens_compatible_wrapper_process_weights_skips_center_unembed_for_logit_softcap() -> None:
+def test_wrapper_process_weights_skips_center_unembed_for_logit_softcap() -> None:
     class _SoftCapUnembeddingModel(_FakeUnembeddingModel):
         config = type(
             "_Config",
@@ -7885,7 +8006,9 @@ def test_transformer_lens_compatible_wrapper_process_weights_skips_center_unembe
     wrapper = TransformerLensCompatibleModelWrapper(name="google/gemma-2-2b")
     wrapper.model = _SoftCapUnembeddingModel([[1.0, 10.0], [2.0, 20.0], [3.0, 30.0]])
 
-    assert wrapper.process_weights_(center_writing_weights=False, fold_value_biases=False) is wrapper
+    assert (
+        wrapper.process_weights_(center_writing_weights=False, fold_value_biases=False) is wrapper
+    )
 
     assert wrapper.model._weight == [[1.0, 10.0], [2.0, 20.0], [3.0, 30.0]]
 
@@ -7920,13 +8043,17 @@ def test_transformer_lens_compatible_wrapper_process_weights_skips_shortformer_c
     assert wrapper.model.input_embeddings.weight == [[1.0, 10.0], [2.0, 20.0]]
 
 
-def test_transformer_lens_compatible_wrapper_process_weights_disables_incompatible_fold_ln() -> None:
+def test_transformer_lens_compatible_wrapper_process_weights_disables_incompatible_fold_ln() -> (
+    None
+):
     class _TrackingWrapper(TransformerLensCompatibleModelWrapper):
         def __init__(self, *args: Any, **kwargs: Any) -> None:
             super().__init__(*args, **kwargs)
             self.fold_layer_norm_calls = 0
 
-        def fold_layer_norm(self, *args: Any, **kwargs: Any) -> TransformerLensCompatibleModelWrapper:
+        def fold_layer_norm(
+            self, *args: Any, **kwargs: Any
+        ) -> TransformerLensCompatibleModelWrapper:
             self.fold_layer_norm_calls += 1
             return self
 
@@ -7966,7 +8093,10 @@ def test_transformer_lens_compatible_wrapper_process_weights_disables_incompatib
     olmo2_wrapper = _TrackingWrapper(name="allenai/OLMo-2-0425-1B")
     olmo2_wrapper.model = Olmo2ForCausalLM()
 
-    assert olmo2_wrapper.process_weights_(center_unembed=False, fold_value_biases=False) is olmo2_wrapper
+    assert (
+        olmo2_wrapper.process_weights_(center_unembed=False, fold_value_biases=False)
+        is olmo2_wrapper
+    )
     assert olmo2_wrapper.fold_layer_norm_calls == 0
 
 
@@ -8022,7 +8152,10 @@ def test_transformer_lens_compatible_wrapper_exposes_apertus_gqa_weights() -> No
     expected_v = attention.v_proj.weight.reshape(2, 2, 8).permute(0, 2, 1).unsqueeze(0)
     expected_o = attention.o_proj.weight.reshape(8, 4, 2).permute(1, 2, 0).unsqueeze(0)
 
-    assert architecture_adapter_for_name(model_name="swiss-ai/Apertus-8B-2509").name == "apertus_decoder"
+    assert (
+        architecture_adapter_for_name(model_name="swiss-ai/Apertus-8B-2509").name
+        == "apertus_decoder"
+    )
     assert torch.equal(wrapper.W_Q, expected_q)
     assert torch.equal(wrapper.W_K, expected_k)
     assert torch.equal(wrapper.W_V, expected_v)
@@ -8097,7 +8230,9 @@ def test_transformer_lens_compatible_wrapper_rejects_routed_moe_dense_mlp_weight
         _ = wrapper.W_out
 
 
-def test_transformer_lens_compatible_wrapper_uses_routed_moe_adapter_for_local_qwen_moe_type() -> None:
+def test_transformer_lens_compatible_wrapper_uses_routed_moe_adapter_for_local_qwen_moe_type() -> (
+    None
+):
     torch = pytest.importorskip("torch")
     wrapper = TransformerLensCompatibleModelWrapper(name="./models/local-qwen-moe")
     wrapper.model = _FakeRoutedMoeModel()
@@ -8106,16 +8241,21 @@ def test_transformer_lens_compatible_wrapper_uses_routed_moe_adapter_for_local_q
 
     expected_q = attention.q_proj.weight.reshape(2, 2, 4).permute(0, 2, 1).unsqueeze(0)
 
-    assert architecture_adapter_for_model(
-        wrapper.model,
-        model_name=wrapper.name,
-    ).name == "routed_moe_decoder"
+    assert (
+        architecture_adapter_for_model(
+            wrapper.model,
+            model_name=wrapper.name,
+        ).name
+        == "routed_moe_decoder"
+    )
     assert torch.equal(wrapper.W_Q, expected_q)
     with pytest.raises(NotImplementedError, match="multiple experts"):
         _ = wrapper.W_in
 
 
-def test_transformer_lens_compatible_wrapper_processes_qwen_moe_without_dense_mlp_internals() -> None:
+def test_transformer_lens_compatible_wrapper_processes_qwen_moe_without_dense_mlp_internals() -> (
+    None
+):
     torch = pytest.importorskip("torch")
     wrapper = TransformerLensCompatibleModelWrapper(name="Qwen/Qwen3-30B-A3B")
     wrapper.model = _FakeRoutedMoeModel()
@@ -8136,7 +8276,7 @@ def test_transformer_lens_compatible_wrapper_processes_qwen_moe_without_dense_ml
         _ = wrapper.W_in
 
 
-def test_transformer_lens_compatible_wrapper_accumulated_bias_matches_transformerlens_semantics() -> None:
+def test_wrapper_accumulated_bias_matches_transformerlens_semantics() -> None:
     torch = pytest.importorskip("torch")
     wrapper = TransformerLensCompatibleModelWrapper(name="Qwen/Qwen3-8B")
     wrapper.model = _FakeWeightedQwenModel()
@@ -8171,7 +8311,7 @@ def test_transformer_lens_compatible_wrapper_exposes_gemma3_conditional_weights(
     assert torch.equal(wrapper.W_out, layer.mlp.down_proj.weight.T.unsqueeze(0))
 
 
-def test_transformer_lens_compatible_wrapper_all_composition_scores_match_transformerlens_mask() -> None:
+def test_wrapper_all_composition_scores_match_transformerlens_mask() -> None:
     torch = pytest.importorskip("torch")
     wrapper = TransformerLensCompatibleModelWrapper(name="Qwen/Qwen3-8B")
     wrapper.model = _FakeWeightedQwenModel()
@@ -8372,7 +8512,9 @@ def test_transformer_lens_compatible_wrapper_exposes_gpt_bigcode_mqa_weights() -
     expected_o = attention.c_proj.weight.reshape(8, 2, 4).permute(1, 2, 0).unsqueeze(0)
     bias = attention.c_attn.bias
 
-    assert architecture_adapter_for_name(model_name="bigcode/santacoder").name == "gpt_bigcode_decoder"
+    assert (
+        architecture_adapter_for_name(model_name="bigcode/santacoder").name == "gpt_bigcode_decoder"
+    )
     assert torch.equal(wrapper.W_Q, expected_q)
     assert torch.equal(wrapper.W_K, expected_k)
     assert torch.equal(wrapper.W_V, expected_v)
@@ -8528,7 +8670,9 @@ def test_transformer_lens_compatible_wrapper_fold_layer_norm_infers_neox_qkv_row
     assert torch.equal(layer.input_layernorm.weight, torch.ones_like(layer.input_layernorm.weight))
 
 
-def test_transformer_lens_compatible_wrapper_fold_layer_norm_folds_final_norm_into_hf_unembed() -> None:
+def test_transformer_lens_compatible_wrapper_fold_layer_norm_folds_final_norm_into_hf_unembed() -> (
+    None
+):
     torch = pytest.importorskip("torch")
     ln_final = torch.nn.LayerNorm(2)
     with torch.no_grad():
@@ -8551,7 +8695,7 @@ def test_transformer_lens_compatible_wrapper_fold_layer_norm_folds_final_norm_in
     assert torch.equal(ln_final.bias, torch.zeros_like(ln_final.bias))
 
 
-def test_transformer_lens_compatible_wrapper_fold_layer_norm_folds_final_norm_into_native_unembed() -> None:
+def test_wrapper_fold_layer_norm_folds_final_norm_into_native_unembed() -> None:
     torch = pytest.importorskip("torch")
     ln_final = torch.nn.LayerNorm(2)
     with torch.no_grad():
@@ -8574,7 +8718,7 @@ def test_transformer_lens_compatible_wrapper_fold_layer_norm_folds_final_norm_in
     assert torch.equal(ln_final.bias, torch.zeros_like(ln_final.bias))
 
 
-def test_transformer_lens_compatible_wrapper_fold_layer_norm_does_not_create_final_unembed_bias() -> None:
+def test_wrapper_fold_layer_norm_does_not_create_final_unembed_bias() -> None:
     torch = pytest.importorskip("torch")
     ln_final = torch.nn.LayerNorm(2)
     with torch.no_grad():
@@ -8594,7 +8738,7 @@ def test_transformer_lens_compatible_wrapper_fold_layer_norm_does_not_create_fin
     assert torch.equal(ln_final.bias, original_bias)
 
 
-def test_transformer_lens_compatible_wrapper_fold_layer_norm_does_not_create_native_final_unembed_bias() -> None:
+def test_wrapper_fold_layer_norm_does_not_create_native_final_unembed_bias() -> None:
     torch = pytest.importorskip("torch")
     ln_final = torch.nn.LayerNorm(2)
     with torch.no_grad():
@@ -8703,9 +8847,7 @@ def test_transformer_lens_compatible_wrapper_exposes_mlp_weights_from_adapter_sp
     assert torch.equal(falcon_wrapper.b_in, falcon_mlp.dense_h_to_4h.bias.unsqueeze(0))
     assert torch.equal(falcon_wrapper.b_out, falcon_mlp.dense_4h_to_h.bias.unsqueeze(0))
 
-    bert_wrapper = TransformerLensCompatibleModelWrapper(
-        name="google-bert/bert-base-uncased"
-    )
+    bert_wrapper = TransformerLensCompatibleModelWrapper(name="google-bert/bert-base-uncased")
     bert_wrapper.model = _FakeWeightedBertModel()
     bert_layer = bert_wrapper.model.encoder.layer[0]
     assert torch.equal(bert_wrapper.W_in, bert_layer.intermediate.dense.weight.T.unsqueeze(0))
@@ -8713,9 +8855,7 @@ def test_transformer_lens_compatible_wrapper_exposes_mlp_weights_from_adapter_sp
     assert torch.equal(bert_wrapper.b_in, bert_layer.intermediate.dense.bias.unsqueeze(0))
     assert torch.equal(bert_wrapper.b_out, bert_layer.output.dense.bias.unsqueeze(0))
 
-    distilbert_wrapper = TransformerLensCompatibleModelWrapper(
-        name="distilbert-base-uncased"
-    )
+    distilbert_wrapper = TransformerLensCompatibleModelWrapper(name="distilbert-base-uncased")
     distilbert_wrapper.model = _FakeWeightedDistilBertModel()
     distilbert_ffn = distilbert_wrapper.model.transformer.layer[0].ffn
     assert torch.equal(distilbert_wrapper.W_in, distilbert_ffn.lin1.weight.T.unsqueeze(0))
@@ -8784,7 +8924,9 @@ def test_transformer_lens_compatible_wrapper_exposes_embedding_and_mlp_weights()
 
     assert torch.equal(wrapper.W_E, model.embed_tokens.weight)
     assert torch.equal(wrapper.W_pos, model.wpe.weight)
-    assert torch.equal(wrapper.W_E_pos, torch.cat([model.embed_tokens.weight, model.wpe.weight], dim=0))
+    assert torch.equal(
+        wrapper.W_E_pos, torch.cat([model.embed_tokens.weight, model.wpe.weight], dim=0)
+    )
     assert torch.equal(wrapper.W_in, mlp.up_proj.weight.T.unsqueeze(0))
     assert torch.equal(wrapper.W_gate, mlp.gate_proj.weight.T.unsqueeze(0))
     assert torch.equal(wrapper.W_out, mlp.down_proj.weight.T.unsqueeze(0))
@@ -8806,15 +8948,9 @@ def test_transformer_lens_compatible_wrapper_exposes_list_embedding_and_mlp_weig
         [30, 31, 32, 33],
         [40, 41, 42, 43],
     ]
-    assert wrapper.W_in == [
-        [[100, 110, 120], [101, 111, 121], [102, 112, 122], [103, 113, 123]]
-    ]
-    assert wrapper.W_gate == [
-        [[0, 10, 20], [1, 11, 21], [2, 12, 22], [3, 13, 23]]
-    ]
-    assert wrapper.W_out == [
-        [[30, 40, 50, 60], [31, 41, 51, 61], [32, 42, 52, 62]]
-    ]
+    assert wrapper.W_in == [[[100, 110, 120], [101, 111, 121], [102, 112, 122], [103, 113, 123]]]
+    assert wrapper.W_gate == [[[0, 10, 20], [1, 11, 21], [2, 12, 22], [3, 13, 23]]]
+    assert wrapper.W_out == [[[30, 40, 50, 60], [31, 41, 51, 61], [32, 42, 52, 62]]]
     assert wrapper.W_Q == [
         reshape_attention_weight(attention.q_proj.weight, component="q", n_heads=2)
     ]
@@ -8888,7 +9024,9 @@ def test_transformer_lens_parameter_map_preserves_sparse_layernorm_indices() -> 
     wrapper.model = _FakeWeightedQwenModel()
     wrapper.model.model.layers.append(_FakeWeightedLayer())
     wrapper.model.model.layers[0].post_attention_layernorm.weight = None
-    wrapper.model.model.layers[1].post_attention_layernorm.weight = torch.tensor([1.0, 2.0, 3.0, 4.0])
+    wrapper.model.model.layers[1].post_attention_layernorm.weight = torch.tensor(
+        [1.0, 2.0, 3.0, 4.0]
+    )
 
     params = wrapper.tl_parameters()
 
@@ -8929,7 +9067,9 @@ def test_svd_interpreter_projects_wrapper_circuit_singular_vectors() -> None:
     assert torch.allclose(ov_vectors, expected)
     assert torch.allclose(w_in_vectors, expected)
     assert torch.allclose(w_out_vectors, expected)
-    assert interpreter.get_singular_vectors("OV", layer_index=0, head_index=0, num_vectors=0).shape == (
+    assert interpreter.get_singular_vectors(
+        "OV", layer_index=0, head_index=0, num_vectors=0
+    ).shape == (
         2,
         1,
         0,
@@ -8963,7 +9103,9 @@ def test_svd_interpreter_uses_wrapper_layernorm_weight_for_w_in_vectors() -> Non
     params = wrapper.tl_parameters()
     matrix = params["blocks.0.mlp.W_in"].T * params["blocks.0.ln2.w"]
     _u, _s, vh = torch.linalg.svd(matrix)
-    expected = torch.stack([vh[index].float() @ params["unembed.W_U"] for index in range(2)], dim=1).unsqueeze(1)
+    expected = torch.stack(
+        [vh[index].float() @ params["unembed.W_U"] for index in range(2)], dim=1
+    ).unsqueeze(1)
 
     vectors = SVDInterpreter(wrapper).get_singular_vectors("w_in", layer_index=0, num_vectors=2)
 
@@ -8994,7 +9136,9 @@ def test_svd_interpreter_accepts_mixed_backend_layernorm_weight() -> None:
     params = SvdModel().tl_parameters()
     matrix = params["blocks.0.mlp.W_in"].T * torch.tensor(params["blocks.0.ln2.w"])
     _u, _s, vh = torch.linalg.svd(matrix)
-    expected = torch.stack([vh[index].float() @ params["unembed.W_U"] for index in range(2)], dim=1).unsqueeze(1)
+    expected = torch.stack(
+        [vh[index].float() @ params["unembed.W_U"] for index in range(2)], dim=1
+    ).unsqueeze(1)
 
     vectors = SVDInterpreter(SvdModel()).get_singular_vectors("w_in", layer_index=0, num_vectors=2)
 
@@ -9029,7 +9173,9 @@ def test_svd_interpreter_projects_low_precision_torch_parameters_without_list_fa
         ("w_in", {}),
         ("w_out", {}),
     ):
-        vectors = interpreter.get_singular_vectors(vector_type, layer_index=0, num_vectors=2, **kwargs)
+        vectors = interpreter.get_singular_vectors(
+            vector_type, layer_index=0, num_vectors=2, **kwargs
+        )
 
         assert isinstance(vectors, torch.Tensor)
         assert vectors.dtype == torch.float32
@@ -9181,7 +9327,7 @@ def test_transformer_lens_compatible_wrapper_restores_missing_attention_implemen
 
         def set_attn_implementation(self, value: Any) -> None:
             self.attention_calls.append(value)
-            setattr(self.config, "_attn_implementation", value)
+            self.config._attn_implementation = value
 
     wrapper = TransformerLensCompatibleModelWrapper(name="Qwen/Qwen3-8B")
     wrapper.model = _EagerSwitchQwenModel()
@@ -9206,7 +9352,7 @@ def test_transformer_lens_compatible_wrapper_restores_none_attention_implementat
 
         def set_attn_implementation(self, value: Any) -> None:
             self.attention_calls.append(value)
-            setattr(self.config, "_attn_implementation", value)
+            self.config._attn_implementation = value
 
     wrapper = TransformerLensCompatibleModelWrapper(name="Qwen/Qwen3-8B")
     wrapper.model = _EagerSwitchQwenModel()
@@ -9220,7 +9366,7 @@ def test_transformer_lens_compatible_wrapper_restores_none_attention_implementat
     assert wrapper.model.config._attn_implementation is None
 
 
-def test_transformer_lens_compatible_wrapper_restores_attention_implementation_after_failed_switch() -> None:
+def test_wrapper_restores_attention_implementation_after_failed_switch() -> None:
     pytest.importorskip("torch")
 
     class _FailingEagerSwitchQwenModel(_FakeQwenModel):
@@ -9230,7 +9376,7 @@ def test_transformer_lens_compatible_wrapper_restores_attention_implementation_a
 
         def set_attn_implementation(self, value: Any) -> None:
             self.attention_calls.append(value)
-            setattr(self.config, "_attn_implementation", value)
+            self.config._attn_implementation = value
             raise RuntimeError("unsupported attention backend")
 
     wrapper = TransformerLensCompatibleModelWrapper(name="Qwen/Qwen3-8B")
@@ -9258,9 +9404,7 @@ def test_transformer_lens_compatible_wrapper_caches_mlp_post_for_neuron_decompos
     assert output == {"post": [[[3.0, 4.0, 5.0]]]}
     assert cache["layer_0.post"] == [[[3.0, 4.0, 5.0]]]
     torch = pytest.importorskip("torch")
-    expected = torch.tensor(
-        [[[[36.0, 45.0, 54.0, 63.0], [70.0, 85.0, 100.0, 115.0]]]]
-    )
+    expected = torch.tensor([[[[36.0, 45.0, 54.0, 63.0], [70.0, 85.0, 100.0, 115.0]]]])
     assert torch.equal(cache.get_neuron_results(0, neuron_slice=[0, 2]), expected)
 
 
@@ -9307,9 +9451,7 @@ def test_transformer_lens_compatible_wrapper_patches_gated_mlp_pre_linear() -> N
 
     output = wrapper.run_with_hooks(
         {"input_ids": [[1, 2]]},
-        fwd_hooks=[
-            ("blocks.0.mlp.hook_pre_linear", lambda **_kwargs: [[[40.0, 50.0, 60.0]]])
-        ],
+        fwd_hooks=[("blocks.0.mlp.hook_pre_linear", lambda **_kwargs: [[[40.0, 50.0, 60.0]]])],
     )
 
     assert output["gate"] == [[[1.0, 2.0, 3.0]]]
@@ -9463,7 +9605,9 @@ def test_attention_softmax_cache_records_patched_scores_when_patch_hook_runs_fir
     expected_scores = torch.full_like(scores, -1000.0)
     expected_scores[..., 0] = 1000.0
     assert torch.equal(cache["blocks.0.attn.hook_attn_scores"], expected_scores)
-    assert torch.allclose(cache["blocks.0.attn.hook_pattern"], torch.softmax(expected_scores, dim=-1))
+    assert torch.allclose(
+        cache["blocks.0.attn.hook_pattern"], torch.softmax(expected_scores, dim=-1)
+    )
 
 
 def test_attention_softmax_persistent_cache_records_original_scores_when_installed_first() -> None:
@@ -9511,7 +9655,9 @@ def test_transformer_lens_compatible_handle_remove_untracks_hook() -> None:
     wrapper = TransformerLensCompatibleModelWrapper(name="Qwen/Qwen3-8B")
     wrapper.model = _FakeQwenModel()
 
-    handle = wrapper.add_hook("blocks.0.attn.hook_q", lambda **kwargs: kwargs["activation"] + ["patched"])
+    handle = wrapper.add_hook(
+        "blocks.0.attn.hook_q", lambda **kwargs: kwargs["activation"] + ["patched"]
+    )
     assert wrapper._hooks == [handle]
 
     handle.remove()
@@ -9716,7 +9862,9 @@ def test_component_bridge_splits_and_merges_split_qkv_projection_for_list_backen
     patched = [[[[-7, -7, -7, -7], [-8, -8, -8, -8]]]]
     merged = merge_component_activation(patched, raw, spec, _FakeHeadModel())
 
-    assert merged == [[[0, 1, 2, 3, 4, 5, 6, 7, -7, -7, -7, -7, -8, -8, -8, -8, 16, 17, 18, 19, 20, 21, 22, 23]]]
+    assert merged == [
+        [[0, 1, 2, 3, 4, 5, 6, 7, -7, -7, -7, -7, -8, -8, -8, -8, 16, 17, 18, 19, 20, 21, 22, 23]]
+    ]
 
 
 def test_component_bridge_splits_and_merges_interleaved_qkv_projection() -> None:
@@ -9757,7 +9905,9 @@ def test_component_bridge_splits_and_merges_interleaved_qkv_projection_for_list_
     patched = [[[[-3, -3, -3, -3], [-4, -4, -4, -4]]]]
     merged = merge_component_activation(patched, raw, spec, _FakeHeadModel())
 
-    assert merged == [[[0, 1, 2, 3, 4, 5, 6, 7, -3, -3, -3, -3, 12, 13, 14, 15, 16, 17, 18, 19, -4, -4, -4, -4]]]
+    assert merged == [
+        [[0, 1, 2, 3, 4, 5, 6, 7, -3, -3, -3, -3, 12, 13, 14, 15, 16, 17, 18, 19, -4, -4, -4, -4]]
+    ]
 
 
 @pytest.mark.parametrize(
@@ -9805,19 +9955,130 @@ def test_component_bridge_splits_and_merges_grouped_interleaved_qkv_projection(
             "q",
             [[[[0, 1, 2, 3], [4, 5, 6, 7], [16, 17, 18, 19], [20, 21, 22, 23]]]],
             [[[[-4, -4, -4, -4], [-5, -5, -5, -5], [-6, -6, -6, -6], [-7, -7, -7, -7]]]],
-            [[[-4, -4, -4, -4, -5, -5, -5, -5, 8, 9, 10, 11, 12, 13, 14, 15, -6, -6, -6, -6, -7, -7, -7, -7, 24, 25, 26, 27, 28, 29, 30, 31]]],
+            [
+                [
+                    [
+                        -4,
+                        -4,
+                        -4,
+                        -4,
+                        -5,
+                        -5,
+                        -5,
+                        -5,
+                        8,
+                        9,
+                        10,
+                        11,
+                        12,
+                        13,
+                        14,
+                        15,
+                        -6,
+                        -6,
+                        -6,
+                        -6,
+                        -7,
+                        -7,
+                        -7,
+                        -7,
+                        24,
+                        25,
+                        26,
+                        27,
+                        28,
+                        29,
+                        30,
+                        31,
+                    ]
+                ]
+            ],
         ),
         (
             "k",
             [[[[8, 9, 10, 11], [24, 25, 26, 27]]]],
             [[[[-8, -8, -8, -8], [-9, -9, -9, -9]]]],
-            [[[0, 1, 2, 3, 4, 5, 6, 7, -8, -8, -8, -8, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, -9, -9, -9, -9, 28, 29, 30, 31]]],
+            [
+                [
+                    [
+                        0,
+                        1,
+                        2,
+                        3,
+                        4,
+                        5,
+                        6,
+                        7,
+                        -8,
+                        -8,
+                        -8,
+                        -8,
+                        12,
+                        13,
+                        14,
+                        15,
+                        16,
+                        17,
+                        18,
+                        19,
+                        20,
+                        21,
+                        22,
+                        23,
+                        -9,
+                        -9,
+                        -9,
+                        -9,
+                        28,
+                        29,
+                        30,
+                        31,
+                    ]
+                ]
+            ],
         ),
         (
             "v",
             [[[[12, 13, 14, 15], [28, 29, 30, 31]]]],
             [[[[-10, -10, -10, -10], [-11, -11, -11, -11]]]],
-            [[[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, -10, -10, -10, -10, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, -11, -11, -11, -11]]],
+            [
+                [
+                    [
+                        0,
+                        1,
+                        2,
+                        3,
+                        4,
+                        5,
+                        6,
+                        7,
+                        8,
+                        9,
+                        10,
+                        11,
+                        -10,
+                        -10,
+                        -10,
+                        -10,
+                        16,
+                        17,
+                        18,
+                        19,
+                        20,
+                        21,
+                        22,
+                        23,
+                        24,
+                        25,
+                        26,
+                        27,
+                        -11,
+                        -11,
+                        -11,
+                        -11,
+                    ]
+                ]
+            ],
         ),
     ),
 )

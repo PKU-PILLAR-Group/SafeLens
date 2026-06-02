@@ -41,13 +41,15 @@ from SafeLens.core.analysis import (
     residual_stack_to_logits,
     sample_logits,
     softmax,
-    test_prompt as run_test_prompt,
     topk_tokens,
     zero_ablation_hook,
 )
+from SafeLens.core.analysis import (
+    test_prompt as run_test_prompt,
+)
 from SafeLens.core.factored_matrix import FactoredMatrix, composition_scores, matmul, transpose
-from SafeLens.core.hooks import ActivationCache, HookPoint
 from SafeLens.core.hooked_root import HookedRoot
+from SafeLens.core.hooks import ActivationCache, HookPoint
 from SafeLens.core.kv_cache import (
     KeyValueCache,
     KeyValueCacheEntry,
@@ -65,6 +67,8 @@ from SafeLens.core.tensors import (
     remove_batch_dim,
     repeat_along_head_dimension,
     to_numpy,
+)
+from SafeLens.core.tensors import (
     transpose as tensor_transpose,
 )
 from SafeLens.core.utilities import (
@@ -258,9 +262,7 @@ def test_hooked_root_preserved_nested_hooks_do_not_share_future_context_level() 
         ):
             assert resid([]) == ["outer", "kept"]
         with root.hooks(
-            fwd_hooks=[
-                ("blocks.0.hook_resid_pre", lambda activation, _hook: activation + ["temp"])
-            ]
+            fwd_hooks=[("blocks.0.hook_resid_pre", lambda activation, _hook: activation + ["temp"])]
         ):
             assert resid([]) == ["outer", "kept", "temp"]
         assert resid([]) == ["outer", "kept"]
@@ -1578,7 +1580,9 @@ def test_transformerlens_tensor_utilities_support_torch_tensors() -> None:
 
     assert is_lower_triangular(matrix)
     assert torch.equal(get_offset_position_ids(1, mask), torch.tensor([[0, 1], [1, 2]]))
-    assert torch.equal(get_cumsum_along_dim(torch.tensor([[1, 2, 3]]), dim=1), torch.tensor([[1, 3, 6]]))
+    assert torch.equal(
+        get_cumsum_along_dim(torch.tensor([[1, 2, 3]]), dim=1), torch.tensor([[1, 3, 6]])
+    )
     assert repeat_along_head_dimension(values, 2).shape == (1, 2, 2, 2)
 
 
@@ -1707,7 +1711,9 @@ def test_transformerlens_tokenizer_and_hf_lite_utilities() -> None:
     assert get_rotary_pct_from_config(_LegacyConfig()) == 0.25
     assert get_rotary_pct_from_config(_RopeConfig()) == 0.5
     assert get_rotary_pct_from_config({"rotary_pct": 0.75}) == 0.75
-    assert get_rotary_pct_from_config({"rope_parameters": {"partial_rotary_factor": 0.125}}) == 0.125
+    assert (
+        get_rotary_pct_from_config({"rope_parameters": {"partial_rotary_factor": 0.125}}) == 0.125
+    )
     assert get_rotary_pct_from_config(None) == 1.0
     assert select_compatible_kwargs({"a": 1, "b": 2}, lambda a: a) == {"a": 1}
     assert get_input_with_manually_prepended_bos("<bos>", ["a", "b"]) == ["<bos>a", "<bos>b"]
@@ -1824,7 +1830,9 @@ def test_transformerlens_attention_and_addmm_utilities_match_torch_formulas() ->
 
     assert torch.allclose(simple, expected_simple)
     assert torch.allclose(complex_result, expected_complex)
-    assert torch.allclose(vanilla_addmm(addmm_bias, mat1, mat2), torch.addmm(addmm_bias, mat1, mat2))
+    assert torch.allclose(
+        vanilla_addmm(addmm_bias, mat1, mat2), torch.addmm(addmm_bias, mat1, mat2)
+    )
     assert torch.allclose(
         batch_addmm(addmm_bias, mat2, batched_x),
         torch.addmm(addmm_bias, mat1, mat2).view(1, 2, 2),
@@ -2132,7 +2140,9 @@ def test_factored_matrix_norm_preserves_leading_dimensions() -> None:
     assert_nested_close(batched.norm(), [5.0, math.sqrt(20.0)])
 
 
-def test_factored_matrix_norm_does_not_materialize_dense_product(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_factored_matrix_norm_does_not_materialize_dense_product(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     matrix = FactoredMatrix([[1, 2, 3], [4, 5, 6]], [[7, 8], [9, 10], [11, 12]])
     expected = math.sqrt(sum(value * value for row in matrix.AB for value in row))
 
@@ -2144,7 +2154,9 @@ def test_factored_matrix_norm_does_not_materialize_dense_product(monkeypatch: py
     assert math.isclose(matrix.norm(), expected)
 
 
-def test_factored_matrix_get_corner_does_not_materialize_dense_product(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_factored_matrix_get_corner_does_not_materialize_dense_product(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     matrix = FactoredMatrix(
         [[1, 2, 3], [4, 5, 6]],
         [[7, 8, 9, 10], [11, 12, 13, 14], [15, 16, 17, 18]],
@@ -2941,7 +2953,9 @@ def test_prompt_accepts_transformerlens_argument_order_and_answer_ranks() -> Non
             mapping = {"<bos>": 0, "The": 1, " answer": 2, " road": 3, " car": 4}
             if isinstance(text, list):
                 return torch.tensor([[mapping[item]] for item in text])
-            tokens = [mapping["The"], mapping[" answer"]] if text == "The answer" else [mapping[text]]
+            tokens = (
+                [mapping["The"], mapping[" answer"]] if text == "The answer" else [mapping[text]]
+            )
             if prepend_bos:
                 tokens = [mapping["<bos>"], *tokens]
             return torch.tensor([tokens])
@@ -2957,7 +2971,13 @@ def test_prompt_accepts_transformerlens_argument_order_and_answer_ranks() -> Non
             return [f" {text}"]
 
         def to_string(self, token: Any) -> str:
-            item = int(token.item() if hasattr(token, "item") else token[0] if isinstance(token, list) else token)
+            item = int(
+                token.item()
+                if hasattr(token, "item")
+                else token[0]
+                if isinstance(token, list)
+                else token
+            )
             return {0: "<bos>", 1: "The", 2: " answer", 3: " road", 4: " car"}[item]
 
         def __call__(self, tokens: Any) -> Any:
@@ -3114,9 +3134,10 @@ def test_prompt_transformerlens_order_records_top_tokens_for_each_answer_row() -
 
     token_result = result["token_results"][0]
     assert token_result["top_tokens"][0]["token_id"] == 2
-    assert [
-        top_tokens[0]["token_id"] for top_tokens in token_result["top_tokens_by_answer"]
-    ] == [2, 3]
+    assert [top_tokens[0]["token_id"] for top_tokens in token_result["top_tokens_by_answer"]] == [
+        2,
+        3,
+    ]
 
 
 def test_prompt_transformerlens_order_prints_details_by_default(capsys: Any) -> None:
@@ -3273,10 +3294,14 @@ def test_causal_lm_loss_matches_torch_cross_entropy() -> None:
         tokens[:, 1:].reshape(-1),
     )
 
-    expected_log_probs = torch.log_softmax(logits[:, :-1], dim=-1).gather(
-        -1,
-        tokens[:, 1:].unsqueeze(-1),
-    ).squeeze(-1)
+    expected_log_probs = (
+        torch.log_softmax(logits[:, :-1], dim=-1)
+        .gather(
+            -1,
+            tokens[:, 1:].unsqueeze(-1),
+        )
+        .squeeze(-1)
+    )
 
     assert torch.allclose(lm_log_probs(logits, tokens), expected_log_probs)
     assert math.isclose(lm_cross_entropy_loss(logits, tokens), float(expected), rel_tol=1e-6)
@@ -3380,14 +3405,18 @@ def test_numpy_logit_helpers_gather_token_log_probs_on_last_dim() -> None:
     log_probs = logits_to_log_probs(logits, tokens)
     same_token_log_probs = logits_to_log_probs(logits, 1)
 
-    expected = np.array([
-        2.0 - math.log(math.exp(0.0) + math.exp(2.0) + math.exp(0.0)),
-        3.0 - math.log(math.exp(0.0) + math.exp(0.0) + math.exp(3.0)),
-    ])
-    same_token_expected = np.array([
-        2.0 - math.log(math.exp(0.0) + math.exp(2.0) + math.exp(0.0)),
-        0.0 - math.log(math.exp(0.0) + math.exp(0.0) + math.exp(3.0)),
-    ])
+    expected = np.array(
+        [
+            2.0 - math.log(math.exp(0.0) + math.exp(2.0) + math.exp(0.0)),
+            3.0 - math.log(math.exp(0.0) + math.exp(0.0) + math.exp(3.0)),
+        ]
+    )
+    same_token_expected = np.array(
+        [
+            2.0 - math.log(math.exp(0.0) + math.exp(2.0) + math.exp(0.0)),
+            0.0 - math.log(math.exp(0.0) + math.exp(0.0) + math.exp(3.0)),
+        ]
+    )
     assert np.allclose(log_probs, expected)
     assert np.allclose(same_token_log_probs, same_token_expected)
     assert math.isclose(cross_entropy_loss(logits, tokens), float(-expected.mean()))
@@ -3726,13 +3755,17 @@ def test_detect_head_supports_duplicate_and_induction_patterns() -> None:
         model,
         tokens,
         "duplicate_token_head",
-        cache=ActivationCache({"layer_0.pattern": duplicate.unsqueeze(0)}, model=model, has_batch_dim=False),
+        cache=ActivationCache(
+            {"layer_0.pattern": duplicate.unsqueeze(0)}, model=model, has_batch_dim=False
+        ),
     )
     induction_scores = detect_head(
         model,
         tokens,
         "induction_head",
-        cache=ActivationCache({"layer_0.pattern": induction.unsqueeze(0)}, model=model, has_batch_dim=False),
+        cache=ActivationCache(
+            {"layer_0.pattern": induction.unsqueeze(0)}, model=model, has_batch_dim=False
+        ),
     )
 
     assert torch.allclose(duplicate_scores, torch.ones(1, 1))
@@ -3762,7 +3795,9 @@ def test_detect_head_runs_model_when_cache_is_not_supplied() -> None:
         def run_with_cache(self, tokens: Any, remove_batch_dim: bool = False) -> Any:
             self.seen_tokens = (tokens.clone(), remove_batch_dim)
             pattern = get_previous_token_head_detection_pattern(tokens).unsqueeze(0)
-            cache = ActivationCache({"blocks.0.attn.hook_pattern": pattern}, model=self, has_batch_dim=False)
+            cache = ActivationCache(
+                {"blocks.0.attn.hook_pattern": pattern}, model=self, has_batch_dim=False
+            )
             return torch.zeros(1), cache
 
     model = _HeadDetectorModel()

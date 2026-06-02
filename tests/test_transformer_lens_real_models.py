@@ -7,9 +7,9 @@ from typing import Any
 
 import pytest
 
+from SafeLens.core.analysis import induction_attention_score, previous_token_attention_score
 from SafeLens.core.base import ModelLoadConfig
 from SafeLens.core.hooks import ActivationCache
-from SafeLens.core.analysis import induction_attention_score, previous_token_attention_score
 from SafeLens.core.patching import (
     PatchResult,
     get_act_patch_attn_head_out_by_pos,

@@ -1,53 +1,9 @@
 """Utility helpers."""
 
-from SafeLens.utils.model_bridge import (
-    ArchitectureAdapter,
-    ComponentHookSpec,
-    ComponentRef,
-    architecture_adapter_for_model,
-    architecture_adapter_for_name,
-    list_architecture_adapters,
-    supported_transformer_component_names,
-)
-from SafeLens.utils.model_registry import (
-    ModelAdapterCapabilities,
-    ModelAdapterRegistry,
-    ModelAdapterSpec,
-    ModelDownloadPlan,
-    get_model_adapter_registry,
-    resolve_model_download_plan,
-)
-from SafeLens.utils.model_wrapper import (
-    DummyModelWrapper,
-    HuggingFaceModelWrapper,
-    HookedTransformer,
-    LocalModelWrapper,
-    ModelScopeModelWrapper,
-    Qwen3DenseModelWrapper,
-    TransformerLensConfigView,
-    TransformerLensCompatibleModelWrapper,
-    build_model_wrapper,
-    is_supported_qwen3_dense_model_name,
-    parse_qwen3_component_ref,
-    qwen3_dense_size_billion,
-    qwen3_hook_name_examples,
-    qwen3_supported_hook_components,
-    register_builtin_model_adapters,
-    validate_qwen3_dense_model_name,
-    validate_qwen3_hook_ref,
-)
-from SafeLens.utils.transformer_lens_support import (
-    is_transformer_lens_native_checkpoint,
-    is_transformer_lens_official_model_name,
-    is_transformer_lens_supported_model_name,
-    resolve_transformer_lens_compatible_model_name,
-    transformer_lens_model_kind,
-    transformer_lens_official_model_names,
-)
 from SafeLens.core.activation_functions import (
-    ActivationFunction,
     SUPPORTED_ACTIVATIONS,
     XIELU,
+    ActivationFunction,
     gelu,
     gelu_fast,
     gelu_new,
@@ -57,7 +13,13 @@ from SafeLens.core.activation_functions import (
     solu,
     xielu,
 )
-from SafeLens.core.analysis import lm_accuracy, lm_cross_entropy_loss, logits_to_df, sample_logits, test_prompt
+from SafeLens.core.analysis import (
+    lm_accuracy,
+    lm_cross_entropy_loss,
+    logits_to_df,
+    sample_logits,
+    test_prompt,
+)
 from SafeLens.core.factored_matrix import composition_scores
 from SafeLens.core.hooks import get_act_name
 from SafeLens.core.tensors import (
@@ -90,10 +52,10 @@ from SafeLens.core.utilities import (
     download_file_from_hf,
     enable_hf_retry,
     find_embedding_device,
-    get_dataset,
     get_attention_mask,
     get_best_available_cuda_device,
     get_best_available_device,
+    get_dataset,
     get_device,
     get_device_for_block_index,
     get_hf_token,
@@ -120,6 +82,50 @@ from SafeLens.core.utilities import (
     tokenize_and_concatenate,
     vanilla_addmm,
     warn_if_mps,
+)
+from SafeLens.utils.model_bridge import (
+    ArchitectureAdapter,
+    ComponentHookSpec,
+    ComponentRef,
+    architecture_adapter_for_model,
+    architecture_adapter_for_name,
+    list_architecture_adapters,
+    supported_transformer_component_names,
+)
+from SafeLens.utils.model_registry import (
+    ModelAdapterCapabilities,
+    ModelAdapterRegistry,
+    ModelAdapterSpec,
+    ModelDownloadPlan,
+    get_model_adapter_registry,
+    resolve_model_download_plan,
+)
+from SafeLens.utils.model_wrapper import (
+    DummyModelWrapper,
+    HookedTransformer,
+    HuggingFaceModelWrapper,
+    LocalModelWrapper,
+    ModelScopeModelWrapper,
+    Qwen3DenseModelWrapper,
+    TransformerLensCompatibleModelWrapper,
+    TransformerLensConfigView,
+    build_model_wrapper,
+    is_supported_qwen3_dense_model_name,
+    parse_qwen3_component_ref,
+    qwen3_dense_size_billion,
+    qwen3_hook_name_examples,
+    qwen3_supported_hook_components,
+    register_builtin_model_adapters,
+    validate_qwen3_dense_model_name,
+    validate_qwen3_hook_ref,
+)
+from SafeLens.utils.transformer_lens_support import (
+    is_transformer_lens_native_checkpoint,
+    is_transformer_lens_official_model_name,
+    is_transformer_lens_supported_model_name,
+    resolve_transformer_lens_compatible_model_name,
+    transformer_lens_model_kind,
+    transformer_lens_official_model_names,
 )
 
 __all__ = [

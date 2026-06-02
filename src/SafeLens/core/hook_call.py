@@ -95,10 +95,9 @@ def _select_positional_call(
 
 def _prefers_positional_options(hook_signature: Any) -> bool:
     parameters = list(hook_signature.parameters.values())
-    return any(
-        parameter.kind == Parameter.VAR_POSITIONAL
-        for parameter in parameters
-    ) and not any(parameter.kind == Parameter.VAR_KEYWORD for parameter in parameters)
+    return any(parameter.kind == Parameter.VAR_POSITIONAL for parameter in parameters) and not any(
+        parameter.kind == Parameter.VAR_KEYWORD for parameter in parameters
+    )
 
 
 def _keyword_kwargs_for_signature(

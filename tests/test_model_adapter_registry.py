@@ -16,8 +16,8 @@ from SafeLens.utils import (
     is_transformer_lens_native_checkpoint,
     is_transformer_lens_official_model_name,
     is_transformer_lens_supported_model_name,
-    resolve_transformer_lens_compatible_model_name,
     resolve_model_download_plan,
+    resolve_transformer_lens_compatible_model_name,
 )
 
 
@@ -318,7 +318,11 @@ def test_model_adapter_registry_uses_resolved_alias_for_transformerlens_model_fa
 @pytest.mark.parametrize(
     "model_name, expected_family, expected_resolved",
     [
-        ("bert-base-uncased", "transformer_lens_compatible_encoder", "google-bert/bert-base-uncased"),
+        (
+            "bert-base-uncased",
+            "transformer_lens_compatible_encoder",
+            "google-bert/bert-base-uncased",
+        ),
         ("t5-small", "transformer_lens_compatible_encoder_decoder", "google-t5/t5-small"),
     ],
 )
@@ -482,9 +486,7 @@ def test_build_model_wrapper_uses_registered_adapters() -> None:
 
 
 def test_transformerlens_build_model_wrapper_resolves_legacy_llama_alias_to_loadable_id() -> None:
-    wrapper = build_model_wrapper(
-        ModelLoadConfig(source="transformer_lens", name="llama-7b-hf")
-    )
+    wrapper = build_model_wrapper(ModelLoadConfig(source="transformer_lens", name="llama-7b-hf"))
 
     assert isinstance(wrapper, TransformerLensCompatibleModelWrapper)
     assert wrapper.name == "llama-7b-hf"

@@ -6,7 +6,6 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-
 _MISSING = object()
 
 
@@ -120,9 +119,7 @@ class KeyValueCacheEntry:
 class KeyValueCache:
     """Dictionary-like key/value cache keyed by layer index."""
 
-    entries: dict[int, KeyValueCacheEntry] | list[KeyValueCacheEntry] = field(
-        default_factory=dict
-    )
+    entries: dict[int, KeyValueCacheEntry] | list[KeyValueCacheEntry] = field(default_factory=dict)
     previous_attention_mask: Any | None = None
     frozen: bool = False
 
@@ -262,7 +259,7 @@ def shape_of(value: Any) -> tuple[int, ...]:
 
 
 def _is_sequence(value: Any) -> bool:
-    return isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray))
+    return isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray)
 
 
 def _iter_entries(

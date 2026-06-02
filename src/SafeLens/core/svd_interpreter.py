@@ -35,7 +35,9 @@ class SVDInterpreter:
         if callable(named_parameters):
             self.params = {name: param for name, param in named_parameters()}
             return
-        raise ValueError("SVDInterpreter requires a model exposing tl_parameters() or named_parameters().")
+        raise ValueError(
+            "SVDInterpreter requires a model exposing tl_parameters() or named_parameters()."
+        )
 
     def get_singular_vectors(
         self,
@@ -66,7 +68,9 @@ class SVDInterpreter:
         elif vector_type == "w_out":
             vh = _svd_vh(self._get_w_out_matrix(layer_index))
         else:
-            raise ValueError(f"Vector type must be in {list(VECTOR_TYPES)}, instead got {vector_type}")
+            raise ValueError(
+                f"Vector type must be in {list(VECTOR_TYPES)}, instead got {vector_type}"
+            )
 
         return self._get_singular_vectors_from_matrix(vh, self._get_output_embedding(), num_vectors)
 
@@ -77,9 +81,11 @@ class SVDInterpreter:
         num_vectors: int = 10,
     ) -> Any:
         """Project right singular vectors into vocabulary space."""
-        if num_vectors > _first_dim(vh):
+        available_vectors = _first_dim(vh)
+        if num_vectors > available_vectors:
             raise ValueError(
-                f"Requested {num_vectors} singular vectors, but only {_first_dim(vh)} are available."
+                f"Requested {num_vectors} singular vectors, "
+                f"but only {available_vectors} are available."
             )
         expected_vocab = _cfg_int(self.cfg, "d_vocab", "vocab_size")
         if num_vectors == 0:
@@ -178,7 +184,10 @@ def _stack_vocab_vectors(vectors: list[Any]) -> Any:
         return array[:, None, :].tolist()
     except Exception:
         vocab_size = len(first)
-        return [[[vectors[vector_index][vocab_index] for vector_index in range(len(vectors))]] for vocab_index in range(vocab_size)]
+        return [
+            [[vectors[vector_index][vocab_index] for vector_index in range(len(vectors))]]
+            for vocab_index in range(vocab_size)
+        ]
 
 
 def _empty_singular_vector_stack(vocab_size: int | None, embedding: Any) -> Any:

@@ -1,23 +1,5 @@
 """SafeLens package."""
 
-from SafeLens.core.base import (
-    AttributionResult,
-    BaseAttributor,
-    BaseMethodConfig,
-    BaseMonitor,
-    BaseProbe,
-    MethodSpec,
-    ModelLoadConfig,
-    ModelWrapper,
-    MonitoringSignal,
-    OutputConfig,
-    PipelineConfig,
-    PipelineSectionConfig,
-    ProbeResult,
-    RunReport,
-    SafetyReport,
-    TokenAttribution,
-)
 from SafeLens.core.activation_functions import (
     SUPPORTED_ACTIVATIONS,
     XIELU,
@@ -61,6 +43,24 @@ from SafeLens.core.analysis import (
     topk_tokens,
     zero_ablation_hook,
 )
+from SafeLens.core.base import (
+    AttributionResult,
+    BaseAttributor,
+    BaseMethodConfig,
+    BaseMonitor,
+    BaseProbe,
+    MethodSpec,
+    ModelLoadConfig,
+    ModelWrapper,
+    MonitoringSignal,
+    OutputConfig,
+    PipelineConfig,
+    PipelineSectionConfig,
+    ProbeResult,
+    RunReport,
+    SafetyReport,
+    TokenAttribution,
+)
 from SafeLens.core.factored_matrix import FactoredMatrix, composition_scores
 from SafeLens.core.hooked_root import HookedRoot
 from SafeLens.core.hooks import ActivationCache, HookPoint
@@ -79,8 +79,8 @@ from SafeLens.core.patching import (
     PatchSetter,
     PatchSpec,
     activation_name_for_component,
-    add_patch_setter,
     adapt_transformer_lens_patch_setter,
+    add_patch_setter,
     apply_patch,
     component_activation_patch,
     format_patch_results,
@@ -151,9 +151,9 @@ from SafeLens.core.utilities import (
     download_file_from_hf,
     enable_hf_retry,
     find_embedding_device,
-    get_dataset,
     get_attention_mask,
     get_best_available_device,
+    get_dataset,
     get_device,
     get_device_for_block_index,
     get_hf_token,

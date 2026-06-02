@@ -339,7 +339,9 @@ def run_activation_patch(
                 layers=layers,
                 **_patch_run_return_type_kwargs(model.run_with_cache, metric, model),
             )
-    return PatchResult(spec=spec, metric=_metric_to_float(metric(output)), output=output, cache=cache)
+    return PatchResult(
+        spec=spec, metric=_metric_to_float(metric(output)), output=output, cache=cache
+    )
 
 
 def _metric_to_float(value: Any) -> float:
@@ -486,7 +488,9 @@ def patch_results_to_index_table(
         else:
             row = {}
             if index_axis_names and index_axis_names[0] == "layer":
-                row["layer"] = index[0] if len(index) == len(index_axis_names) else result.spec.layer
+                row["layer"] = (
+                    index[0] if len(index) == len(index_axis_names) else result.spec.layer
+                )
             for axis_index, axis_name in enumerate(index_axis_names):
                 if axis_name == "layer" and "layer" in row:
                     continue
@@ -1607,21 +1611,15 @@ def get_act_patch_attn_head_by_pos_every(
         ),
         (
             "q",
-            get_act_patch_attn_head_q_by_pos(
-                model, corrupted_batch, clean_cache, metric, **kwargs
-            ),
+            get_act_patch_attn_head_q_by_pos(model, corrupted_batch, clean_cache, metric, **kwargs),
         ),
         (
             "k",
-            get_act_patch_attn_head_k_by_pos(
-                model, corrupted_batch, clean_cache, metric, **kwargs
-            ),
+            get_act_patch_attn_head_k_by_pos(model, corrupted_batch, clean_cache, metric, **kwargs),
         ),
         (
             "v",
-            get_act_patch_attn_head_v_by_pos(
-                model, corrupted_batch, clean_cache, metric, **kwargs
-            ),
+            get_act_patch_attn_head_v_by_pos(model, corrupted_batch, clean_cache, metric, **kwargs),
         ),
         (
             "pattern",
@@ -1721,7 +1719,9 @@ def _stack_metric_outputs(metric_outputs: Sequence[Any]) -> Any:
 
 def _pad_kv_metric_outputs(named_outputs: Sequence[tuple[str, Any]]) -> list[tuple[str, Any]]:
     metric_outputs = [_split_metric_output(output)[0] for _name, output in named_outputs]
-    last_dim = max((shape_of(output)[-1] for output in metric_outputs if shape_of(output)), default=0)
+    last_dim = max(
+        (shape_of(output)[-1] for output in metric_outputs if shape_of(output)), default=0
+    )
     padded_outputs: list[tuple[str, Any]] = []
     for name, output in named_outputs:
         if name in {"k", "v"}:
@@ -1764,7 +1764,7 @@ def _move_metric_axis(output: Any, source: int, destination: int) -> Any:
 
 def _move_axis(value: Any, source: int, destination: int) -> Any:
     try:
-        movedim = getattr(value, "movedim")
+        movedim = value.movedim
         if callable(movedim):
             return movedim(source, destination)
     except (AttributeError, RuntimeError, TypeError, ValueError):
@@ -1804,8 +1804,7 @@ def _build_nested_from_shape(
     if not shape:
         return value_fn(prefix)
     return [
-        _build_nested_from_shape(shape[1:], value_fn, (*prefix, index))
-        for index in range(shape[0])
+        _build_nested_from_shape(shape[1:], value_fn, (*prefix, index)) for index in range(shape[0])
     ]
 
 
@@ -2110,7 +2109,9 @@ def maybe_apply_transformer_lens_patch_setter(
         return None
     index = normalize_index(index_or_spec)
     if len(index) != expected_length:
-        raise ValueError(f"{setter_name} expects an index of length {expected_length}; got {index!r}.")
+        raise ValueError(
+            f"{setter_name} expects an index of length {expected_length}; got {index!r}."
+        )
     patched = clone_patch_target(corrupted_activation)
     target_slice = _maybe_drop_batch_slice(
         target_slice_fn(index),
@@ -2476,7 +2477,11 @@ def _component_from_transformer_lens_cache_name(
             return f"{attention_prefix}_attn_out"
         if component in ATTENTION_VECTOR_COMPONENTS:
             return f"{attention_prefix}_{component}"
-    if stack == "decoder" and normalized_layer_type == "mlp" and component in DECODER_MLP_COMPONENTS:
+    if (
+        stack == "decoder"
+        and normalized_layer_type == "mlp"
+        and component in DECODER_MLP_COMPONENTS
+    ):
         return f"decoder_{component}"
     if (
         stack == "decoder"
@@ -2493,7 +2498,11 @@ def _component_from_transformer_lens_cache_name(
         return "attn_out"
     if stack == "encoder" and normalized_layer_type == "mlp" and component == "out":
         return "mlp_out"
-    if stack == "blocks" and normalized_layer_type == "decoder_mlp" and component in DECODER_MLP_COMPONENTS:
+    if (
+        stack == "blocks"
+        and normalized_layer_type == "decoder_mlp"
+        and component in DECODER_MLP_COMPONENTS
+    ):
         return f"decoder_{component}"
     return _normalize_component_for_layer_type(component, normalized_layer_type)
 
@@ -2577,9 +2586,7 @@ def infer_positions(
     if activation is not None:
         shape = shape_of(activation)
         has_batch_dim = getattr(clean_cache, "has_batch_dim", True)
-        if normalized_component in PATTERN_COMPONENTS and len(shape) >= (
-            4 if has_batch_dim else 3
-        ):
+        if normalized_component in PATTERN_COMPONENTS and len(shape) >= (4 if has_batch_dim else 3):
             if axis_name == "src_pos":
                 return int(shape[-1])
             return int(shape[-2])
@@ -2664,9 +2671,7 @@ def infer_heads(
     if activation is not None:
         shape = shape_of(activation)
         has_batch_dim = getattr(clean_cache, "has_batch_dim", True)
-        if normalized_component in PATTERN_COMPONENTS and len(shape) >= (
-            2 if has_batch_dim else 1
-        ):
+        if normalized_component in PATTERN_COMPONENTS and len(shape) >= (2 if has_batch_dim else 1):
             return shape[1 if has_batch_dim else 0]
         if len(shape) >= (3 if has_batch_dim else 2):
             return shape[2 if has_batch_dim else 1]
@@ -2708,9 +2713,7 @@ def infer_index_table(
     if "head" in index_axis_names:
         axis_values["head"] = range(infer_heads(model, clean_cache, activation_name, layers))
     if "head_index" in index_axis_names:
-        axis_values["head_index"] = range(
-            infer_heads(model, clean_cache, activation_name, layers)
-        )
+        axis_values["head_index"] = range(infer_heads(model, clean_cache, activation_name, layers))
     if "dest_pos" in index_axis_names:
         axis_values["dest_pos"] = range(
             infer_positions(
@@ -2757,7 +2760,7 @@ def normalize_index_table(
         try:
             records = to_dict("records")
             if columns is None:
-                columns = list(getattr(index_df, "columns"))
+                columns = list(index_df.columns)
             return [dict(record) for record in records], tuple(columns)
         except TypeError:
             pass

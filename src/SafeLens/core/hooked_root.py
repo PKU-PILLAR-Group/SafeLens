@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+import warnings
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from typing import Any, Literal
-import warnings
 
 from SafeLens.core.hooks import (
     ActivationCache,
@@ -108,9 +108,7 @@ class HookedRoot:
                 raise TypeError("hook_point_name is required when checking one HookPoint.")
             if self._resolve_hook_name(hook_point_name) is None:
                 available = ", ".join(self.hook_dict)
-                raise KeyError(
-                    f"Unknown hook point {hook_point_name!r}. Available: {available}"
-                )
+                raise KeyError(f"Unknown hook point {hook_point_name!r}. Available: {available}")
             return
         missing = [
             name
@@ -672,16 +670,16 @@ class HookedRoot:
     def _resolve_hook_name(self, name: str) -> str | None:
         if name in self.hook_dict:
             return name
-        matches = [hook_name for hook_name in self.hook_dict if matches_names_filter(hook_name, name)]
+        matches = [
+            hook_name for hook_name in self.hook_dict if matches_names_filter(hook_name, name)
+        ]
         if len(matches) == 1:
             return matches[0]
         return None
 
     def _matching_hook_names(self, names_filter: NamesFilter) -> list[str]:
         if names_filter is None or callable(names_filter):
-            return [
-                name for name in self.hook_dict if matches_names_filter(name, names_filter)
-            ]
+            return [name for name in self.hook_dict if matches_names_filter(name, names_filter)]
         if isinstance(names_filter, str):
             resolved = self._resolve_hook_name(names_filter)
             return [] if resolved is None else [resolved]
@@ -721,9 +719,9 @@ class HookedRoot:
                     name = f"{prefix}.{key}" if prefix else str(key)
                     yield from visit(name, item)
                 return
-            if isinstance(value, (str, bytes, int, float, bool, type(None))):
+            if isinstance(value, str | bytes | int | float | bool | type(None)):
                 return
-            if isinstance(value, (list, tuple)):
+            if isinstance(value, list | tuple):
                 for index, item in enumerate(value):
                     name = f"{prefix}.{index}" if prefix else str(index)
                     yield from visit(name, item)
@@ -792,7 +790,7 @@ def _is_differentiable_scalar(value: Any) -> bool:
 
 
 def _looks_like_scalar(value: Any) -> bool:
-    if isinstance(value, (str, bytes, Mapping, tuple, list)):
+    if isinstance(value, str | bytes | Mapping | tuple | list):
         return False
     ndim = getattr(value, "ndim", None)
     if ndim is not None:
@@ -812,4 +810,4 @@ def _looks_like_scalar(value: Any) -> bool:
             return len(shape) == 0
         except TypeError:
             pass
-    return isinstance(value, (int, float, complex, bool))
+    return isinstance(value, int | float | complex | bool)

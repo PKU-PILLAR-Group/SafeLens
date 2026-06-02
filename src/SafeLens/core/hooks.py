@@ -1039,7 +1039,9 @@ class ActivationCache(MutableMapping[Any, Any]):
         target_layer = self._normalize_layer(layer)
         values: list[Any] = []
         labels: list[str] = []
-        can_project_before_stack = project_output_onto is not None and not apply_ln and not incl_remainder
+        can_project_before_stack = (
+            project_output_onto is not None and not apply_ln and not incl_remainder
+        )
         can_fold_ln_projection = (
             component == "post"
             and project_output_onto is not None
@@ -1066,9 +1068,7 @@ class ActivationCache(MutableMapping[Any, Any]):
                 )
                 results_are_projected = can_project_before_stack
                 neuron_dim = (
-                    -1
-                    if results_are_projected and len(_shape_of(project_output_onto)) == 1
-                    else -2
+                    -1 if results_are_projected and len(_shape_of(project_output_onto)) == 1 else -2
                 )
             except ValueError:
                 if project_output_onto is not None or require_output_weight or incl_remainder:
@@ -1743,9 +1743,7 @@ def activation_name_candidates(
     aliased_layer_type = _LAYER_TYPE_ALIASES.get(layer_type, layer_type)
     if layer == -1:
         stack_n_layers = (
-            decoder_n_layers
-            if _activation_key_stack_name(aliased_name) == "decoder"
-            else n_layers
+            decoder_n_layers if _activation_key_stack_name(aliased_name) == "decoder" else n_layers
         )
         if stack_n_layers:
             layer = stack_n_layers - 1
@@ -1903,7 +1901,10 @@ def _transformer_lens_names_from_safelens_name(name: str) -> list[str]:
             f"blocks.{layer}.{ln_layer_type}.hook_{ln_component}",
         ]
     if component in _ATTN_ACTS:
-        return [f"encoder.{layer}.attn.hook_{component}", get_act_name(component, layer, layer_type)]
+        return [
+            f"encoder.{layer}.attn.hook_{component}",
+            get_act_name(component, layer, layer_type),
+        ]
     if component in _MLP_ACTS:
         return [f"encoder.{layer}.mlp.hook_{component}", get_act_name(component, layer, layer_type)]
     if component in _ENCODER_TOP_LEVEL_ACTS:
@@ -2079,7 +2080,9 @@ def _activation_name_components(name: str) -> list[str]:
     components: list[str] = []
     for candidate in activation_name_candidates(name):
         if "." not in candidate:
-            components.append(_ACT_NAME_ALIASES.get(_strip_hook_prefix(candidate), _strip_hook_prefix(candidate)))
+            components.append(
+                _ACT_NAME_ALIASES.get(_strip_hook_prefix(candidate), _strip_hook_prefix(candidate))
+            )
             continue
         tail = candidate.rsplit(".", 1)[-1]
         components.append(_ACT_NAME_ALIASES.get(_strip_hook_prefix(tail), _strip_hook_prefix(tail)))
@@ -2119,11 +2122,7 @@ def _normalize_residual_stack_name(stack: str) -> Literal["encoder", "decoder"]:
 
 
 def _activation_key_stack_name(name: str) -> Literal["encoder", "decoder"]:
-    if (
-        name.startswith("decoder_")
-        or name.startswith("cross_")
-        or name in _CROSS_TOP_LEVEL_ACTS
-    ):
+    if name.startswith("decoder_") or name.startswith("cross_") or name in _CROSS_TOP_LEVEL_ACTS:
         return "decoder"
     return "encoder"
 
@@ -2465,11 +2464,7 @@ def _residual_stack_batch_dim(
         and direction_shape[0] == residual_shape[1]
     ):
         return 1
-    if (
-        len(residual_shape) == 3
-        and pos_slice is not None
-        and len(direction_shape) >= 3
-    ):
+    if len(residual_shape) == 3 and pos_slice is not None and len(direction_shape) >= 3:
         return 1
     if direction_shape and residual_shape == direction_shape:
         return 0
@@ -2599,7 +2594,9 @@ def _apply_cached_ln_scale_to_sliced_stack(
         if requires_cached_scale:
             expected_key = candidates[0]
             expected_name = (
-                get_act_name(*expected_key) if isinstance(expected_key, tuple) else str(expected_key)
+                get_act_name(*expected_key)
+                if isinstance(expected_key, tuple)
+                else str(expected_key)
             )
             raise KeyError(
                 f"Cached LN scale not found at {expected_name!r}. apply_ln operations require "
@@ -2665,7 +2662,9 @@ def _residual_stack_pos_dim_after_optional_batch_slice(
     return 2 if len(shape) >= 4 else 1
 
 
-def _head_axis_after_pos_slice(activation: Any, pos_slice: Any, *, component: str = "result") -> int:
+def _head_axis_after_pos_slice(
+    activation: Any, pos_slice: Any, *, component: str = "result"
+) -> int:
     if _is_attention_pattern_component(component):
         return -2 if isinstance(pos_slice, int) else -3
     if isinstance(pos_slice, int):
@@ -3180,7 +3179,7 @@ def _dot_last_dim(left: Any, right: Any) -> Any:
         if len(left) == len(right):
             return [
                 _dot_last_dim(left_item, right_item)
-                for left_item, right_item in zip(left, right)
+                for left_item, right_item in zip(left, right, strict=False)
             ]
         return [_dot_last_dim(left_item, right) for left_item in left]
     return left
@@ -3219,9 +3218,7 @@ def _project_last_dim(left: Any, projection: Any) -> Any:
         return _dot_last_dim(left, projection)
     if len(projection_shape) == 2:
         return _matmul_last_dim(left, projection)
-    raise ValueError(
-        "project_output_onto must have shape [d_model] or [d_model, num_outputs]."
-    )
+    raise ValueError("project_output_onto must have shape [d_model] or [d_model, num_outputs].")
 
 
 def _matmul_last_dim(left: Any, right: Any) -> Any:
@@ -3260,7 +3257,10 @@ def _can_broadcast_shape(source: tuple[int, ...], target: tuple[int, ...]) -> bo
     if len(source) > len(target):
         return False
     padded = (1,) * (len(target) - len(source)) + source
-    return all(source_dim in (1, target_dim) for source_dim, target_dim in zip(padded, target))
+    return all(
+        source_dim in (1, target_dim)
+        for source_dim, target_dim in zip(padded, target, strict=False)
+    )
 
 
 def _broadcast_index(
