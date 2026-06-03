@@ -63,12 +63,13 @@ class PipelineRunner:
 
     def run(self, dataset: Iterable[Mapping[str, Any]] | None = None) -> RunReport:
         """Run the configured safety pipeline and write a JSON report."""
+        batches = list(dataset if dataset is not None else self.config.dataset)
+        if not batches:
+            batches = [{"id": "demo", "text": "This is a benign SafeLens demo sample."}]
+        self._provide_dataset_to_methods(batches)
+        batches = self._filter_dataset_for_methods(batches)
         self.setup()
         try:
-            batches = list(dataset if dataset is not None else self.config.dataset)
-            if not batches:
-                batches = [{"id": "demo", "text": "This is a benign SafeLens demo sample."}]
-
             reports = [self._run_one(index, batch) for index, batch in enumerate(batches)]
             run_report = RunReport(reports=reports, summary=self._summarize(reports))
             self._write_report(run_report)
@@ -161,6 +162,23 @@ class PipelineRunner:
         path = Path(self.config.output.report_path)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(run_report.to_dict(), indent=2), encoding="utf-8")
+
+    def _provide_dataset_to_methods(self, batches: list[Mapping[str, Any]]) -> None:
+        for method in [*self.probes, *self.monitors, *self.attributors]:
+            set_dataset = getattr(method, "set_dataset", None)
+            if callable(set_dataset):
+                set_dataset(batches)
+
+    def _filter_dataset_for_methods(
+        self,
+        batches: list[Mapping[str, Any]],
+    ) -> list[Mapping[str, Any]]:
+        filtered = batches
+        for method in [*self.probes, *self.monitors, *self.attributors]:
+            filter_dataset = getattr(method, "filter_dataset", None)
+            if callable(filter_dataset):
+                filtered = list(filter_dataset(filtered))
+        return filtered
 
 
 def run_from_config(
