@@ -9,6 +9,7 @@ from SafeLens.core.factored_matrix import (
     matmul,
     multiply_values,
     shape_of,
+    svd_nested,
     transpose,
 )
 
@@ -162,8 +163,9 @@ def _svd_vh(matrix: Any) -> Any:
 
         _u, _s, vh = np.linalg.svd(np.asarray(matrix, dtype=float))
         return vh.tolist()
-    except Exception as exc:
-        raise RuntimeError("SVDInterpreter requires torch or numpy-compatible matrices.") from exc
+    except Exception:
+        _u, _s, v = svd_nested(matrix)
+        return transpose(v)
 
 
 def _stack_vocab_vectors(vectors: list[Any]) -> Any:

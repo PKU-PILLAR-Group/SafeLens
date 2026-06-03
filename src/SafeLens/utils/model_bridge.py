@@ -97,7 +97,7 @@ _UNSUPPORTED_ATTENTION_REASON = (
     "this fallback adapter has no known attention module path for softmax instrumentation"
 )
 _UNSUPPORTED_RESULT_REASON = (
-    "TransformerLens result vectors are derived from z @ W_O for HuggingFace " "projection modules"
+    "TransformerLens result vectors are derived from z @ W_O for HuggingFace projection modules"
 )
 _UNSUPPORTED_SSM_ATTENTION_REASON = "state-space model adapters do not expose attention activations"
 _ATTENTION_SOFTMAX_STATE_ATTR = "_safelens_attention_softmax_hook_state"
@@ -2902,10 +2902,15 @@ def _register_attention_softmax_hook(
         import torch
         import torch.nn.functional as functional
     except ImportError as exc:
-        raise ImportError(
-            "Attention score instrumentation requires torch. "
-            "Install model dependencies with `pip install -e '.[models]'`."
-        ) from exc
+        _ = exc
+        return _register_attention_output_fallback_hook(
+            module,
+            hook_fn,
+            component_ref,
+            architecture,
+            spec,
+            prepend=prepend,
+        )
 
     state = getattr(module, _ATTENTION_SOFTMAX_STATE_ATTR, None)
     if state is None:
@@ -2983,6 +2988,86 @@ def _register_attention_softmax_hook(
                     "instrumentation."
                 )
             return output
+
+        state.wrapped_forward = wrapped_forward
+        module.forward = wrapped_forward
+        setattr(module, _ATTENTION_SOFTMAX_STATE_ATTR, state)
+
+    record = _AttentionSoftmaxHookRecord(
+        hook_fn=hook_fn,
+        component_ref=component_ref,
+        architecture=architecture,
+        spec=spec,
+        hook_context=ComponentHookContext(component_ref),
+    )
+    if prepend:
+        state.records.insert(0, record)
+    else:
+        state.records.append(record)
+    return _AttentionSoftmaxHookHandle(state, record)
+
+
+def _register_attention_output_fallback_hook(
+    module: Any,
+    hook_fn: HookFn,
+    component_ref: ComponentRef,
+    architecture: str,
+    spec: ComponentHookSpec,
+    *,
+    prepend: bool = False,
+) -> Any:
+    """Fallback for dependency-light fake/list backends without torch softmax."""
+    state = getattr(module, _ATTENTION_SOFTMAX_STATE_ATTR, None)
+    if state is None:
+        original_forward = module.forward
+        state = _AttentionSoftmaxHookState(module=module, original_forward=original_forward)
+
+        def wrapped_forward(*args: Any, **kwargs: Any) -> Any:
+            output = state.original_forward(*args, **kwargs)
+            pattern = _find_attention_pattern(output)
+            scores = _find_attention_scores(output)
+            if pattern is None:
+                components = ", ".join(
+                    record.component_ref.safelens_name for record in state.records
+                )
+                raise RuntimeError(
+                    f"Attention instrumentation for {components!r} did not observe an "
+                    "attention pattern in the module output. Install torch for softmax "
+                    "instrumentation or use a model adapter with explicit attention outputs."
+                )
+            patched_scores = scores
+            for record in list(state.records):
+                if record.spec.value != "attention_scores" or patched_scores is None:
+                    continue
+                replacement = call_component_hook(
+                    record.hook_fn,
+                    activation=patched_scores,
+                    component_ref=record.component_ref,
+                    architecture=record.architecture,
+                    hook_context=record.hook_context,
+                )
+                if replacement is not None:
+                    patched_scores = replacement
+            patched_pattern = pattern
+            for record in list(state.records):
+                if record.spec.value != "attention_pattern":
+                    continue
+                replacement = call_component_hook(
+                    record.hook_fn,
+                    activation=patched_pattern,
+                    component_ref=record.component_ref,
+                    architecture=record.architecture,
+                    hook_context=record.hook_context,
+                )
+                if replacement is not None:
+                    patched_pattern = replacement
+            if patched_pattern is pattern:
+                pattern_output = output
+            else:
+                pattern_output = _replace_first_matching_identity(output, pattern, patched_pattern)
+            if patched_scores is not scores and scores is not None:
+                return _replace_first_matching_identity(pattern_output, scores, patched_scores)
+            return pattern_output
 
         state.wrapped_forward = wrapped_forward
         module.forward = wrapped_forward
@@ -3136,6 +3221,52 @@ def _find_attention_pattern(
             if found is not None:
                 return found
     return None
+
+
+def _replace_first_matching_identity(value: Any, target: Any, replacement: Any) -> Any:
+    if value is target:
+        return replacement
+    if isinstance(value, tuple):
+        replaced = False
+        items: list[Any] = []
+        for item in value:
+            if not replaced and _contains_identity(item, target):
+                items.append(_replace_first_matching_identity(item, target, replacement))
+                replaced = True
+            else:
+                items.append(item)
+        return tuple(items)
+    if isinstance(value, list):
+        replaced = False
+        items = []
+        for item in value:
+            if not replaced and _contains_identity(item, target):
+                items.append(_replace_first_matching_identity(item, target, replacement))
+                replaced = True
+            else:
+                items.append(item)
+        return items
+    if isinstance(value, dict):
+        replaced = False
+        result: dict[Any, Any] = {}
+        for key, item in value.items():
+            if not replaced and _contains_identity(item, target):
+                result[key] = _replace_first_matching_identity(item, target, replacement)
+                replaced = True
+            else:
+                result[key] = item
+        return result
+    return value
+
+
+def _contains_identity(value: Any, target: Any) -> bool:
+    if value is target:
+        return True
+    if isinstance(value, dict):
+        return any(_contains_identity(item, target) for item in value.values())
+    if isinstance(value, tuple | list):
+        return any(_contains_identity(item, target) for item in value)
+    return False
 
 
 def _looks_like_attention_pattern(value: Any) -> bool:

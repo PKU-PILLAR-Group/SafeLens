@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import builtins
 from collections.abc import Mapping
 from typing import Any
 
@@ -637,6 +638,23 @@ def _tuplify_nested(value: Any) -> Any:
     if isinstance(value, list):
         return tuple(_tuplify_nested(item) for item in value)
     return value
+
+
+def _block_torch_and_numpy_imports(monkeypatch: pytest.MonkeyPatch) -> None:
+    real_import = builtins.__import__
+
+    def blocked_import(
+        name: str,
+        globals_: Any | None = None,
+        locals_: Any | None = None,
+        fromlist: tuple[str, ...] = (),
+        level: int = 0,
+    ) -> Any:
+        if name in {"torch", "numpy"} or name.startswith(("torch.", "numpy.")):
+            raise ImportError(f"blocked optional dependency {name}")
+        return real_import(name, globals_, locals_, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", blocked_import)
 
 
 class _FakeTupleWeightedQwenModel(_FakeListWeightedQwenModel):
@@ -9255,6 +9273,41 @@ def test_svd_interpreter_supports_list_backed_parameters() -> None:
         [[]],
         [[]],
     ]
+
+
+def test_svd_interpreter_handles_non_diagonal_lists_without_optional_backends(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _block_torch_and_numpy_imports(monkeypatch)
+
+    class SvdConfig:
+        n_layers = 1
+        n_heads = 1
+        d_vocab = 2
+
+    class SvdModel:
+        cfg = SvdConfig()
+
+        def tl_parameters(self) -> dict[str, Any]:
+            return {
+                "blocks.0.attn.W_V": [[[1.0, 0.0], [0.0, 1.0]]],
+                "blocks.0.attn.W_O": [[[1.0, 0.0], [0.0, 1.0]]],
+                "blocks.0.mlp.W_in": [[2.0, 1.0], [1.0, 2.0]],
+                "blocks.0.mlp.W_out": [[2.0, 1.0], [1.0, 2.0]],
+                "unembed.W_U": [[1.0, 0.0], [0.0, 1.0]],
+            }
+
+    vectors = SVDInterpreter(SvdModel()).get_singular_vectors(
+        "w_out",
+        layer_index=0,
+        num_vectors=2,
+    )
+
+    root_half = 0.5**0.5
+    assert vectors[0][0][0] == pytest.approx(root_half)
+    assert vectors[0][0][1] == pytest.approx(root_half)
+    assert vectors[1][0][0] == pytest.approx(root_half)
+    assert vectors[1][0][1] == pytest.approx(-root_half)
 
 
 def test_transformer_lens_compatible_wrapper_exposes_tuple_backed_circuit_helpers() -> None:

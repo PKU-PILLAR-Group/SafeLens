@@ -23,6 +23,7 @@ from SafeLens.core.factored_matrix import (
     FactoredMatrix,
     composition_scores,
     shape_of,
+    svd_nested,
     transpose,
 )
 from SafeLens.core.hook_call import call_user_hook
@@ -867,7 +868,7 @@ class HuggingFaceModelWrapper(ModelWrapper):
         """Set the tokenizer used by TransformerLens-style token helpers."""
         if default_padding_side not in {"right", "left", None}:
             raise AssertionError(
-                "padding_side must be 'right', 'left' or None, " f"got {default_padding_side!r}"
+                f"padding_side must be 'right', 'left' or None, got {default_padding_side!r}"
             )
         self.tokenizer = tokenizer
         if default_padding_side is not None:
@@ -2548,7 +2549,7 @@ class HuggingFaceModelWrapper(ModelWrapper):
         if self.tokenizer is None and (input_is_text or normalized_return_type == "str"):
             detail = _tokenizer_error_detail(self._tokenizer_load_error)
             raise RuntimeError(
-                "Tokenizer is not loaded, so text generation is unavailable. " f"{detail}"
+                f"Tokenizer is not loaded, so text generation is unavailable. {detail}"
             )
         if input_is_text:
             input_ids = self.to_tokens(
@@ -2653,7 +2654,7 @@ class HuggingFaceModelWrapper(ModelWrapper):
         if self.tokenizer is None and (input_is_text or normalized_return_type == "str"):
             detail = _tokenizer_error_detail(self._tokenizer_load_error)
             raise RuntimeError(
-                "Tokenizer is not loaded, so streaming text generation is unavailable. " f"{detail}"
+                f"Tokenizer is not loaded, so streaming text generation is unavailable. {detail}"
             )
 
         if input_is_text:
@@ -7823,8 +7824,14 @@ def _svd_component(matrix: Any, component: str) -> Any:
             return s.tolist()
         if component == "V":
             return np.swapaxes(vh, -1, -2).tolist()
-    except Exception as exc:
-        raise RuntimeError("SVD helpers require numpy-compatible data.") from exc
+    except Exception:
+        u, s, v = svd_nested(matrix)
+        if component == "U":
+            return u
+        if component == "S":
+            return s
+        if component == "V":
+            return v
     raise ValueError(f"Unknown SVD component {component!r}.")
 
 

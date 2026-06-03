@@ -137,10 +137,13 @@ class FactoredMatrix:
             import numpy as np
 
             return np.linalg.eigvals(np.asarray(input_matrix)).tolist()
-        except Exception as exc:
-            raise RuntimeError(
-                "FactoredMatrix.eigenvalues requires numpy-compatible data."
-            ) from exc
+        except Exception:
+            try:
+                return eigenvalues_nested(input_matrix)
+            except Exception as fallback_exc:
+                raise RuntimeError(
+                    "FactoredMatrix.eigenvalues requires numpy-compatible data."
+                ) from fallback_exc
 
     def __matmul__(self, other: Any) -> Any:
         """Multiply by another matrix/vector/factored matrix."""
@@ -259,8 +262,13 @@ class FactoredMatrix:
             u_m, s_m, vh_m = np.linalg.svd(middle, full_matrices=False)
             v_m = np.swapaxes(vh_m, -1, -2)
             return (u_a @ u_m).tolist(), s_m.tolist(), (v_b @ v_m).tolist()
-        except Exception as exc:
-            raise RuntimeError("FactoredMatrix.svd requires numpy-compatible data.") from exc
+        except Exception:
+            try:
+                return svd_nested(self.AB)
+            except Exception as fallback_exc:
+                raise RuntimeError(
+                    "FactoredMatrix.svd requires numpy-compatible data."
+                ) from fallback_exc
 
     def norm(self) -> float:
         """Return the Frobenius norm without materializing the dense product."""
@@ -764,6 +772,229 @@ def _promote_numpy_svd_array(array: Any, np: Any) -> Any:
     if dtype is not None and dtype == np.float16:
         return array.astype(np.float32)
     return array
+
+
+def svd_nested(matrix: Any) -> tuple[Any, Any, Any]:
+    """Small pure-Python SVD fallback for dependency-light list backends."""
+    shape = shape_of(matrix)
+    if len(shape) > 2:
+        u_items: list[Any] = []
+        s_items: list[Any] = []
+        v_items: list[Any] = []
+        for item in matrix:
+            u_item, s_item, v_item = svd_nested(item)
+            u_items.append(u_item)
+            s_items.append(s_item)
+            v_items.append(v_item)
+        return u_items, s_items, v_items
+    rows = [[float(value) for value in row] for row in as_2d(matrix)]
+    if not rows:
+        return [], [], []
+    row_count = len(rows)
+    column_count = len(rows[0])
+    if row_count == 0 or column_count == 0:
+        return [[] for _ in range(row_count)], [], [[] for _ in range(column_count)]
+    diagonal = _diagonal_values_if_diagonal(rows)
+    if diagonal is not None:
+        return _diagonal_svd(rows, diagonal)
+    return _svd_via_symmetric_eigen(rows)
+
+
+def eigenvalues_nested(matrix: Any) -> Any:
+    """Pure-Python eigenvalue fallback for small real matrices."""
+    shape = shape_of(matrix)
+    if len(shape) > 2:
+        return [eigenvalues_nested(item) for item in matrix]
+    rows = [[float(value) for value in row] for row in as_2d(matrix)]
+    if len(rows) != len(rows[0]):
+        raise ValueError(f"Eigenvalues require a square matrix, got {shape}.")
+    if len(rows) == 0:
+        return []
+    if len(rows) == 1:
+        return [rows[0][0]]
+    if len(rows) == 2:
+        a, b = rows[0]
+        c, d = rows[1]
+        trace = a + d
+        determinant = a * d - b * c
+        discriminant = trace * trace - 4.0 * determinant
+        if discriminant >= 0:
+            root = math.sqrt(discriminant)
+            return [(trace - root) / 2.0, (trace + root) / 2.0]
+        real = trace / 2.0
+        imaginary = math.sqrt(-discriminant) / 2.0
+        return [complex(real, -imaginary), complex(real, imaginary)]
+    if _is_symmetric_matrix(rows):
+        values, _vectors = _symmetric_eigh_desc(rows)
+        return values
+    raise RuntimeError(
+        "Pure-Python eigenvalue fallback supports 1x1, 2x2, and symmetric matrices. "
+        "Install numpy or torch for general eigendecomposition."
+    )
+
+
+def _is_symmetric_matrix(rows: list[list[float]]) -> bool:
+    size = len(rows)
+    return all(
+        abs(rows[row][col] - rows[col][row]) <= 1e-12
+        for row in range(size)
+        for col in range(row + 1, size)
+    )
+
+
+def _diagonal_values_if_diagonal(rows: list[list[float]]) -> list[float] | None:
+    row_count = len(rows)
+    column_count = len(rows[0])
+    values = [0.0 for _ in range(min(row_count, column_count))]
+    for row_index, row in enumerate(rows):
+        for column_index, value in enumerate(row):
+            if row_index == column_index:
+                values[row_index] = value
+            elif abs(value) > 1e-12:
+                return None
+    return values
+
+
+def _diagonal_svd(
+    rows: list[list[float]],
+    diagonal: list[float],
+) -> tuple[list[list[float]], list[float], list[list[float]]]:
+    row_count = len(rows)
+    column_count = len(rows[0])
+    rank = min(row_count, column_count)
+    order = sorted(range(rank), key=lambda index: abs(diagonal[index]), reverse=True)
+    singular_values = [abs(diagonal[index]) for index in order]
+    u = [[0.0 for _ in range(rank)] for _ in range(row_count)]
+    v = [[0.0 for _ in range(rank)] for _ in range(column_count)]
+    for output_index, source_index in enumerate(order):
+        sign = -1.0 if diagonal[source_index] < 0 else 1.0
+        u[source_index][output_index] = sign
+        v[source_index][output_index] = 1.0
+    return u, singular_values, v
+
+
+def _svd_via_symmetric_eigen(
+    rows: list[list[float]],
+) -> tuple[list[list[float]], list[float], list[list[float]]]:
+    row_count = len(rows)
+    column_count = len(rows[0])
+    rank = min(row_count, column_count)
+    gram = matmul(transpose(rows), rows)
+    eigenvalues, eigenvectors = _symmetric_eigh_desc(gram)
+    singular_values = [math.sqrt(max(value, 0.0)) for value in eigenvalues[:rank]]
+    v = [[float(eigenvectors[row][col]) for col in range(rank)] for row in range(column_count)]
+    u_columns: list[list[float]] = []
+    for col, singular_value in enumerate(singular_values):
+        v_col = [v[row][col] for row in range(column_count)]
+        if singular_value > 1e-12:
+            u_col = [
+                sum(rows[row][inner] * v_col[inner] for inner in range(column_count))
+                / singular_value
+                for row in range(row_count)
+            ]
+        else:
+            u_col = _orthogonal_basis_vector(row_count, u_columns)
+        u_columns.append(_normalize_vector(u_col))
+    u = [
+        [u_columns[column_index][row_index] for column_index in range(rank)]
+        for row_index in range(row_count)
+    ]
+    return u, singular_values, v
+
+
+def _symmetric_eigh_desc(matrix: list[list[float]]) -> tuple[list[float], list[list[float]]]:
+    size = len(matrix)
+    if size == 0:
+        return [], []
+    if size == 1:
+        return [float(matrix[0][0])], [[1.0]]
+    if size == 2:
+        return _symmetric_2x2_eigh_desc(matrix)
+    working = [[float(value) for value in row] for row in matrix]
+    vectors = [[1.0 if row == col else 0.0 for col in range(size)] for row in range(size)]
+    max_iterations = max(32, size * size * 32)
+    for _ in range(max_iterations):
+        pivot_row = 0
+        pivot_col = 1
+        max_value = abs(working[pivot_row][pivot_col])
+        for row in range(size):
+            for col in range(row + 1, size):
+                value = abs(working[row][col])
+                if value > max_value:
+                    max_value = value
+                    pivot_row = row
+                    pivot_col = col
+        if max_value <= 1e-12:
+            break
+        app = working[pivot_row][pivot_row]
+        aqq = working[pivot_col][pivot_col]
+        apq = working[pivot_row][pivot_col]
+        angle = 0.5 * math.atan2(2.0 * apq, aqq - app)
+        cosine = math.cos(angle)
+        sine = math.sin(angle)
+        for index in range(size):
+            aip = working[index][pivot_row]
+            aiq = working[index][pivot_col]
+            working[index][pivot_row] = cosine * aip - sine * aiq
+            working[index][pivot_col] = sine * aip + cosine * aiq
+        for index in range(size):
+            api = working[pivot_row][index]
+            aqi = working[pivot_col][index]
+            working[pivot_row][index] = cosine * api - sine * aqi
+            working[pivot_col][index] = sine * api + cosine * aqi
+        for index in range(size):
+            vip = vectors[index][pivot_row]
+            viq = vectors[index][pivot_col]
+            vectors[index][pivot_row] = cosine * vip - sine * viq
+            vectors[index][pivot_col] = sine * vip + cosine * viq
+    order = sorted(range(size), key=lambda index: working[index][index], reverse=True)
+    values = [working[index][index] for index in order]
+    ordered_vectors = [[vectors[row][index] for index in order] for row in range(size)]
+    return values, ordered_vectors
+
+
+def _symmetric_2x2_eigh_desc(
+    matrix: list[list[float]],
+) -> tuple[list[float], list[list[float]]]:
+    a = matrix[0][0]
+    b = matrix[0][1]
+    d = matrix[1][1]
+    trace = a + d
+    delta = math.sqrt(max((a - d) * (a - d) + 4.0 * b * b, 0.0))
+    values = [(trace + delta) / 2.0, (trace - delta) / 2.0]
+    columns: list[list[float]] = []
+    for value in values:
+        if abs(b) > 1e-12:
+            vector = [b, value - a]
+        elif a >= d:
+            vector = [1.0, 0.0] if value == values[0] else [0.0, 1.0]
+        else:
+            vector = [0.0, 1.0] if value == values[0] else [1.0, 0.0]
+        columns.append(_normalize_vector(vector))
+    first, second = columns
+    dot = first[0] * second[0] + first[1] * second[1]
+    if abs(dot) > 1e-9:
+        second = _normalize_vector([-first[1], first[0]])
+    return values, [[first[0], second[0]], [first[1], second[1]]]
+
+
+def _normalize_vector(vector: list[float]) -> list[float]:
+    norm = math.sqrt(sum(value * value for value in vector))
+    if norm <= 1e-12:
+        return vector
+    return [value / norm for value in vector]
+
+
+def _orthogonal_basis_vector(size: int, existing: list[list[float]]) -> list[float]:
+    for basis_index in range(size):
+        candidate = [1.0 if index == basis_index else 0.0 for index in range(size)]
+        for vector in existing:
+            dot = sum(left * right for left, right in zip(candidate, vector, strict=True))
+            candidate = [value - dot * vector[index] for index, value in enumerate(candidate)]
+        normalized = _normalize_vector(candidate)
+        if math.sqrt(sum(value * value for value in normalized)) > 1e-12:
+            return normalized
+    return [1.0 if index == 0 else 0.0 for index in range(size)]
 
 
 def unsqueeze_dim(value: Any, dim: int) -> Any:

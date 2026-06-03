@@ -26,6 +26,36 @@ def _require_numpy() -> Any:
     return np
 
 
+class _ListBackedArray:
+    """Minimal array facade used when numpy is intentionally absent."""
+
+    def __init__(self, value: Any) -> None:
+        if isinstance(value, Sequence) and not isinstance(value, str | bytes):
+            self._value = _to_nested_list(value)
+        else:
+            self._value = deepcopy(value)
+
+    def tolist(self) -> Any:
+        return deepcopy(self._value)
+
+    def __iter__(self) -> Any:
+        if not isinstance(self._value, Sequence) or isinstance(self._value, str | bytes):
+            return iter([self._value])
+        return iter(self._value)
+
+    def __len__(self) -> int:
+        if not isinstance(self._value, Sequence) or isinstance(self._value, str | bytes):
+            raise TypeError("len() of unsized object")
+        return len(self._value)
+
+    def __getitem__(self, index: Any) -> Any:
+        return _get_nested(self._value, (index,))
+
+    @property
+    def shape(self) -> tuple[int, ...]:
+        return _shape_of(self._value)
+
+
 def _torch_module() -> Any | None:
     try:
         import torch
@@ -49,7 +79,11 @@ def _is_numpy_array(value: Any) -> bool:
 def to_numpy(tensor: Any) -> Any:
     """Convert tensors, arrays, Python sequences, and scalars to a numpy array."""
 
-    np = _require_numpy()
+    np = _numpy_module()
+    if np is None:
+        if _is_torch_tensor(tensor):
+            tensor = tensor.detach().cpu().tolist()
+        return _ListBackedArray(tensor)
     if isinstance(tensor, np.ndarray):
         return tensor
     if isinstance(tensor, list | tuple | range):
@@ -124,11 +158,19 @@ class Slice:
     def indices(self, max_ctx: int | None = None) -> Any:
         """Return the selected indices as a numpy array."""
 
-        np = _require_numpy()
+        np = _numpy_module()
         if self.mode == "int":
+            if np is None:
+                return _ListBackedArray([self.slice])
             return np.array([self.slice], dtype=np.int64)
         if max_ctx is None:
             raise ValueError("max_ctx must be specified if slice is not an integer")
+        if np is None:
+            positions = list(range(max_ctx))
+            explicit_indices = _explicit_indices(self.slice, max_ctx)
+            if explicit_indices is not None:
+                return _ListBackedArray([positions[index] for index in explicit_indices])
+            return _ListBackedArray(positions[_python_index(self.slice)])
         return np.arange(max_ctx, dtype=np.int64)[_numpy_index(self.slice)]
 
     def __repr__(self) -> str:
@@ -363,11 +405,24 @@ def _normalize_dim(dim: int, rank: int) -> int:
 
 
 def _numpy_index(index: Any) -> Any:
-    np = _require_numpy()
+    np = _numpy_module()
+    if np is None:
+        return _python_index(index)
     if isinstance(index, np.ndarray):
         return index
     if _is_torch_tensor(index):
         return index.detach().cpu().numpy()
+    return index
+
+
+def _python_index(index: Any) -> Any:
+    if isinstance(index, slice):
+        return index
+    if isinstance(index, range):
+        return list(index)
+    tolist = getattr(index, "tolist", None)
+    if callable(tolist):
+        index = tolist()
     return index
 
 
