@@ -23,7 +23,9 @@ class RegistryError(KeyError):
 
 def load_builtin_methods() -> None:
     """Import built-in plugins so their registration decorators run."""
+    import SafeLens.attribution.captum  # noqa: F401
     import SafeLens.attribution.dummy  # noqa: F401
+    import SafeLens.attribution.safety_heads  # noqa: F401
     import SafeLens.monitors.dummy  # noqa: F401
     import SafeLens.probes.dummy  # noqa: F401
 

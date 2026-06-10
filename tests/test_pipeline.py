@@ -9,7 +9,14 @@ from typing import Any
 from pytest import MonkeyPatch
 
 from SafeLens.adapters import FlagSafeAdapter
-from SafeLens.core.base import PipelineConfig
+from SafeLens.core.base import (
+    AttributionResult,
+    BaseAttributor,
+    Batch,
+    ModelWrapper,
+    PipelineConfig,
+)
+from SafeLens.core.registry import register_attributor
 from SafeLens.pipelines.runner import PipelineRunner
 from SafeLens.utils import (
     HuggingFaceModelWrapper,
@@ -55,6 +62,40 @@ def test_dummy_pipeline_runs_and_writes_report(tmp_path: Path) -> None:
 
     written = json.loads((tmp_path / "report.json").read_text(encoding="utf-8"))
     assert written["summary"]["flagged_count"] == 1
+
+
+def test_pipeline_runner_calls_attributor_lifecycle(tmp_path: Path) -> None:
+    events: list[str] = []
+
+    @register_attributor("lifecycle_test_attributor", replace=True)
+    class LifecycleTestAttributor(BaseAttributor):
+        def attach(self, model: ModelWrapper) -> None:
+            events.append(f"attach:{type(model).__name__}")
+
+        def detach(self) -> None:
+            events.append("detach")
+
+        def attribute_training(self, batch: Batch, model_output: Any = None) -> AttributionResult:
+            _ = batch, model_output
+            return AttributionResult(method=self.name, attribution_score=0.0)
+
+        def attribute_input(self, batch: Batch, model_output: Any = None) -> AttributionResult:
+            _ = batch, model_output
+            events.append("attribute")
+            return AttributionResult(method=self.name, attribution_score=0.0)
+
+    config = PipelineConfig.model_validate(
+        {
+            "model": {"name": "dummy"},
+            "pipeline": {"attributors": [{"name": "lifecycle_test_attributor"}]},
+            "dataset": [{"id": "sample", "text": "hello"}],
+            "output": {"report_path": str(tmp_path / "report.json")},
+        }
+    )
+
+    PipelineRunner(config).run()
+
+    assert events == ["attach:DummyModelWrapper", "attribute", "detach"]
 
 
 def test_dummy_probe_reports_string_component_layers(tmp_path: Path) -> None:

@@ -16,6 +16,7 @@ from SafeLens.core.analysis import test_prompt as run_test_prompt
 from SafeLens.core.base import PipelineConfig
 from SafeLens.core.hooks import ActivationCache
 from SafeLens.pipelines.runner import PipelineRunner
+from SafeLens.attribution import attribute_response_token_input
 from SafeLens.utils import HuggingFaceModelWrapper, build_model_wrapper
 
 pytestmark = [pytest.mark.integration, pytest.mark.slow]
@@ -277,6 +278,48 @@ def test_huggingface_wrapper_real_direct_logit_attribution_workflow() -> None:
         )
         assert head_scores.shape == (wrapper.cfg.n_layers, wrapper.cfg.n_heads)
         assert torch.isfinite(head_scores[0, 0])
+    finally:
+        wrapper.remove_hooks()
+
+
+def test_huggingface_wrapper_real_captum_response_token_attribution() -> None:
+    _skip_unless_enabled()
+    pytest.importorskip("captum")
+
+    config = PipelineConfig.model_validate(
+        {
+            "model": {
+                "source": "huggingface",
+                "name": _MODEL_ID,
+                "device": "cpu",
+                "dtype": "float32",
+                "cache_dir": _cache_dir(),
+                "load_kwargs": {"low_cpu_mem_usage": False},
+            }
+        }
+    )
+    wrapper = build_model_wrapper(config.model)
+
+    assert isinstance(wrapper, HuggingFaceModelWrapper)
+    wrapper.load_model()
+    try:
+        result = attribute_response_token_input(
+            wrapper,
+            "SafeLens",
+            target_response_index=0,
+            generation_kwargs={
+                "max_new_tokens": 1,
+                "do_sample": False,
+                "pad_token_id": wrapper.tokenizer.eos_token_id,
+            },
+            n_steps=4,
+        )
+
+        assert result.method == "captum_input_attributor"
+        assert result.tokens
+        assert all(0.0 <= abs(token.score) <= 1.0 for token in result.tokens)
+        assert result.details["response_source"] == "generated"
+        assert isinstance(result.details["target_token_id"], int)
     finally:
         wrapper.remove_hooks()
 
