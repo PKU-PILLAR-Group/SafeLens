@@ -38,6 +38,20 @@ def test_render_input_attribution_html_colors_tokens() -> None:
     assert "rgba(37, 99, 235" in html
 
 
+def test_render_input_attribution_html_can_hide_raw_result() -> None:
+    result = AttributionResult(
+        method="captum_input_attributor",
+        attribution_score=1.0,
+        tokens=[TokenAttribution(token_index=0, token_text="hello", score=1.0)],
+    )
+
+    html = render_input_attribution_html(result, include_raw_result=False)
+
+    assert "hello" in html
+    assert "Raw Result" not in html
+    assert "captum_input_attributor" not in html
+
+
 def test_save_input_attribution_html_writes_file(tmp_path: Path) -> None:
     result = AttributionResult(
         method="captum_input_attributor",

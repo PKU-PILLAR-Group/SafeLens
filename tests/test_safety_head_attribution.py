@@ -90,6 +90,25 @@ def test_safety_head_attributor_filters_heads_and_top_k() -> None:
     assert result.details["heads"][0]["head"] == 0
 
 
+def test_safety_head_attributor_supports_scale_ablation() -> None:
+    attributor = SafetyHeadAttributor(
+        {
+            "layers": [0],
+            "heads": [0],
+            "ablation_mode": "scale",
+            "scale_factor": 0.5,
+        }
+    )
+    attributor.attach(_SafetyHeadWrapper())
+
+    result = attributor.attribute_input({"input_ids": [[1, 2]]})
+
+    head = result.details["heads"][0]
+    assert head["ablation_mode"] == "scale"
+    assert head["scale_factor"] == 0.5
+    assert head["score"] > 0.0
+
+
 def test_safety_head_attributor_requires_attached_model() -> None:
     with pytest.raises(RuntimeError, match="attached"):
         SafetyHeadAttributor({"layers": [0]}).attribute_input({"input_ids": [[1, 2]]})

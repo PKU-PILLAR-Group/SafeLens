@@ -14,10 +14,18 @@ def render_input_attribution_html(
     attribution: AttributionResult,
     *,
     title: str = "Input Attribution",
+    include_raw_result: bool = True,
 ) -> str:
     """Return an HTML document with input tokens colored by attribution score."""
     token_spans = "\n".join(_token_span(token) for token in attribution.tokens)
     payload = json.dumps(attribution.to_dict(), ensure_ascii=False, indent=2)
+    raw_result_html = (
+        f"""
+  <h2>Raw Result</h2>
+  <pre>{html.escape(payload)}</pre>"""
+        if include_raw_result
+        else ""
+    )
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -62,8 +70,7 @@ def render_input_attribution_html(
   <div class="tokens">
 {token_spans}
   </div>
-  <h2>Raw Result</h2>
-  <pre>{html.escape(payload)}</pre>
+{raw_result_html}
 </body>
 </html>
 """
@@ -74,12 +81,17 @@ def save_input_attribution_html(
     path: str | Path,
     *,
     title: str = "Input Attribution",
+    include_raw_result: bool = True,
 ) -> Path:
     """Write an input-token attribution HTML visualization."""
     output_path = Path(path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(
-        render_input_attribution_html(attribution, title=title),
+        render_input_attribution_html(
+            attribution,
+            title=title,
+            include_raw_result=include_raw_result,
+        ),
         encoding="utf-8",
     )
     return output_path

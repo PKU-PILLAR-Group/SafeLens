@@ -19,6 +19,8 @@ def attribute_safety_heads(
     layers: Sequence[int] | None = None,
     heads: Sequence[int] | None = None,
     component: str = "result",
+    ablation_mode: str = "zero",
+    scale_factor: float = 0.0,
     top_k: int | None = None,
     cache_pos_slice: Any = None,
     score_type: str = "kl",
@@ -29,6 +31,8 @@ def attribute_safety_heads(
             "layers": list(layers) if layers is not None else None,
             "heads": list(heads) if heads is not None else None,
             "component": component,
+            "ablation_mode": ablation_mode,
+            "scale_factor": scale_factor,
             "top_k": top_k,
             "cache_pos_slice": cache_pos_slice,
             "score_type": score_type,
@@ -100,7 +104,11 @@ class SafetyHeadAttributor(BaseAttributor):
             scored_heads: list[dict[str, Any]] = []
             for layer, head, activation_norm in head_candidates:
                 activation_name = activation_name_for_component(component, layer)
-                hook = _make_zero_head_hook(head)
+                hook = _make_ablate_head_hook(
+                    head,
+                    mode=str(self.config.get("ablation_mode", "zero")),
+                    scale_factor=float(self.config.get("scale_factor", 0.0)),
+                )
                 masked_output = _run_with_single_hook(
                     model,
                     model_batch,
@@ -116,6 +124,8 @@ class SafetyHeadAttributor(BaseAttributor):
                         "score": score,
                         "activation_norm": activation_norm,
                         "activation_name": activation_name,
+                        "ablation_mode": str(self.config.get("ablation_mode", "zero")),
+                        "scale_factor": float(self.config.get("scale_factor", 0.0)),
                     }
                 )
         finally:
@@ -133,9 +143,11 @@ class SafetyHeadAttributor(BaseAttributor):
             details={
                 "score_type": score_type,
                 "component": component,
+                "ablation_mode": str(self.config.get("ablation_mode", "zero")),
+                "scale_factor": float(self.config.get("scale_factor", 0.0)),
                 "heads": scored_heads,
                 "head_count": len(scored_heads),
-                "source": "SafetyHeadAttribution SHIPS-style zero head ablation",
+                "source": "SafetyHeadAttribution SHIPS-style head ablation",
             },
         )
 
@@ -285,22 +297,50 @@ def _activation_norms(head_stack: Any) -> list[float]:
 
 
 def _make_zero_head_hook(head: int) -> Any:
+    return _make_ablate_head_hook(head, mode="zero", scale_factor=0.0)
+
+
+def _make_ablate_head_hook(head: int, *, mode: str, scale_factor: float) -> Any:
+    normalized_mode = mode.strip().lower()
+    if normalized_mode not in {"zero", "scale", "mean"}:
+        raise ValueError("ablation_mode must be one of: 'zero', 'scale', 'mean'.")
+
     def hook(*args: Any, **kwargs: Any) -> Any:
         if not has_hook_output(args, kwargs):
             return None
         activation = extract_hook_output(args, kwargs)
-        return _zero_head_activation(activation, int(head))
+        return _ablate_head_activation(
+            activation,
+            int(head),
+            mode=normalized_mode,
+            scale_factor=scale_factor,
+        )
 
     return hook
 
 
 def _zero_head_activation(activation: Any, head: int) -> Any:
+    return _ablate_head_activation(activation, head, mode="zero", scale_factor=0.0)
+
+
+def _ablate_head_activation(
+    activation: Any,
+    head: int,
+    *,
+    mode: str,
+    scale_factor: float,
+) -> Any:
     try:
         import torch
 
         if isinstance(activation, torch.Tensor):
             patched = activation.clone()
-            patched[:, :, head, ...] = 0
+            if mode == "zero":
+                patched[:, :, head, ...] = 0
+            elif mode == "scale":
+                patched[:, :, head, ...] *= scale_factor
+            elif mode == "mean":
+                patched[:, :, head, ...] = patched.mean(dim=2)
             return patched
     except ImportError:
         pass
@@ -309,20 +349,45 @@ def _zero_head_activation(activation: Any, head: int) -> Any:
 
         if isinstance(activation, np.ndarray):
             patched = activation.copy()
-            patched[:, :, head, ...] = 0
+            if mode == "zero":
+                patched[:, :, head, ...] = 0
+            elif mode == "scale":
+                patched[:, :, head, ...] *= scale_factor
+            elif mode == "mean":
+                patched[:, :, head, ...] = patched.mean(axis=2)
             return patched
     except ImportError:
         pass
-    return _zero_nested_head(activation, head)
+    return _ablate_nested_head(
+        activation,
+        head,
+        mode=mode,
+        scale_factor=scale_factor,
+    )
 
 
 def _zero_nested_head(activation: Any, head: int) -> Any:
+    return _ablate_nested_head(activation, head, mode="zero", scale_factor=0.0)
+
+
+def _ablate_nested_head(
+    activation: Any,
+    head: int,
+    *,
+    mode: str,
+    scale_factor: float,
+) -> Any:
     if not isinstance(activation, Sequence) or isinstance(activation, str | bytes):
         raise TypeError("Expected attention head activation shaped [batch, pos, head, ...].")
     patched = _deep_list(activation)
     for batch_item in patched:
         for pos_item in batch_item:
-            pos_item[head] = _zero_like(pos_item[head])
+            if mode == "zero":
+                pos_item[head] = _zero_like(pos_item[head])
+            elif mode == "scale":
+                pos_item[head] = _scale_like(pos_item[head], scale_factor)
+            elif mode == "mean":
+                pos_item[head] = _mean_nested_heads(pos_item)
     return patched
 
 
@@ -441,3 +506,31 @@ def _zero_like(value: Any) -> Any:
     if isinstance(value, Sequence) and not isinstance(value, str | bytes):
         return [_zero_like(item) for item in value]
     return 0
+
+
+def _scale_like(value: Any, scale_factor: float) -> Any:
+    if isinstance(value, Sequence) and not isinstance(value, str | bytes):
+        return [_scale_like(item, scale_factor) for item in value]
+    return float(value) * scale_factor
+
+
+def _mean_nested_heads(pos_item: Any) -> Any:
+    try:
+        import numpy as np
+
+        array = np.asarray(pos_item, dtype=float)
+        return array.mean(axis=0).tolist()
+    except Exception:
+        if not isinstance(pos_item, Sequence) or not pos_item:
+            return pos_item
+        return _mean_nested_values(pos_item)
+
+
+def _mean_nested_values(values: Sequence[Any]) -> Any:
+    first = values[0]
+    if isinstance(first, Sequence) and not isinstance(first, str | bytes):
+        return [
+            _mean_nested_values([value[index] for value in values])
+            for index in range(len(first))
+        ]
+    return sum(float(value) for value in values) / len(values)
