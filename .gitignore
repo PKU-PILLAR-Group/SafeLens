@@ -25,6 +25,8 @@ coverage.xml
 site/
 safety_scan.json
 outputs/
+REPORT.md
+report_*.md
 tests/.hf-real-flow/
 tests/hf-real-flow-artifacts/
 tests/.qwen3-real-flow/

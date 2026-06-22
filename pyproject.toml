@@ -53,6 +53,11 @@ modelscope = [
   "torch>=2",
   "transformers>=5.8"
 ]
+viz = [
+  "circuitsvis>=1.43",
+  "numpy>=1.23",
+  "torch>=2"
+]
 dev = [
   "build>=1.2",
   "mkdocs>=1.6",
