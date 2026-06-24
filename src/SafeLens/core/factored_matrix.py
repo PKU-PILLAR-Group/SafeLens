@@ -136,7 +136,8 @@ class FactoredMatrix:
         try:
             import numpy as np
 
-            return np.linalg.eigvals(np.asarray(input_matrix)).tolist()
+            eigenvalues = np.linalg.eigvals(np.asarray(input_matrix))
+            return _real_eigenvalues_if_close(eigenvalues.tolist())
         except Exception:
             try:
                 return eigenvalues_nested(input_matrix)
@@ -831,6 +832,17 @@ def eigenvalues_nested(matrix: Any) -> Any:
         "Pure-Python eigenvalue fallback supports 1x1, 2x2, and symmetric matrices. "
         "Install numpy or torch for general eigendecomposition."
     )
+
+
+def _real_eigenvalues_if_close(value: Any) -> Any:
+    if isinstance(value, complex):
+        tolerance = 1e-12 * max(1.0, abs(value.real))
+        if abs(value.imag) <= tolerance:
+            return float(value.real)
+        return value
+    if _is_sequence(value):
+        return [_real_eigenvalues_if_close(item) for item in value]
+    return value
 
 
 def _is_symmetric_matrix(rows: list[list[float]]) -> bool:

@@ -2076,6 +2076,22 @@ def test_factored_matrix_rectangular_eigenvalues_use_inner_product() -> None:
         _ = non_square.BA
 
 
+def test_factored_matrix_numpy_eigenvalues_drop_negligible_imaginary_parts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    np = pytest.importorskip("numpy")
+
+    def fake_eigvals(_matrix: Any) -> Any:
+        return np.asarray([1.0 + 0.0j, 2.0 + 1e-14j, 3.0 + 0.5j])
+
+    monkeypatch.setattr(np.linalg, "eigvals", fake_eigvals)
+
+    eigenvalues = FactoredMatrix([[1, 0], [0, 1]], [[1, 0], [0, 1]]).eigenvalues
+
+    assert eigenvalues[:2] == [1.0, 2.0]
+    assert eigenvalues[2] == 3.0 + 0.5j
+
+
 def test_factored_matrix_unsqueeze_repr_and_index_guards() -> None:
     matrix = FactoredMatrix([[1, 0], [0, 1]], [[2, 0], [0, 3]])
     batched = matrix.unsqueeze(0)
