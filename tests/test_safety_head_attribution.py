@@ -8,7 +8,6 @@ from SafeLens.attribution import SafetyHeadAttributor, attribute_safety_heads
 from SafeLens.attribution.safety_heads import _activation_norms
 from SafeLens.core.hooks import ActivationCache
 
-
 torch = pytest.importorskip("torch")
 
 
@@ -21,9 +20,7 @@ class _SafetyHeadWrapper:
     cfg = _FakeCfg()
 
     def __init__(self) -> None:
-        self.activation = torch.tensor(
-            [[[[1.0, 0.0], [0.0, 1.0]], [[2.0, 0.0], [0.0, 3.0]]]]
-        )
+        self.activation = torch.tensor([[[[1.0, 0.0], [0.0, 1.0]], [[2.0, 0.0], [0.0, 3.0]]]])
         self.hook_calls: list[str] = []
 
     def run_with_cache(

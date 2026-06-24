@@ -286,6 +286,7 @@ class BaseAttributor(ABC):
 
     def detach(self) -> None:
         """Release model references or runtime state held by the attributor."""
+        return None
 
     @abstractmethod
     def attribute_training(self, batch: Batch, model_output: Any = None) -> AttributionResult:

@@ -65,9 +65,7 @@ class SafetyHeadAttributor(BaseAttributor):
             method=self.name,
             attribution_score=0.0,
             details={
-                "message": (
-                    "training attribution is not implemented for safety head attribution"
-                )
+                "message": ("training attribution is not implemented for safety head attribution")
             },
         )
 
@@ -168,9 +166,7 @@ def _model_batch(batch: Batch) -> Any:
         return batch
     if "text" in batch or "prompt" in batch:
         return batch
-    raise ValueError(
-        "Safety head attribution requires text/prompt or token ids in the batch."
-    )
+    raise ValueError("Safety head attribution requires text/prompt or token ids in the batch.")
 
 
 def _require_torch() -> Any:
@@ -530,7 +526,6 @@ def _mean_nested_values(values: Sequence[Any]) -> Any:
     first = values[0]
     if isinstance(first, Sequence) and not isinstance(first, str | bytes):
         return [
-            _mean_nested_values([value[index] for value in values])
-            for index in range(len(first))
+            _mean_nested_values([value[index] for value in values]) for index in range(len(first))
         ]
     return sum(float(value) for value in values) / len(values)

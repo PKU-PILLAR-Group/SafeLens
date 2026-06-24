@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 
+from SafeLens.attribution import attribute_response_token_input
 from SafeLens.core.analysis import (
     compute_head_results_from_z,
     detect_head,
@@ -16,7 +17,6 @@ from SafeLens.core.analysis import test_prompt as run_test_prompt
 from SafeLens.core.base import PipelineConfig
 from SafeLens.core.hooks import ActivationCache
 from SafeLens.pipelines.runner import PipelineRunner
-from SafeLens.attribution import attribute_response_token_input
 from SafeLens.utils import HuggingFaceModelWrapper, build_model_wrapper
 
 pytestmark = [pytest.mark.integration, pytest.mark.slow]

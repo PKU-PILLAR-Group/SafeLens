@@ -4,9 +4,8 @@ from typing import Any
 
 import pytest
 
-from SafeLens.attribution import CaptumInputAttributor, attribute_response_token_input
 import SafeLens.attribution.captum as captum_module
-
+from SafeLens.attribution import CaptumInputAttributor, attribute_response_token_input
 
 torch = pytest.importorskip("torch")
 

@@ -112,9 +112,7 @@ def plot_head_attribution(
         import matplotlib.pyplot as plt
         import numpy as np
     except ImportError as exc:
-        raise ImportError(
-            "Head attribution visualization requires matplotlib and numpy."
-        ) from exc
+        raise ImportError("Head attribution visualization requires matplotlib and numpy.") from exc
 
     max_layer = max(int(item["layer"]) for item in heads)
     max_head = max(int(item["head"]) for item in heads)

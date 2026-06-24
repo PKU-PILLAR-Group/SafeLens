@@ -19,7 +19,6 @@ from SafeLens.attribution import (
 from SafeLens.core.base import ModelLoadConfig
 from SafeLens.utils import build_model_wrapper
 
-
 DEFAULT_MODEL_PATH = Path(
     "/workspace/cjh/projects/FlowManifold/models/huggingface.co/"
     "allenai/Olmo-3-7B-Think-SFT/step45000"

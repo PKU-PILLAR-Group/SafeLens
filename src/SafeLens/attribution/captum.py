@@ -67,9 +67,7 @@ class CaptumInputAttributor(BaseAttributor):
             method=self.name,
             attribution_score=0.0,
             details={
-                "message": (
-                    "training attribution is not implemented for Captum input attribution"
-                )
+                "message": ("training attribution is not implemented for Captum input attribution")
             },
         )
 
@@ -286,9 +284,7 @@ def _require_input_embedding_layer(hf_model: Any) -> Any:
 def _call_model_logits(hf_model: Any, input_ids: Any) -> Any:
     output = hf_model(input_ids=input_ids)
     logits = (
-        output.get("logits")
-        if isinstance(output, Mapping)
-        else getattr(output, "logits", None)
+        output.get("logits") if isinstance(output, Mapping) else getattr(output, "logits", None)
     )
     if logits is None and isinstance(output, tuple | list) and output:
         logits = output[0]

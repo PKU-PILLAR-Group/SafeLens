@@ -274,8 +274,7 @@ def _add_python_vector(activation: Any, vector: Any, *, scale: float, position: 
 def _add_vector_to_all_final_vectors(value: Any, vector: Sequence[float], scale: float) -> Any:
     if _is_final_vector(value):
         return [
-            float(item) + scale * float(delta)
-            for item, delta in zip(value, vector, strict=True)
+            float(item) + scale * float(delta) for item, delta in zip(value, vector, strict=True)
         ]
     if isinstance(value, Sequence) and not isinstance(value, str | bytes):
         return [_add_vector_to_all_final_vectors(item, vector, scale) for item in value]
@@ -285,8 +284,7 @@ def _add_vector_to_all_final_vectors(value: Any, vector: Sequence[float], scale:
 def _add_vector_to_last_final_vector(value: Any, vector: Sequence[float], scale: float) -> Any:
     if _is_final_vector(value):
         return [
-            float(item) + scale * float(delta)
-            for item, delta in zip(value, vector, strict=True)
+            float(item) + scale * float(delta) for item, delta in zip(value, vector, strict=True)
         ]
     if isinstance(value, Sequence) and not isinstance(value, str | bytes) and value:
         output = list(value)
@@ -368,9 +366,10 @@ def _last_nested_vector(value: Any) -> list[Any] | None:
 
 
 def _is_final_vector(value: Any) -> bool:
-    return isinstance(value, Sequence) and not isinstance(value, str | bytes) and all(
-        not isinstance(item, Sequence) or isinstance(item, str | bytes)
-        for item in value
+    return (
+        isinstance(value, Sequence)
+        and not isinstance(value, str | bytes)
+        and all(not isinstance(item, Sequence) or isinstance(item, str | bytes) for item in value)
     )
 
 

@@ -54,11 +54,7 @@ class LinearProbe(BaseProbe):
         """Return the evaluation subset when an eval split is configured."""
         if self.eval_split is None:
             return list(dataset)
-        return [
-            row
-            for row in dataset
-            if row.get(self.split_key) == self.eval_split
-        ]
+        return [row for row in dataset if row.get(self.split_key) == self.eval_split]
 
     def attach(self, model: ModelWrapper, layers: Sequence[int]) -> None:
         self._model = model
@@ -535,8 +531,7 @@ class LinearProbe(BaseProbe):
             if not value:
                 return None
             if all(
-                not isinstance(item, Sequence) or isinstance(item, str | bytes)
-                for item in value
+                not isinstance(item, Sequence) or isinstance(item, str | bytes) for item in value
             ):
                 return list(value)
             return cls._last_nested_vector(value[-1])
