@@ -280,6 +280,13 @@ class BaseAttributor(ABC):
     def __init__(self, config: Mapping[str, Any] | None = None) -> None:
         self.config = dict(config or {})
 
+    def attach(self, model: ModelWrapper) -> None:
+        """Attach the attributor to a loaded model wrapper."""
+        _ = model
+
+    def detach(self) -> None:
+        """Release model references or runtime state held by the attributor."""
+
     @abstractmethod
     def attribute_training(self, batch: Batch, model_output: Any = None) -> AttributionResult:
         """Estimate influential training examples or sources for the batch."""

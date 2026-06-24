@@ -8,3 +8,5 @@ def test_builtin_methods_register() -> None:
     assert "dummy_probe" in list_probes()
     assert "dummy_monitor" in list_monitors()
     assert "dummy_attributor" in list_attributors()
+    assert "captum_input_attributor" in list_attributors()
+    assert "safety_head_attributor" in list_attributors()

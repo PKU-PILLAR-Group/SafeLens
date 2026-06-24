@@ -60,6 +60,8 @@ class PipelineRunner:
             probe.attach(self.model, layers)
         for monitor in self.monitors:
             monitor.start_monitoring(self.model)
+        for attributor in self.attributors:
+            attributor.attach(self.model)
 
     def run(self, dataset: Iterable[Mapping[str, Any]] | None = None) -> RunReport:
         """Run the configured safety pipeline and write a JSON report."""
@@ -74,6 +76,8 @@ class PipelineRunner:
             self._write_report(run_report)
             return run_report
         finally:
+            for attributor in self.attributors:
+                attributor.detach()
             for probe in self.probes:
                 probe.detach()
             self.model.remove_hooks()

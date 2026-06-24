@@ -41,3 +41,4 @@ runs/
 *.env
 .env
 .env.*
+test_reports/

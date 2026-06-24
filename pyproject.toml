@@ -44,6 +44,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+attribution = [
+  "captum>=0.9,<1",
+  "torch>=2.3"
+]
 models = [
   "torch>=2",
   "transformers>=5.8"
