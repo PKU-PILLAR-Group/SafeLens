@@ -205,9 +205,12 @@ def test_heatmap_line_scatter_and_component_plots() -> None:
         keys=["layer_0.resid_post", "layer_1.resid_post", "layer_0.pattern", ("resid_post", 2)],
         y_labels=["A", "B"],
         x_labels=["d0", "d1"],
+        x_axis="Residual dimension",
+        y_axis="Token",
     )
     assert_visualization(cache_browser, "Activation Cache Browser")
     assert 'data-filter="activation"' in cache_browser.html
+    assert "Residual dimension" in cache_browser.html
     assert cache_browser.data["skipped"][0]["key"] == "layer_0.pattern"
     assert "('resid_post', 2)" in cache_browser.data["keys"]
 

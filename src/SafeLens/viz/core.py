@@ -191,6 +191,18 @@ def plot_attention_pattern(
     ):
         raise ValueError("tokens length must match the query/key dimensions.")
     resolved_title = title or _component_title("Attention Pattern", layer=layer, head=head)
+    if len(matrix) == len(matrix[0]):
+        labels = label_tokens or [str(idx) for idx in range(len(matrix))]
+        viz = _attention_patterns_widget(
+            [matrix],
+            ["Head 0" if head is None else f"Head {head}"],
+            labels,
+            title=resolved_title,
+            kind="attention-pattern",
+            include_overview=False,
+        )
+        viz.data.update({"matrix": matrix, "x_labels": labels, "y_labels": labels})
+        return viz
     return _heatmap(
         matrix,
         title=resolved_title,
@@ -237,44 +249,36 @@ def plot_attention_heads(
         raise ValueError("head_names length must match the number of heads.")
     token_labels = [str(token) for token in tokens] if tokens is not None else None
 
-    viz_id = _next_viz_id("attention-heads")
-    buttons = []
-    sections = []
-    data_heads = []
-    for idx, (name, matrix) in enumerate(zip(names, heads, strict=True)):
+    for matrix in heads:
         if token_labels is not None and (
             len(token_labels) != len(matrix) or len(token_labels) != len(matrix[0])
         ):
             raise ValueError("tokens length must match each attention head matrix.")
-        buttons.append(
-            '<button type="button" '
-            f'class="safelens-control-button{" is-active" if idx == 0 else ""}" '
-            f'data-head="{idx}">{escape(name)}</button>'
+    first = heads[0]
+    if len(first) == len(first[0]) and all(len(matrix) == len(matrix[0]) for matrix in heads):
+        labels = token_labels or [str(idx) for idx in range(len(first))]
+        return _attention_patterns_widget(
+            heads,
+            names,
+            labels,
+            title=title,
+            kind="attention-heads",
+            include_overview=len(heads) > 1,
         )
-        viz = _heatmap(
-            matrix,
-            title=name,
-            x_labels=token_labels,
-            y_labels=token_labels,
-            x_axis="Key",
-            y_axis="Query",
-            color="blue",
-        )
-        sections.append(
-            '<div class="safelens-head-panel'
-            f'{"" if idx == 0 else " safelens-hidden"}" data-head-panel="{idx}">'
-            f"{viz.html}</div>"
-        )
-        data_heads.append(viz.data["matrix"])
-    body = (
-        f'<div id="{viz_id}" class="safelens-attention-head-browser">'
-        f'<div class="safelens-controls">{"".join(buttons)}</div>'
-        f"{''.join(sections)}{_head_selector_script(viz_id)}</div>"
-    )
-    return Visualization(
-        html=_wrap_panel("attention-heads", title, body),
+    x_labels = token_labels or [str(idx) for idx in range(len(first[0]))]
+    y_labels = token_labels or [str(idx) for idx in range(len(first))]
+    return _matrix_browser(
+        heads,
+        names,
+        x_labels=x_labels,
+        y_labels=y_labels,
         title=title,
-        data={"heads": data_heads, "head_names": names, "tokens": token_labels},
+        kind="attention-heads",
+        selector_label="head",
+        color="blue",
+        allow_transpose=False,
+        x_axis="Key",
+        y_axis="Query",
     )
 
 
@@ -1199,6 +1203,8 @@ def plot_activation_cache_browser(
     max_columns: int | None = 64,
     x_labels: Sequence[Any] | None = None,
     y_labels: Sequence[Any] | None = None,
+    x_axis: str = "Feature",
+    y_axis: str = "Token",
     title: str | None = "Activation Cache Browser",
 ) -> Visualization:
     """Interactively browse same-shaped rank-2 or batched rank-3 cache entries."""
@@ -1274,8 +1280,8 @@ def plot_activation_cache_browser(
         selector_label="activation",
         color="red_blue",
         allow_transpose=True,
-        x_axis="Feature",
-        y_axis="Token",
+        x_axis=x_axis,
+        y_axis=y_axis,
     )
     viz.data.update(
         {
@@ -1572,6 +1578,280 @@ def to_circuitsvis_topk_samples(
     return circuitsvis_topk_samples(tokens, activations, **kwargs)
 
 
+def _attention_patterns_widget(
+    heads: Sequence[Sequence[Sequence[Number]]],
+    head_names: Sequence[str],
+    tokens: Sequence[str],
+    *,
+    title: str | None,
+    kind: str,
+    include_overview: bool,
+) -> Visualization:
+    normalized = [_as_2d_numbers(head) for head in heads]
+    if not normalized:
+        raise ValueError("attention visualization needs at least one head.")
+    size = len(normalized[0])
+    if size == 0 or len(normalized[0][0]) == 0:
+        raise ValueError("attention heads must be non-empty.")
+    if any(len(head) != size or any(len(row) != size for row in head) for head in normalized):
+        raise ValueError("attention pattern heads must be square and same-shaped.")
+    if len(head_names) != len(normalized):
+        raise ValueError("head_names length must match the number of heads.")
+    token_labels = [str(token) for token in tokens]
+    if len(token_labels) != size:
+        raise ValueError("tokens length must match the attention dimensions.")
+
+    viz_id = _next_viz_id(kind)
+    overview = (
+        '<button type="button" class="safelens-cv-head-button is-active" '
+        'data-head="overview">'
+        '<span class="safelens-cv-head-label">Overview</span>'
+        f"{_attention_overview_svg(normalized)}"
+        "</button>"
+        if include_overview
+        else ""
+    )
+    buttons = []
+    for idx, (name, matrix) in enumerate(zip(head_names, normalized, strict=True)):
+        active = " is-active" if idx == 0 and not include_overview else ""
+        head_color = _attention_head_color(idx, len(normalized))
+        buttons.append(
+            f'<button type="button" class="safelens-cv-head-button{active}" data-head="{idx}">'
+            f'<span class="safelens-cv-head-badge" style="background:{head_color};">'
+            f"{escape(name)}</span>"
+            f"{_attention_image_svg(matrix, head_index=idx, head_count=len(normalized), size=92)}"
+            "</button>"
+        )
+    payload = {
+        "heads": normalized,
+        "headNames": list(head_names),
+        "tokens": token_labels,
+        "includeOverview": include_overview,
+    }
+    body = (
+        f'<div id="{viz_id}" class="safelens-attention-head-browser safelens-cv-attention">'
+        '<div class="safelens-cv-layout">'
+        '<section class="safelens-cv-main">'
+        '<div class="safelens-cv-section-title" data-role="focus-title"></div>'
+        '<div class="safelens-cv-image-frame" data-role="attention-image"></div>'
+        '<div class="safelens-focus-readout" data-role="readout"></div>'
+        "</section>"
+        '<aside class="safelens-cv-selector">'
+        '<div class="safelens-cv-section-title">Head selector '
+        "<span>(hover to view, click to lock)</span></div>"
+        f'<div class="safelens-cv-head-grid">{overview}{"".join(buttons)}</div>'
+        "</aside>"
+        "</div>"
+        '<div class="safelens-cv-token-panel">'
+        '<label class="safelens-control-label">tokens '
+        '<select class="safelens-select" data-role="token-view">'
+        '<option value="destination_to_source">Source <- Destination</option>'
+        '<option value="source_to_destination">Destination <- Source</option>'
+        "</select></label>"
+        '<div class="safelens-cv-token-strip" data-role="tokens"></div>'
+        "</div>"
+        f"{_json_script(viz_id, payload)}"
+        f"{_attention_patterns_script(viz_id)}</div>"
+    )
+    return Visualization(
+        html=_wrap_panel(kind, title, body),
+        title=title,
+        data={"heads": normalized, "head_names": list(head_names), "tokens": token_labels},
+    )
+
+
+def _attention_head_color(head_index: int, head_count: int, alpha: float = 1.0) -> str:
+    hue = round((head_index / max(head_count, 1)) * 360)
+    return f"hsla({hue}, 70%, 50%, {alpha:.3g})"
+
+
+def _attention_cell_color(value: float, head_index: int, head_count: int) -> str:
+    hue = round((head_index / max(head_count, 1)) * 360)
+    intensity = max(0.0, min(1.0, value))
+    lightness = 98 - 70 * intensity
+    return f"hsl({hue}, 82%, {lightness:.3g}%)"
+
+
+def _attention_image_svg(
+    matrix: Sequence[Sequence[Number]],
+    *,
+    head_index: int,
+    head_count: int,
+    size: int,
+) -> str:
+    rows = _as_2d_numbers(matrix)
+    height = len(rows)
+    width = len(rows[0]) if height else 0
+    cell = max(1.0, size / max(width, height, 1))
+    svg_width = max(1, round(width * cell, 3))
+    svg_height = max(1, round(height * cell, 3))
+    parts = [
+        (
+            '<svg class="safelens-cv-attention-image" '
+            f'width="{svg_width}" height="{svg_height}" '
+            f'viewBox="0 0 {svg_width} {svg_height}" aria-hidden="true">'
+        )
+    ]
+    for row_idx, row in enumerate(rows):
+        for col_idx, value in enumerate(row):
+            parts.append(
+                f'<rect x="{col_idx * cell:.3g}" y="{row_idx * cell:.3g}" '
+                f'width="{cell:.3g}" height="{cell:.3g}" '
+                f'fill="{_attention_cell_color(value, head_index, head_count)}"></rect>'
+            )
+    parts.append("</svg>")
+    return "".join(parts)
+
+
+def _attention_overview_svg(heads: Sequence[Sequence[Sequence[float]]], size: int = 92) -> str:
+    height = len(heads[0])
+    width = len(heads[0][0]) if height else 0
+    cell = max(1.0, size / max(width, height, 1))
+    svg_width = max(1, round(width * cell, 3))
+    svg_height = max(1, round(height * cell, 3))
+    parts = [
+        (
+            '<svg class="safelens-cv-attention-image" '
+            f'width="{svg_width}" height="{svg_height}" '
+            f'viewBox="0 0 {svg_width} {svg_height}" aria-hidden="true">'
+        )
+    ]
+    for row_idx in range(height):
+        for col_idx in range(width):
+            best_head = max(range(len(heads)), key=lambda idx: heads[idx][row_idx][col_idx])
+            value = heads[best_head][row_idx][col_idx]
+            parts.append(
+                f'<rect x="{col_idx * cell:.3g}" y="{row_idx * cell:.3g}" '
+                f'width="{cell:.3g}" height="{cell:.3g}" '
+                f'fill="{_attention_cell_color(value, best_head, len(heads))}"></rect>'
+            )
+    parts.append("</svg>")
+    return "".join(parts)
+
+
+def _svg_heatmap(
+    rows: Sequence[Sequence[float]],
+    x_labels: Sequence[str],
+    y_labels: Sequence[str],
+    *,
+    min_value: float,
+    max_value: float,
+    color: str,
+    x_axis: str,
+    y_axis: str,
+) -> str:
+    height = len(rows)
+    width = len(rows[0]) if height else 0
+    max_x_label = max((len(label) for label in x_labels), default=1)
+    max_y_label = max((len(label) for label in y_labels), default=1)
+    if max(width, height) <= 10:
+        cell = 48
+    elif max(width, height) <= 16:
+        cell = 36
+    else:
+        cell = 28
+    left = min(180, max(78, max_y_label * 7 + 28))
+    top = min(220, max(96, max_x_label * 7 + 52))
+    right = 24
+    bottom = 46
+    svg_width = left + width * cell + right
+    svg_height = top + height * cell + bottom
+    show_values = width * height <= 144 and cell >= 28
+
+    parts = [
+        (
+            '<svg class="safelens-heatmap-svg" '
+            f'width="{svg_width}" height="{svg_height}" '
+            f'viewBox="0 0 {svg_width} {svg_height}" '
+            'role="img" aria-label="SafeLens heatmap">'
+        ),
+        '<rect class="safelens-heatmap-background" width="100%" height="100%"></rect>',
+    ]
+    if x_axis:
+        parts.append(
+            f'<text class="safelens-axis-label" x="{left + width * cell / 2:.1f}" '
+            f'y="{svg_height - 10}" text-anchor="middle">{escape(x_axis)}</text>'
+        )
+    if y_axis:
+        y_mid = top + height * cell / 2
+        parts.append(
+            f'<text class="safelens-axis-label" x="16" y="{y_mid:.1f}" '
+            f'text-anchor="middle" transform="rotate(-90 16 {y_mid:.1f})">{escape(y_axis)}</text>'
+        )
+
+    for col_idx, label in enumerate(x_labels):
+        x = left + col_idx * cell + cell / 2
+        y = top - 48
+        parts.append(
+            f'<text class="safelens-heatmap-label safelens-x-label" '
+            f'x="{x:.1f}" y="{y:.1f}" text-anchor="end" '
+            f'transform="rotate(-45 {x:.1f} {y:.1f})">{escape(label)}</text>'
+        )
+    for row_idx, label in enumerate(y_labels):
+        y = top + row_idx * cell + cell / 2 + 4
+        parts.append(
+            f'<text class="safelens-heatmap-label safelens-y-label" '
+            f'x="{left - 10}" y="{y:.1f}" text-anchor="end">{escape(label)}</text>'
+        )
+
+    for row_idx, row in enumerate(rows):
+        for col_idx, value in enumerate(row):
+            background, foreground = _value_color(value, min_value, max_value, color=color)
+            x = left + col_idx * cell
+            y = top + row_idx * cell
+            row_label = escape(y_labels[row_idx], quote=True)
+            col_label = escape(x_labels[col_idx], quote=True)
+            parts.append(
+                '<rect class="safelens-heatmap-cell" '
+                f'x="{x:.1f}" y="{y:.1f}" width="{cell - 1}" height="{cell - 1}" rx="3" '
+                f'fill="{background}" data-row="{row_idx}" data-col="{col_idx}" '
+                f'data-row-label="{row_label}" data-col-label="{col_label}" '
+                f'data-value="{value:.12g}"><title>'
+                f"{escape(y_labels[row_idx])} x {escape(x_labels[col_idx])}: {value:.6g}"
+                "</title></rect>"
+            )
+            if show_values:
+                parts.append(
+                    f'<text class="safelens-heatmap-value" x="{x + cell / 2:.1f}" '
+                    f'y="{y + cell / 2 + 3:.1f}" text-anchor="middle" '
+                    f'fill="{foreground}">{value:.3g}</text>'
+                )
+    parts.append("</svg>")
+    return "".join(parts)
+
+
+def _mini_heatmap_svg(
+    matrix: Sequence[Sequence[Number]],
+    *,
+    min_value: float,
+    max_value: float,
+    color: str,
+) -> str:
+    rows = _as_2d_numbers(matrix)
+    height = len(rows)
+    width = len(rows[0]) if height else 0
+    cell = 9
+    gap = 1
+    svg_width = max(1, width * (cell + gap) - gap)
+    svg_height = max(1, height * (cell + gap) - gap)
+    parts = [
+        (
+            '<svg class="safelens-mini-heatmap" '
+            f'width="{svg_width}" height="{svg_height}" '
+            f'viewBox="0 0 {svg_width} {svg_height}" aria-hidden="true">'
+        )
+    ]
+    for row_idx, row in enumerate(rows):
+        for col_idx, value in enumerate(row):
+            background, _foreground = _value_color(value, min_value, max_value, color=color)
+            parts.append(
+                f'<rect x="{col_idx * (cell + gap)}" y="{row_idx * (cell + gap)}" '
+                f'width="{cell}" height="{cell}" rx="1.5" fill="{background}"></rect>'
+            )
+    parts.append("</svg>")
+    return "".join(parts)
+
+
 def _heatmap(
     matrix: Sequence[Sequence[Number]],
     *,
@@ -1594,32 +1874,22 @@ def _heatmap(
     y_names = list(y_labels) if y_labels is not None else [str(i) for i in range(len(rows))]
 
     viz_id = _next_viz_id("heatmap")
-    table_rows = []
-    header = "<tr><th></th>" + "".join(f"<th>{escape(label)}</th>" for label in x_names) + "</tr>"
-    for row_idx, row in enumerate(rows):
-        cells = [f"<th>{escape(y_names[row_idx])}</th>"]
-        for col_idx, value in enumerate(row):
-            background, foreground = _value_color(value, min_value, max_value, color=color)
-            cells.append(
-                '<td class="safelens-heatmap-cell" '
-                f'data-row="{row_idx}" data-col="{col_idx}" '
-                f'data-row-label="{escape(y_names[row_idx])}" '
-                f'data-col-label="{escape(x_names[col_idx])}" '
-                f'data-value="{value:.12g}" '
-                f'title="{escape(y_names[row_idx])} x {escape(x_names[col_idx])}: {value:.6g}" '
-                f'style="background:{background};'
-                f'color:{foreground};">{value:.4g}</td>'
-            )
-        table_rows.append("<tr>" + "".join(cells) + "</tr>")
-
+    svg = _svg_heatmap(
+        rows,
+        x_names,
+        y_names,
+        min_value=min_value,
+        max_value=max_value,
+        color=color,
+        x_axis=x_axis,
+        y_axis=y_axis,
+    )
     body = (
         f'<div id="{viz_id}" class="safelens-heatmap-widget">'
-        '<div class="safelens-axis safelens-x-axis">'
-        f'{escape(x_axis)}</div><table class="safelens-heatmap">'
-        f"{header}{''.join(table_rows)}</table>"
-        f'<div class="safelens-axis">{escape(y_axis)}</div>'
+        '<div class="safelens-heatmap-scroller">'
+        f"{svg}</div>"
         '<div class="safelens-focus-readout" data-role="readout"></div>'
-        + _legend(min_value, max_value)
+        + _legend(min_value, max_value, color=color)
         + _heatmap_focus_script(viz_id)
         + "</div>"
     )
@@ -1696,11 +1966,9 @@ def _matrix_browser(
         '<div class="safelens-controls">'
         f"{_select_control(viz_id, selector_label, matrix_labels)}"
         f"{mode_control}</div>"
-        '<div class="safelens-axis safelens-x-axis" data-role="x-axis"></div>'
-        '<table class="safelens-heatmap" data-role="matrix"></table>'
-        '<div class="safelens-axis" data-role="y-axis"></div>'
+        '<div class="safelens-heatmap-scroller" data-role="matrix"></div>'
         '<div class="safelens-focus-readout" data-role="readout"></div>'
-        f"{_legend(min_value, max_value)}"
+        f"{_legend(min_value, max_value, color=color)}"
         f"{_json_script(viz_id, payload)}"
         f"{_matrix_browser_script(viz_id)}</div>"
     )
@@ -1753,7 +2021,7 @@ def _heatmap_focus_script(viz_id: str) -> str:
     }});
     if (readout) {{
       readout.textContent = `${{cell.dataset.rowLabel}} x ${{cell.dataset.colLabel}}: ` +
-        `${{Number(cell.dataset.value).toPrecision(6)}}`;
+        `${{formatValue(Number(cell.dataset.value))}}`;
     }}
   }}
   function clearFocus() {{
@@ -1789,28 +2057,18 @@ def _matrix_browser_script(viz_id: str) -> str:
   const data = JSON.parse(dataNode.textContent);
   const matrixSelect = root.querySelector(".safelens-select");
   const modeSelect = root.querySelector('[data-filter="mode"]');
-  const table = root.querySelector('[data-role="matrix"]');
+  const host = root.querySelector('[data-role="matrix"]');
   const readout = root.querySelector('[data-role="readout"]');
-  const xAxis = root.querySelector('[data-role="x-axis"]');
-  const yAxis = root.querySelector('[data-role="y-axis"]');
+  const SVG_NS = "http://www.w3.org/2000/svg";
   let pinned = null;
-  function escapeHtml(value) {{
-    return String(value).replace(/[&<>"']/g, (char) => ({{
-      "&": "&amp;",
-      "<": "&lt;",
-      ">": "&gt;",
-      '"': "&quot;",
-      "'": "&#39;",
-    }}[char]));
-  }}
   function valueColor(value) {{
     const minValue = data.min;
     const maxValue = data.max;
     if (data.color === "blue") {{
-      const intensity = (value - minValue) / (maxValue - minValue || 1);
-      const red = Math.round(239 - 198 * intensity);
-      const green = Math.round(246 - 95 * intensity);
-      const blue = Math.round(255 - 61 * intensity);
+      const intensity = Math.max(0, Math.min(1, (value - minValue) / (maxValue - minValue || 1)));
+      const red = Math.round(248 - 211 * intensity);
+      const green = Math.round(250 - 151 * intensity);
+      const blue = Math.round(252 - 17 * intensity);
       const lum = (0.299 * red + 0.587 * green + 0.114 * blue) / 255;
       return [`rgb(${{red}},${{green}},${{blue}})`, lum > 0.58 ? "#111827" : "#ffffff"];
     }}
@@ -1819,26 +2077,40 @@ def _matrix_browser_script(viz_id: str) -> str:
     if (value >= midpoint) {{
       denominator = maxValue - midpoint || 1;
       intensity = Math.min(1, (value - midpoint) / denominator);
-      red = 255;
-      green = Math.round(245 - 105 * intensity);
-      blue = Math.round(245 - 125 * intensity);
+      red = Math.round(255 - 30 * intensity);
+      green = Math.round(255 - 226 * intensity);
+      blue = Math.round(255 - 109 * intensity);
     }} else {{
       denominator = midpoint - minValue || 1;
       intensity = Math.min(1, (midpoint - value) / denominator);
-      red = Math.round(245 - 125 * intensity);
-      green = Math.round(248 - 88 * intensity);
-      blue = 255;
+      red = Math.round(255 - 218 * intensity);
+      green = Math.round(255 - 156 * intensity);
+      blue = Math.round(255 - 20 * intensity);
     }}
     const lum = (0.299 * red + 0.587 * green + 0.114 * blue) / 255;
     return [`rgb(${{red}},${{green}},${{blue}})`, lum > 0.58 ? "#111827" : "#ffffff"];
   }}
+  function svgEl(tag, attrs = {{}}, text = null) {{
+    const node = document.createElementNS(SVG_NS, tag);
+    Object.entries(attrs).forEach(([key, value]) => node.setAttribute(key, value));
+    if (text !== null) node.textContent = text;
+    return node;
+  }}
   function transpose(matrix) {{
     return matrix[0].map((_, col) => matrix.map((row) => row[col]));
+  }}
+  function formatValue(value) {{
+    const absValue = Math.abs(value);
+    if (absValue === 0) return "0";
+    if (absValue >= 0.01 && absValue < 1000) {{
+      return value.toFixed(3).replace(/(\\.\\d*?[1-9])0+$/, "$1").replace(/\\.0+$/, "");
+    }}
+    return value.toExponential(2);
   }}
   function focusCell(cell) {{
     const row = cell.dataset.row;
     const col = cell.dataset.col;
-    table.querySelectorAll(".safelens-heatmap-cell").forEach((candidate) => {{
+    host.querySelectorAll(".safelens-heatmap-cell").forEach((candidate) => {{
       candidate.classList.toggle("safelens-cell-focus", candidate === cell);
       candidate.classList.toggle("safelens-row-focus", candidate.dataset.row === row);
       candidate.classList.toggle("safelens-col-focus", candidate.dataset.col === col);
@@ -1853,10 +2125,121 @@ def _matrix_browser_script(viz_id: str) -> str:
       focusCell(pinned);
       return;
     }}
-    table.querySelectorAll(".safelens-heatmap-cell").forEach((cell) => {{
+    host.querySelectorAll(".safelens-heatmap-cell").forEach((cell) => {{
       cell.classList.remove("safelens-cell-focus", "safelens-row-focus", "safelens-col-focus");
     }});
     if (readout) readout.textContent = "";
+  }}
+  function renderHeatmap(matrix, xLabels, yLabels, xAxis, yAxis) {{
+    const height = matrix.length;
+    const width = height ? matrix[0].length : 0;
+    const maxX = xLabels.reduce((acc, label) => Math.max(acc, String(label).length), 1);
+    const maxY = yLabels.reduce((acc, label) => Math.max(acc, String(label).length), 1);
+    const cell = Math.max(24, Math.min(48, Math.floor(720 / Math.max(width, 1))));
+    const left = Math.min(180, Math.max(78, maxY * 7 + 28));
+    const top = Math.min(220, Math.max(96, maxX * 7 + 52));
+    const right = 24;
+    const bottom = 46;
+    const svgWidth = left + width * cell + right;
+    const svgHeight = top + height * cell + bottom;
+    const showValues = width * height <= 144 && cell >= 28;
+    const svg = svgEl("svg", {{
+      class: "safelens-heatmap-svg",
+      width: svgWidth,
+      height: svgHeight,
+      viewBox: `0 0 ${{svgWidth}} ${{svgHeight}}`,
+      role: "img",
+      "aria-label": "SafeLens heatmap",
+    }});
+    svg.appendChild(svgEl("rect", {{
+      class: "safelens-heatmap-background",
+      width: "100%",
+      height: "100%",
+    }}));
+    if (xAxis) {{
+      svg.appendChild(svgEl("text", {{
+        class: "safelens-axis-label",
+        x: left + (width * cell) / 2,
+        y: svgHeight - 10,
+        "text-anchor": "middle",
+      }}, xAxis));
+    }}
+    if (yAxis) {{
+      const yMid = top + (height * cell) / 2;
+      svg.appendChild(svgEl("text", {{
+        class: "safelens-axis-label",
+        x: 16,
+        y: yMid,
+        "text-anchor": "middle",
+        transform: `rotate(-90 16 ${{yMid}})`,
+      }}, yAxis));
+    }}
+    xLabels.forEach((label, colIndex) => {{
+      const x = left + colIndex * cell + cell / 2;
+      const y = top - 48;
+      svg.appendChild(svgEl("text", {{
+        class: "safelens-heatmap-label safelens-x-label",
+        x,
+        y,
+        "text-anchor": "end",
+        transform: `rotate(-45 ${{x}} ${{y}})`,
+      }}, label));
+    }});
+    yLabels.forEach((label, rowIndex) => {{
+      svg.appendChild(svgEl("text", {{
+        class: "safelens-heatmap-label safelens-y-label",
+        x: left - 10,
+        y: top + rowIndex * cell + cell / 2 + 4,
+        "text-anchor": "end",
+      }}, label));
+    }});
+    matrix.forEach((row, rowIndex) => {{
+      row.forEach((value, colIndex) => {{
+        const number = Number(value);
+        const colors = valueColor(number);
+        const x = left + colIndex * cell;
+        const y = top + rowIndex * cell;
+        const rect = svgEl("rect", {{
+          class: "safelens-heatmap-cell",
+          x,
+          y,
+          width: cell - 1,
+          height: cell - 1,
+          rx: 3,
+          fill: colors[0],
+          "data-row": rowIndex,
+          "data-col": colIndex,
+          "data-row-label": yLabels[rowIndex],
+          "data-col-label": xLabels[colIndex],
+          "data-value": number,
+        }});
+        rect.appendChild(svgEl(
+          "title",
+          {{}},
+          `${{yLabels[rowIndex]}} x ${{xLabels[colIndex]}}: ${{formatValue(number)}}`,
+        ));
+        svg.appendChild(rect);
+        if (showValues) {{
+          svg.appendChild(svgEl("text", {{
+            class: "safelens-heatmap-value",
+            x: x + cell / 2,
+            y: y + cell / 2 + 3,
+            "text-anchor": "middle",
+            fill: colors[1],
+          }}, formatValue(number)));
+        }}
+      }});
+    }});
+    host.textContent = "";
+    host.appendChild(svg);
+    host.querySelectorAll(".safelens-heatmap-cell").forEach((cell) => {{
+      cell.addEventListener("mouseenter", () => focusCell(cell));
+      cell.addEventListener("mouseleave", clearFocus);
+      cell.addEventListener("click", () => {{
+        pinned = pinned === cell ? null : cell;
+        clearFocus();
+      }});
+    }});
   }}
   function render() {{
     pinned = null;
@@ -1865,29 +2248,425 @@ def _matrix_browser_script(viz_id: str) -> str:
     const matrix = transposed ? transpose(data.matrices[matrixIndex]) : data.matrices[matrixIndex];
     const xLabels = transposed ? data.yLabels : data.xLabels;
     const yLabels = transposed ? data.xLabels : data.yLabels;
-    if (xAxis) xAxis.textContent = transposed ? data.yAxis : data.xAxis;
-    if (yAxis) yAxis.textContent = transposed ? data.xAxis : data.yAxis;
-    let html = "<thead><tr><th></th>";
-    xLabels.forEach((label) => {{ html += `<th>${{escapeHtml(label)}}</th>`; }});
-    html += "</tr></thead><tbody>";
-    matrix.forEach((row, rowIndex) => {{
-      const rowLabel = escapeHtml(yLabels[rowIndex]);
-      html += `<tr><th>${{rowLabel}}</th>`;
-      row.forEach((value, colIndex) => {{
-        const colLabel = escapeHtml(xLabels[colIndex]);
-        const colors = valueColor(Number(value));
-        html += `<td class="safelens-heatmap-cell" data-row="${{rowIndex}}" ` +
-          `data-col="${{colIndex}}" data-row-label="${{rowLabel}}" ` +
-          `data-col-label="${{colLabel}}" data-value="${{value}}" ` +
-          `style="background:${{colors[0]}};color:${{colors[1]}};" ` +
-          `title="${{rowLabel}} x ${{colLabel}}: ${{Number(value).toPrecision(6)}}">` +
-          `${{Number(value).toPrecision(4)}}</td>`;
-      }});
-      html += "</tr>";
+    renderHeatmap(
+      matrix,
+      xLabels,
+      yLabels,
+      transposed ? data.yAxis : data.xAxis,
+      transposed ? data.xAxis : data.yAxis,
+    );
+    clearFocus();
+  }}
+  matrixSelect.addEventListener("change", render);
+  if (modeSelect) modeSelect.addEventListener("change", render);
+  render();
+}})();
+</script>
+"""
+
+
+def _attention_patterns_script(viz_id: str) -> str:
+    return f"""
+<script>
+(function() {{
+  const root = document.getElementById("{viz_id}");
+  const dataNode = document.getElementById("{viz_id}-data");
+  if (!root || !dataNode) return;
+  const data = JSON.parse(dataNode.textContent);
+  const imageHost = root.querySelector('[data-role="attention-image"]');
+  const readout = root.querySelector('[data-role="readout"]');
+  const titleNode = root.querySelector('[data-role="focus-title"]');
+  const tokenHost = root.querySelector('[data-role="tokens"]');
+  const tokenViewSelect = root.querySelector('[data-role="token-view"]');
+  const headButtons = Array.from(root.querySelectorAll("[data-head]"));
+  const SVG_NS = "http://www.w3.org/2000/svg";
+  let hoveredHead = null;
+  let lockedHead = data.includeOverview ? null : 0;
+  let hoveredToken = null;
+  let lockedToken = null;
+
+  function svgEl(tag, attrs = {{}}, text = null) {{
+    const node = document.createElementNS(SVG_NS, tag);
+    Object.entries(attrs).forEach(([key, value]) => node.setAttribute(key, value));
+    if (text !== null) node.textContent = text;
+    return node;
+  }}
+  function clamp01(value) {{
+    return Math.max(0, Math.min(1, Number(value)));
+  }}
+  function headColor(head, alpha = 1) {{
+    const hue = Math.round((head / Math.max(data.heads.length, 1)) * 360);
+    return `hsla(${{hue}}, 70%, 50%, ${{alpha}})`;
+  }}
+  function attentionColor(value, head) {{
+    const hue = Math.round((head / Math.max(data.heads.length, 1)) * 360);
+    const lightness = 98 - 70 * clamp01(value);
+    return `hsl(${{hue}}, 82%, ${{lightness}}%)`;
+  }}
+  function textColorFor(value) {{
+    return clamp01(value) > 0.58 ? "#ffffff" : "#111827";
+  }}
+  function formatValue(value) {{
+    const number = Number(value);
+    const absValue = Math.abs(number);
+    if (absValue === 0) return "0";
+    if (absValue >= 0.01 && absValue < 1000) {{
+      return number.toFixed(3).replace(/(\\.\\d*?[1-9])0+$/, "$1").replace(/\\.0+$/, "");
+    }}
+    return number.toExponential(2);
+  }}
+  function activeHead() {{
+    return hoveredHead !== null ? hoveredHead : lockedHead;
+  }}
+  function activeToken() {{
+    return hoveredToken !== null ? hoveredToken : lockedToken;
+  }}
+  function parseHead(value) {{
+    return value === "overview" ? null : Number(value);
+  }}
+  function bestHeadForCell(dest, src) {{
+    let bestHead = 0;
+    let bestValue = data.heads[0][dest][src];
+    for (let head = 1; head < data.heads.length; head += 1) {{
+      const value = data.heads[head][dest][src];
+      if (value > bestValue) {{
+        bestValue = value;
+        bestHead = head;
+      }}
+    }}
+    return [bestHead, bestValue];
+  }}
+  function cellInfo(head, dest, src) {{
+    if (head === null) {{
+      const [bestHead, bestValue] = bestHeadForCell(dest, src);
+      return {{ head: bestHead, value: bestValue }};
+    }}
+    return {{ head, value: data.heads[head][dest][src] }};
+  }}
+  function tokenValue(head, tokenIndex, focusToken, view) {{
+    const size = data.tokens.length;
+    if (focusToken !== null) {{
+      if (view === "destination_to_source") {{
+        return cellInfo(head, focusToken, tokenIndex);
+      }}
+      return cellInfo(head, tokenIndex, focusToken);
+    }}
+    let total = 0;
+    let bestHead = 0;
+    let count = 0;
+    if (view === "destination_to_source") {{
+      for (let src = 0; src <= tokenIndex; src += 1) {{
+        const info = cellInfo(head, tokenIndex, src);
+        total += info.value;
+        bestHead = info.value >= (head === null ? data.heads[bestHead][tokenIndex][src] : -1)
+          ? info.head
+          : bestHead;
+        count += 1;
+      }}
+    }} else {{
+      for (let dest = tokenIndex; dest < size; dest += 1) {{
+        const info = cellInfo(head, dest, tokenIndex);
+        total += info.value;
+        bestHead = info.value >= (head === null ? data.heads[bestHead][dest][tokenIndex] : -1)
+          ? info.head
+          : bestHead;
+        count += 1;
+      }}
+    }}
+    return {{ head: head === null ? bestHead : head, value: total / Math.max(count, 1) }};
+  }}
+  function renderImage() {{
+    const head = activeHead();
+    const rows = data.tokens.length;
+    const cols = data.tokens.length;
+    const cell = Math.max(8, Math.min(54, Math.floor(520 / Math.max(cols, 1))));
+    const width = cols * cell;
+    const height = rows * cell;
+    const svg = svgEl("svg", {{
+      class: "safelens-cv-main-image",
+      width,
+      height,
+      viewBox: `0 0 ${{width}} ${{height}}`,
+      role: "img",
+      "aria-label": "attention pattern",
     }});
-    html += "</tbody>";
-    table.innerHTML = html;
-    table.querySelectorAll(".safelens-heatmap-cell").forEach((cell) => {{
+    const token = activeToken();
+    for (let dest = 0; dest < rows; dest += 1) {{
+      for (let src = 0; src < cols; src += 1) {{
+        const info = cellInfo(head, dest, src);
+        const rect = svgEl("rect", {{
+          x: src * cell,
+          y: dest * cell,
+          width: cell,
+          height: cell,
+          fill: attentionColor(info.value, info.head),
+          class: "safelens-cv-cell",
+          "data-dest": dest,
+          "data-src": src,
+          "data-head": info.head,
+          "data-value": info.value,
+        }});
+        if (token !== null && (token === dest || token === src)) {{
+          rect.classList.add("is-token-focused");
+        }}
+        rect.appendChild(svgEl(
+          "title",
+          {{}},
+          `${{data.headNames[info.head]}} | dest ${{dest}} ${{data.tokens[dest]}} <- ` +
+            `src ${{src}} ${{data.tokens[src]}}: ${{formatValue(info.value)}}`,
+        ));
+        rect.addEventListener("mouseenter", () => {{
+          if (readout) {{
+            readout.textContent =
+              `${{data.headNames[info.head]}} | dest ${{dest}} ${{data.tokens[dest]}} <- ` +
+              `src ${{src}} ${{data.tokens[src]}}: ${{formatValue(info.value)}}`;
+          }}
+        }});
+        rect.addEventListener("mouseleave", () => {{
+          if (readout) readout.textContent = "";
+        }});
+        svg.appendChild(rect);
+      }}
+    }}
+    imageHost.textContent = "";
+    imageHost.appendChild(svg);
+    if (titleNode) {{
+      titleNode.textContent = head === null
+        ? "Attention Patterns"
+        : `${{data.headNames[head]}} Zoomed`;
+    }}
+  }}
+  function renderTokens() {{
+    const head = activeHead();
+    const token = activeToken();
+    const view = tokenViewSelect.value;
+    tokenHost.textContent = "";
+    data.tokens.forEach((label, tokenIndex) => {{
+      const info = tokenValue(head, tokenIndex, token, view);
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "safelens-cv-token";
+      if (token === tokenIndex) button.classList.add("is-active");
+      button.style.background = attentionColor(info.value, info.head);
+      button.style.color = textColorFor(info.value);
+      button.textContent = label;
+      button.title = `${{label}}: ${{formatValue(info.value)}}`;
+      button.addEventListener("mouseenter", () => {{
+        hoveredToken = tokenIndex;
+        render();
+      }});
+      button.addEventListener("mouseleave", () => {{
+        hoveredToken = null;
+        render();
+      }});
+      button.addEventListener("click", () => {{
+        lockedToken = lockedToken === tokenIndex ? null : tokenIndex;
+        render();
+      }});
+      tokenHost.appendChild(button);
+    }});
+  }}
+  function renderButtons() {{
+    const head = activeHead();
+    headButtons.forEach((button) => {{
+      const buttonHead = parseHead(button.dataset.head);
+      const active = buttonHead === head || (buttonHead === null && head === null);
+      button.classList.toggle("is-active", active);
+      if (buttonHead !== null) {{
+        button.style.setProperty("--safelens-head-color", headColor(buttonHead));
+        button.style.setProperty("--safelens-head-glow", headColor(buttonHead, 0.35));
+      }}
+    }});
+  }}
+  function render() {{
+    renderButtons();
+    renderImage();
+    renderTokens();
+  }}
+  headButtons.forEach((button) => {{
+    button.addEventListener("mouseenter", () => {{
+      hoveredHead = parseHead(button.dataset.head);
+      render();
+    }});
+    button.addEventListener("mouseleave", () => {{
+      hoveredHead = null;
+      render();
+    }});
+    button.addEventListener("click", () => {{
+      const clicked = parseHead(button.dataset.head);
+      lockedHead = lockedHead === clicked ? (data.includeOverview ? null : 0) : clicked;
+      render();
+    }});
+  }});
+  tokenViewSelect.addEventListener("change", render);
+  render();
+}})();
+</script>
+"""
+
+
+def _attention_heads_script(viz_id: str) -> str:
+    return f"""
+<script>
+(function() {{
+  const root = document.getElementById("{viz_id}");
+  const dataNode = document.getElementById("{viz_id}-data");
+  if (!root || !dataNode) return;
+  const data = JSON.parse(dataNode.textContent);
+  const buttons = Array.from(root.querySelectorAll("[data-head]"));
+  const host = root.querySelector('[data-role="matrix"]');
+  const readout = root.querySelector('[data-role="readout"]');
+  const title = root.querySelector('[data-role="head-title"]');
+  const SVG_NS = "http://www.w3.org/2000/svg";
+  let pinned = null;
+  function valueColor(value) {{
+    const minValue = data.min;
+    const maxValue = data.max;
+    const intensity = Math.max(0, Math.min(1, (value - minValue) / (maxValue - minValue || 1)));
+    const red = Math.round(248 - 211 * intensity);
+    const green = Math.round(250 - 151 * intensity);
+    const blue = Math.round(252 - 17 * intensity);
+    const lum = (0.299 * red + 0.587 * green + 0.114 * blue) / 255;
+    return [`rgb(${{red}},${{green}},${{blue}})`, lum > 0.58 ? "#111827" : "#ffffff"];
+  }}
+  function svgEl(tag, attrs = {{}}, text = null) {{
+    const node = document.createElementNS(SVG_NS, tag);
+    Object.entries(attrs).forEach(([key, value]) => node.setAttribute(key, value));
+    if (text !== null) node.textContent = text;
+    return node;
+  }}
+  function formatValue(value) {{
+    const absValue = Math.abs(value);
+    if (absValue === 0) return "0";
+    if (absValue >= 0.01 && absValue < 1000) {{
+      return value.toFixed(3).replace(/(\\.\\d*?[1-9])0+$/, "$1").replace(/\\.0+$/, "");
+    }}
+    return value.toExponential(2);
+  }}
+  function focusCell(cell) {{
+    const row = cell.dataset.row;
+    const col = cell.dataset.col;
+    host.querySelectorAll(".safelens-heatmap-cell").forEach((candidate) => {{
+      candidate.classList.toggle("safelens-cell-focus", candidate === cell);
+      candidate.classList.toggle("safelens-row-focus", candidate.dataset.row === row);
+      candidate.classList.toggle("safelens-col-focus", candidate.dataset.col === col);
+    }});
+    if (readout) {{
+      readout.textContent = `${{cell.dataset.rowLabel}} -> ${{cell.dataset.colLabel}}: ` +
+        `${{formatValue(Number(cell.dataset.value))}}`;
+    }}
+  }}
+  function clearFocus() {{
+    if (pinned) {{
+      focusCell(pinned);
+      return;
+    }}
+    host.querySelectorAll(".safelens-heatmap-cell").forEach((cell) => {{
+      cell.classList.remove("safelens-cell-focus", "safelens-row-focus", "safelens-col-focus");
+    }});
+    if (readout) readout.textContent = "";
+  }}
+  function renderHeatmap(matrix) {{
+    const xLabels = data.xLabels;
+    const yLabels = data.yLabels;
+    const height = matrix.length;
+    const width = height ? matrix[0].length : 0;
+    const maxX = xLabels.reduce((acc, label) => Math.max(acc, String(label).length), 1);
+    const maxY = yLabels.reduce((acc, label) => Math.max(acc, String(label).length), 1);
+    const cell = Math.max(24, Math.min(48, Math.floor(720 / Math.max(width, 1))));
+    const left = Math.min(180, Math.max(78, maxY * 7 + 28));
+    const top = Math.min(220, Math.max(96, maxX * 7 + 52));
+    const right = 24;
+    const bottom = 46;
+    const svgWidth = left + width * cell + right;
+    const svgHeight = top + height * cell + bottom;
+    const showValues = width * height <= 144 && cell >= 28;
+    const svg = svgEl("svg", {{
+      class: "safelens-heatmap-svg",
+      width: svgWidth,
+      height: svgHeight,
+      viewBox: `0 0 ${{svgWidth}} ${{svgHeight}}`,
+      role: "img",
+      "aria-label": "SafeLens attention head heatmap",
+    }});
+    svg.appendChild(svgEl("rect", {{
+      class: "safelens-heatmap-background",
+      width: "100%",
+      height: "100%",
+    }}));
+    svg.appendChild(svgEl("text", {{
+      class: "safelens-axis-label",
+      x: left + (width * cell) / 2,
+      y: svgHeight - 10,
+      "text-anchor": "middle",
+    }}, data.xAxis));
+    const yMid = top + (height * cell) / 2;
+    svg.appendChild(svgEl("text", {{
+      class: "safelens-axis-label",
+      x: 16,
+      y: yMid,
+      "text-anchor": "middle",
+      transform: `rotate(-90 16 ${{yMid}})`,
+    }}, data.yAxis));
+    xLabels.forEach((label, colIndex) => {{
+      const x = left + colIndex * cell + cell / 2;
+      const y = top - 48;
+      svg.appendChild(svgEl("text", {{
+        class: "safelens-heatmap-label safelens-x-label",
+        x,
+        y,
+        "text-anchor": "end",
+        transform: `rotate(-45 ${{x}} ${{y}})`,
+      }}, label));
+    }});
+    yLabels.forEach((label, rowIndex) => {{
+      svg.appendChild(svgEl("text", {{
+        class: "safelens-heatmap-label safelens-y-label",
+        x: left - 10,
+        y: top + rowIndex * cell + cell / 2 + 4,
+        "text-anchor": "end",
+      }}, label));
+    }});
+    matrix.forEach((row, rowIndex) => {{
+      row.forEach((value, colIndex) => {{
+        const number = Number(value);
+        const colors = valueColor(number);
+        const x = left + colIndex * cell;
+        const y = top + rowIndex * cell;
+        const rect = svgEl("rect", {{
+          class: "safelens-heatmap-cell",
+          x,
+          y,
+          width: cell - 1,
+          height: cell - 1,
+          rx: 3,
+          fill: colors[0],
+          "data-row": rowIndex,
+          "data-col": colIndex,
+          "data-row-label": yLabels[rowIndex],
+          "data-col-label": xLabels[colIndex],
+          "data-value": number,
+        }});
+        rect.appendChild(svgEl(
+          "title",
+          {{}},
+          `${{yLabels[rowIndex]}} -> ${{xLabels[colIndex]}}: ${{formatValue(number)}}`,
+        ));
+        svg.appendChild(rect);
+        if (showValues) {{
+          svg.appendChild(svgEl("text", {{
+            class: "safelens-heatmap-value",
+            x: x + cell / 2,
+            y: y + cell / 2 + 3,
+            "text-anchor": "middle",
+            fill: colors[1],
+          }}, formatValue(number)));
+        }}
+      }});
+    }});
+    host.textContent = "";
+    host.appendChild(svg);
+    host.querySelectorAll(".safelens-heatmap-cell").forEach((cell) => {{
       cell.addEventListener("mouseenter", () => focusCell(cell));
       cell.addEventListener("mouseleave", clearFocus);
       cell.addEventListener("click", () => {{
@@ -1895,11 +2674,22 @@ def _matrix_browser_script(viz_id: str) -> str:
         clearFocus();
       }});
     }});
+  }}
+  function showHead(index) {{
+    pinned = null;
+    const headIndex = Number(index);
+    buttons.forEach((button) => {{
+      button.classList.toggle("is-active", Number(button.dataset.head) === headIndex);
+    }});
+    if (title) title.textContent = data.headNames[headIndex];
+    renderHeatmap(data.heads[headIndex]);
     clearFocus();
   }}
-  matrixSelect.addEventListener("change", render);
-  if (modeSelect) modeSelect.addEventListener("change", render);
-  render();
+  buttons.forEach((button) => {{
+    button.addEventListener("mouseenter", () => showHead(button.dataset.head));
+    button.addEventListener("click", () => showHead(button.dataset.head));
+  }});
+  showHead(0);
 }})();
 </script>
 """
@@ -2763,24 +3553,24 @@ def _value_color(
 ) -> tuple[str, str]:
     if color == "blue":
         denominator = max_value - min_value or 1.0
-        intensity = (value - min_value) / denominator
-        red = int(239 - 198 * intensity)
-        green = int(246 - 95 * intensity)
-        blue = int(255 - 61 * intensity)
+        intensity = max(0.0, min(1.0, (value - min_value) / denominator))
+        red = int(248 - 211 * intensity)
+        green = int(250 - 151 * intensity)
+        blue = int(252 - 17 * intensity)
     else:
         midpoint = 0.0 if min_value <= 0.0 <= max_value else (min_value + max_value) / 2.0
         if value >= midpoint:
             denominator = max_value - midpoint or 1.0
             intensity = min(1.0, (value - midpoint) / denominator)
-            red = 255
-            green = int(245 - 105 * intensity)
-            blue = int(245 - 125 * intensity)
+            red = int(255 - 30 * intensity)
+            green = int(255 - 226 * intensity)
+            blue = int(255 - 109 * intensity)
         else:
             denominator = midpoint - min_value or 1.0
             intensity = min(1.0, (midpoint - value) / denominator)
-            red = int(245 - 125 * intensity)
-            green = int(248 - 88 * intensity)
-            blue = 255
+            red = int(255 - 218 * intensity)
+            green = int(255 - 156 * intensity)
+            blue = int(255 - 20 * intensity)
     luminance = (0.299 * red + 0.587 * green + 0.114 * blue) / 255.0
     foreground = "#111827" if luminance > 0.58 else "#ffffff"
     return f"rgb({red},{green},{blue})", foreground
@@ -2795,10 +3585,17 @@ def _component_title(base: str, *, layer: int | None = None, head: int | None = 
     return " - ".join(parts)
 
 
-def _legend(min_value: float, max_value: float) -> str:
+def _legend(min_value: float, max_value: float, *, color: str = "red_blue") -> str:
+    gradient_class = (
+        "safelens-legend-gradient safelens-legend-gradient-blue"
+        if color == "blue"
+        else "safelens-legend-gradient safelens-legend-gradient-red-blue"
+    )
     return (
         '<div class="safelens-legend">'
-        f"<span>{min_value:.4g}</span><span>{max_value:.4g}</span></div>"
+        f"<span>{min_value:.4g}</span>"
+        f'<span class="{gradient_class}"></span>'
+        f"<span>{max_value:.4g}</span></div>"
     )
 
 
@@ -2807,48 +3604,108 @@ def _wrap_panel(kind: str, title: str | None, body: str) -> str:
     return (
         "<style>"
         ".safelens-viz{font-family:Inter,ui-sans-serif,system-ui,sans-serif;"
-        "line-height:1.35;color:#111827;margin:0.75rem 0;}"
-        ".safelens-viz h3{font-size:1rem;margin:0 0 0.5rem 0;}"
-        ".safelens-controls{display:flex;flex-wrap:wrap;gap:0.35rem;margin:0.35rem 0;}"
-        ".safelens-control-button{border:1px solid #cbd5e1;background:#ffffff;"
-        "color:#111827;border-radius:4px;padding:0.25rem 0.45rem;font-size:0.78rem;"
+        "line-height:1.35;color:#111827;background:#ffffff;border:1px solid #e5e7eb;"
+        "border-radius:6px;padding:0.8rem;margin:0.75rem 0;box-sizing:border-box;}"
+        ".safelens-viz *{box-sizing:border-box;}"
+        ".safelens-viz h3{font-size:1rem;font-weight:650;margin:0 0 0.65rem 0;color:#0f172a;}"
+        ".safelens-controls{display:flex;flex-wrap:wrap;gap:0.45rem;margin:0.4rem 0 0.65rem 0;}"
+        ".safelens-control-label{display:inline-flex;align-items:center;gap:0.35rem;"
+        "font-size:0.78rem;color:#475569;}"
+        ".safelens-control-button{border:1px solid #d9dee8;background:#ffffff;"
+        "color:#111827;border-radius:5px;padding:0.3rem 0.5rem;font-size:0.78rem;"
         "cursor:pointer;}"
         ".safelens-control-button:hover,.safelens-control-button.is-active{"
-        "background:#111827;color:#ffffff;border-color:#111827;}"
-        ".safelens-select,.safelens-input{border:1px solid #cbd5e1;border-radius:4px;"
-        "padding:0.25rem 0.35rem;font-size:0.8rem;background:#ffffff;color:#111827;}"
+        "background:#0f172a;color:#ffffff;border-color:#0f172a;}"
+        ".safelens-select,.safelens-input{border:1px solid #d9dee8;border-radius:5px;"
+        "padding:0.3rem 0.42rem;font-size:0.8rem;background:#ffffff;color:#111827;}"
         ".safelens-hidden{display:none!important;}"
         ".safelens-token-strip{display:flex;flex-wrap:wrap;gap:0.08rem;margin:0.35rem 0;}"
         ".safelens-token{padding:0.15rem 0.22rem;margin:0.08rem;border-radius:4px;"
         "display:inline-block;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;}"
         ".safelens-live-token{transition:background 120ms ease,color 120ms ease;}"
-        ".safelens-heatmap{border-collapse:collapse;font-size:0.82rem;}"
-        ".safelens-heatmap th{font-weight:600;background:#f3f4f6;color:#374151;}"
-        ".safelens-heatmap th,.safelens-heatmap td{border:1px solid #d1d5db;"
-        "min-width:2.4rem;padding:0.35rem;text-align:center;}"
-        ".safelens-heatmap-cell{cursor:crosshair;transition:outline 80ms ease;}"
+        ".safelens-heatmap-scroller{overflow:auto;background:#ffffff;border:1px solid #edf0f5;"
+        "border-radius:6px;padding:0.35rem;max-width:100%;width:max-content;margin:0 auto;}"
+        ".safelens-heatmap-svg{display:block;background:#ffffff;width:auto;height:auto;"
+        "max-width:none;margin:0 auto;}"
+        ".safelens-heatmap-background{fill:#ffffff;}"
+        ".safelens-heatmap-label{font-size:11px;fill:#334155;"
+        "font-family:ui-monospace,SFMono-Regular,Consolas,monospace;}"
+        ".safelens-axis-label{font-size:12px;fill:#475569;font-weight:600;}"
+        ".safelens-heatmap-value{font-size:10px;font-weight:650;pointer-events:none;"
+        "font-family:ui-monospace,SFMono-Regular,Consolas,monospace;}"
+        ".safelens-heatmap-cell{cursor:crosshair;stroke:#ffffff;stroke-width:1;"
+        "transition:stroke 80ms ease,stroke-width 80ms ease;}"
         ".safelens-heatmap-cell.safelens-row-focus,.safelens-heatmap-cell.safelens-col-focus{"
-        "box-shadow:inset 0 0 0 9999px rgba(17,24,39,0.08);}"
-        ".safelens-heatmap-cell.safelens-cell-focus{outline:2px solid #111827;"
-        "outline-offset:-2px;}"
+        "stroke:#64748b;stroke-width:1.6;}"
+        ".safelens-heatmap-cell.safelens-cell-focus{stroke:#0f172a;stroke-width:2.4;}"
         ".safelens-axis{font-size:0.78rem;color:#4b5563;margin:0.25rem 0;}"
         ".safelens-x-axis{margin-left:2.4rem;}"
         ".safelens-focus-readout{min-height:1rem;font-size:0.78rem;color:#374151;"
         "margin:0.3rem 0;}"
-        ".safelens-legend{display:flex;justify-content:space-between;max-width:18rem;"
-        "font-size:0.75rem;color:#4b5563;margin-top:0.35rem;}"
+        ".safelens-legend{display:grid;grid-template-columns:auto minmax(7rem,14rem) auto;"
+        "align-items:center;gap:0.45rem;font-size:0.75rem;color:#4b5563;margin-top:0.45rem;}"
+        ".safelens-legend-gradient{display:block;height:0.45rem;border-radius:999px;"
+        "border:1px solid #e5e7eb;}"
+        ".safelens-legend-gradient-blue{background:linear-gradient(90deg,#f8fafc,#60a5fa,#2563eb);}"
+        ".safelens-legend-gradient-red-blue{background:linear-gradient(90deg,#2563eb,#ffffff,#e11d48);}"
+        ".safelens-head-strip{display:grid;grid-template-columns:repeat(auto-fill,minmax(108px,1fr));"
+        "gap:0.55rem;margin:0.25rem 0 0.75rem 0;}"
+        ".safelens-head-thumb{display:flex;flex-direction:column;gap:0.35rem;text-align:left;"
+        "border:1px solid #e5e7eb;background:#ffffff;border-radius:6px;padding:0.4rem;"
+        "cursor:pointer;color:#111827;}"
+        ".safelens-head-thumb:hover,.safelens-head-thumb.is-active{border-color:#2563eb;"
+        "box-shadow:0 0 0 2px rgba(37,99,235,0.12);}"
+        ".safelens-head-thumb-title{font-size:0.76rem;font-weight:650;white-space:nowrap;"
+        "overflow:hidden;text-overflow:ellipsis;}"
+        ".safelens-mini-heatmap{width:100%;height:auto;display:block;background:#ffffff;}"
+        ".safelens-head-detail-title{font-size:0.86rem;font-weight:650;color:#0f172a;"
+        "margin:0 0 0.35rem 0;}"
+        ".safelens-cv-attention{background:#ffffff;}"
+        ".safelens-cv-layout{display:grid;grid-template-columns:max-content minmax(18rem,1fr);"
+        "gap:1.25rem;align-items:start;}"
+        ".safelens-cv-main{min-width:0;}"
+        ".safelens-cv-selector{min-width:14rem;}"
+        ".safelens-cv-section-title{font-size:0.86rem;font-weight:700;color:#111827;"
+        "margin:0 0 0.45rem 0;}"
+        ".safelens-cv-section-title span{font-weight:400;color:#64748b;}"
+        ".safelens-cv-image-frame{display:inline-block;background:#ffffff;border:1px solid #d9dee8;"
+        "padding:0.3rem;line-height:0;max-width:100%;overflow:auto;}"
+        ".safelens-cv-main-image,.safelens-cv-attention-image{display:block;background:#ffffff;"
+        "image-rendering:pixelated;shape-rendering:crispEdges;}"
+        ".safelens-cv-cell{stroke:#ffffff;stroke-width:0.25;cursor:crosshair;}"
+        ".safelens-cv-cell.is-token-focused{stroke:rgba(15,23,42,0.62);stroke-width:0.8;}"
+        ".safelens-cv-head-grid{display:flex;flex-wrap:wrap;gap:0.55rem;align-items:flex-start;}"
+        ".safelens-cv-head-button{position:relative;border:1px solid #d9dee8;background:#ffffff;"
+        "padding:0.25rem;margin:0;cursor:pointer;line-height:0;color:#111827;}"
+        ".safelens-cv-head-button:hover,.safelens-cv-head-button.is-active{border-color:var(--safelens-head-color,#1d4ed8);"
+        "box-shadow:0 0 4px 3px var(--safelens-head-glow,rgba(29,78,216,0.22));}"
+        ".safelens-cv-head-label{display:block;font-size:0.7rem;font-weight:700;line-height:1.1;"
+        "margin-bottom:0.2rem;color:#111827;}"
+        ".safelens-cv-head-badge{position:absolute;top:0;right:0;z-index:1;max-width:90%;"
+        "overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#ffffff;font-size:0.68rem;"
+        "font-weight:700;line-height:1.1;padding:0.12rem 0.2rem;}"
+        ".safelens-cv-token-panel{margin-top:0.85rem;}"
+        ".safelens-cv-token-strip{display:flex;flex-wrap:wrap;align-items:center;gap:0;margin-top:0.4rem;}"
+        ".safelens-cv-token{border:0;border-right:1px solid #d9dee8;margin:0 0 0.2rem 0;"
+        "padding:0.22rem 0.34rem;font-size:0.82rem;"
+        "font-family:ui-monospace,SFMono-Regular,Consolas,monospace;"
+        "cursor:pointer;min-height:1.55rem;}"
+        ".safelens-cv-token:hover,.safelens-cv-token.is-active{"
+        "box-shadow:0 0 0 2px rgba(15,23,42,0.22);"
+        "position:relative;z-index:1;}"
+        "@media(max-width:760px){.safelens-cv-layout{grid-template-columns:1fr;}.safelens-cv-selector{min-width:0;}}"
         ".safelens-summary{border-collapse:collapse;font-size:0.86rem;margin:0.35rem 0;}"
-        ".safelens-summary th,.safelens-summary td{border:1px solid #d1d5db;"
+        ".safelens-summary th,.safelens-summary td{border:1px solid #e5e7eb;"
         "padding:0.35rem 0.5rem;text-align:left;vertical-align:top;}"
-        ".safelens-summary th{background:#f3f4f6;}"
+        ".safelens-summary th{background:#ffffff;color:#334155;font-weight:650;}"
         ".safelens-line-table{border-collapse:collapse;font-size:0.82rem;margin:0.35rem 0;}"
-        ".safelens-line-table th,.safelens-line-table td{border:1px solid #d1d5db;"
+        ".safelens-line-table th,.safelens-line-table td{border:1px solid #e5e7eb;"
         "min-width:3.2rem;padding:0.35rem;text-align:left;vertical-align:middle;}"
-        ".safelens-line-table th{background:#f3f4f6;}"
+        ".safelens-line-table th{background:#ffffff;color:#334155;}"
         ".safelens-bar{height:0.45rem;background:#2563eb;border-radius:2px;margin-bottom:0.15rem;}"
         ".safelens-track{margin:0.4rem 0;}"
         "details.safelens-details{margin:0.4rem 0;}"
-        "details.safelens-details pre{white-space:pre-wrap;background:#f9fafb;"
+        "details.safelens-details pre{white-space:pre-wrap;background:#ffffff;"
         "border:1px solid #e5e7eb;padding:0.5rem;}"
         "</style>"
         f'<div class="safelens-viz safelens-viz-{escape(kind)}">{title_html}{body}</div>'
