@@ -3090,7 +3090,7 @@ def _to_nested(value: Any) -> Any:
         return value.tolist()
     if isinstance(value, Mapping):
         return {key: _to_nested(item) for key, item in value.items()}
-    if isinstance(value, (str, bytes)):
+    if isinstance(value, str | bytes):
         return value
     if isinstance(value, Sequence):
         return [_to_nested(item) for item in value]
@@ -3100,7 +3100,7 @@ def _to_nested(value: Any) -> Any:
 def _flatten_nested(value: Any) -> list[Any]:
     if isinstance(value, Mapping):
         items = value.values()
-    elif isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+    elif isinstance(value, Sequence) and not isinstance(value, str | bytes):
         items = value
     else:
         return [value]
@@ -3169,13 +3169,13 @@ def _normalize_text_neuron_inputs(
         max_token_count = max(max_token_count, current_shape[0])
         sample_values = []
         for token_values in sample_acts:
-            if not isinstance(token_values, Sequence) or isinstance(token_values, (str, bytes)):
+            if not isinstance(token_values, Sequence) or isinstance(token_values, str | bytes):
                 raise ValueError("each token activation must contain layer values.")
             if len(token_values) != layer_count:
                 raise ValueError("all token activations must have the same layer dimension.")
             layer_values_list = []
             for layer_values in token_values:
-                if not isinstance(layer_values, Sequence) or isinstance(layer_values, (str, bytes)):
+                if not isinstance(layer_values, Sequence) or isinstance(layer_values, str | bytes):
                     raise ValueError("each layer activation must contain neuron values.")
                 if len(layer_values) != neuron_count:
                     raise ValueError("all layer activations must have the same neuron dimension.")
@@ -3373,14 +3373,14 @@ def _topk_token_rows(
         limit = min(max_k, len(token_list))
         for layer_idx in range(current_shape[0]):
             layer_acts = sample_acts[layer_idx]
-            if not isinstance(layer_acts, Sequence) or isinstance(layer_acts, (str, bytes)):
+            if not isinstance(layer_acts, Sequence) or isinstance(layer_acts, str | bytes):
                 raise ValueError("each layer activation must contain token values.")
             if len(layer_acts) != len(token_list):
                 raise ValueError(
                     "tokens length must match each activation sample's token dimension."
                 )
             for token_values in layer_acts:
-                if not isinstance(token_values, Sequence) or isinstance(token_values, (str, bytes)):
+                if not isinstance(token_values, Sequence) or isinstance(token_values, str | bytes):
                     raise ValueError("each token activation must contain neuron values.")
                 if len(token_values) != sample_neuron_count:
                     raise ValueError(
@@ -3428,7 +3428,7 @@ def _topk_sample_rows(
     neuron_names = _labels_or_indices(neuron_labels, shape[1], "neuron")
 
     rows = []
-    if not isinstance(token_data, Sequence) or isinstance(token_data, (str, bytes)):
+    if not isinstance(token_data, Sequence) or isinstance(token_data, str | bytes):
         raise ValueError("tokens must have shape [layer, neuron, sample, token].")
     if len(token_data) != shape[0]:
         raise ValueError("tokens must match activations on the layer dimension.")
@@ -3436,10 +3436,10 @@ def _topk_sample_rows(
         layer_activations = activation_data[layer_idx]
         layer_tokens = token_data[layer_idx]
         if not isinstance(layer_activations, Sequence) or isinstance(
-            layer_activations, (str, bytes)
+            layer_activations, str | bytes
         ):
             raise ValueError("each activation layer must contain neuron values.")
-        if not isinstance(layer_tokens, Sequence) or isinstance(layer_tokens, (str, bytes)):
+        if not isinstance(layer_tokens, Sequence) or isinstance(layer_tokens, str | bytes):
             raise ValueError("each token layer must contain neuron token values.")
         if len(layer_activations) != shape[1] or len(layer_tokens) != shape[1]:
             raise ValueError("tokens and activations must match on the neuron dimension.")
@@ -3447,10 +3447,10 @@ def _topk_sample_rows(
             neuron_activations = layer_activations[neuron_idx]
             neuron_tokens = layer_tokens[neuron_idx]
             if not isinstance(neuron_activations, Sequence) or isinstance(
-                neuron_activations, (str, bytes)
+                neuron_activations, str | bytes
             ):
                 raise ValueError("each activation neuron must contain sample values.")
-            if not isinstance(neuron_tokens, Sequence) or isinstance(neuron_tokens, (str, bytes)):
+            if not isinstance(neuron_tokens, Sequence) or isinstance(neuron_tokens, str | bytes):
                 raise ValueError("each token neuron must contain sample token values.")
             if len(neuron_activations) != shape[2] or len(neuron_tokens) != shape[2]:
                 raise ValueError("tokens and activations must match on the sample dimension.")
@@ -3459,11 +3459,11 @@ def _topk_sample_rows(
                 sample_values_raw = neuron_activations[sample_idx]
                 sample_tokens_raw = neuron_tokens[sample_idx]
                 if not isinstance(sample_values_raw, Sequence) or isinstance(
-                    sample_values_raw, (str, bytes)
+                    sample_values_raw, str | bytes
                 ):
                     raise ValueError("each activation sample must contain token values.")
                 if not isinstance(sample_tokens_raw, Sequence) or isinstance(
-                    sample_tokens_raw, (str, bytes)
+                    sample_tokens_raw, str | bytes
                 ):
                     raise ValueError("each token sample must contain token strings.")
                 sample_values = [_scalar(value) for value in sample_values_raw]
@@ -3494,9 +3494,9 @@ def _topk_sample_rows(
 
 def _token_samples(tokens: Sequence[Any]) -> list[list[str]]:
     data = _to_nested(tokens)
-    if not isinstance(data, Sequence) or isinstance(data, (str, bytes)):
+    if not isinstance(data, Sequence) or isinstance(data, str | bytes):
         raise ValueError("tokens must be a sequence.")
-    if data and isinstance(data[0], Sequence) and not isinstance(data[0], (str, bytes)):
+    if data and isinstance(data[0], Sequence) and not isinstance(data[0], str | bytes):
         return [[str(token) for token in sample] for sample in data]
     return [[str(token) for token in data]]
 
@@ -3510,7 +3510,7 @@ def _log_softmax(values: Sequence[float]) -> list[float]:
 
 
 def _shape(value: Any) -> tuple[int, ...]:
-    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
+    if isinstance(value, str | bytes) or not isinstance(value, Sequence):
         return ()
     if not value:
         return (0,)
@@ -3746,7 +3746,7 @@ def _details_block(title: str, payload: Any) -> str:
 def _display_value(value: Any) -> str:
     if isinstance(value, float):
         return f"{value:.4g}"
-    if isinstance(value, (list, tuple, dict)):
+    if isinstance(value, list | tuple | dict):
         return str(value)
     if value is None:
         return ""
