@@ -28,6 +28,7 @@ def load_builtin_methods() -> None:
     import SafeLens.attribution.safety_heads  # noqa: F401
     import SafeLens.monitors.dummy  # noqa: F401
     import SafeLens.probes.dummy  # noqa: F401
+    import SafeLens.probes.linear  # noqa: F401
 
 
 def _register(

@@ -519,8 +519,38 @@ Built-in demo methods:
 | Method | Purpose |
 | --- | --- |
 | `dummy_probe` | Keyword-based probe for validating probe integration and evidence tokens. |
+| `linear_probe` | Logistic-regression probe over explicit feature vectors or captured activations, trained from labeled examples. |
 | `dummy_monitor` | Threshold-based monitor for validating monitor integration. |
 | `dummy_attributor` | Token attribution stub for validating attribution output. |
+
+`linear_probe` can train from labeled `train_data`, a `train_jsonl` file, or the
+active pipeline `dataset` when `train_from_dataset: true` is set. Dataset rows
+may provide explicit `features`, or plain `text`/`prompt` plus `label`; in the
+latter case the probe runs the base model, caches the configured layer
+activation, and trains on that activation internally.
+Set `train_split` and `eval_split` to train and report on different subsets of
+one dataset.
+
+Contrastive steering vectors can be built and applied in separate steps:
+
+```python
+from SafeLens.steering import ContrastiveSteeringVector
+
+steering = ContrastiveSteeringVector.fit(
+    model,
+    dataset,
+    layer="layer_12.resid_post",
+    train_split="train",
+)
+steering.save("steering_vector.json")
+
+loaded = ContrastiveSteeringVector.load("steering_vector.json")
+handle = loaded.apply(model, scale=1.0)
+try:
+    output = model.generate("Prompt to steer")
+finally:
+    handle.remove()
+```
 
 ## Package Layout
 
