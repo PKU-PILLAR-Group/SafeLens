@@ -1,0 +1,108 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+import yaml
+
+import SafeLens
+from SafeLens.nla import (
+    INJECT_PLACEHOLDER,
+    NLAResult,
+    build_nla_prompt_input_ids,
+    extract_nla_explanation,
+    find_nla_injection_positions,
+    get_nla_profile,
+    inject_nla_vectors,
+    list_nla_profiles,
+    load_nla_config,
+    normalize_nla_activation,
+)
+
+
+class _TinyNLATokenizer:
+    unk_token_id = 0
+
+    def encode(self, text: str, add_special_tokens: bool = False) -> list[int]:
+        del add_special_tokens
+        if text == "X":
+            return [99]
+        return [ord(ch) % 97 + 3 for ch in text]
+
+    def apply_chat_template(
+        self,
+        messages,
+        tokenize: bool,
+        add_generation_prompt: bool,
+    ) -> list[int]:
+        assert tokenize is True
+        assert add_generation_prompt is True
+        content = messages[0]["content"]
+        assert "<concept>X</concept>" in content
+        return [11, 29, 99, 522, 13]
+
+
+def _write_sidecar(path: Path) -> None:
+    payload = {
+        "kind": "nla_model",
+        "role": "av",
+        "d_model": 4,
+        "extraction": {"injection_scale": 3.0, "mse_scale": "sqrt_d_model"},
+        "tokens": {
+            "injection_char": "X",
+            "injection_token_id": 99,
+            "injection_left_neighbor_id": 29,
+            "injection_right_neighbor_id": 522,
+        },
+        "prompt_templates": {"av": "Probe <concept>{injection_char}</concept>."},
+    }
+    path.mkdir()
+    (path / "nla_meta.yaml").write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+
+def test_nla_sidecar_tokenizer_validation_and_injection(tmp_path: Path) -> None:
+    torch = pytest.importorskip("torch")
+    checkpoint = tmp_path / "nla-av"
+    _write_sidecar(checkpoint)
+
+    config = load_nla_config(checkpoint, tokenizer=_TinyNLATokenizer())
+
+    assert config.d_model == 4
+    assert config.injection_scale == 3.0
+    assert config.mse_scale == 2.0
+    assert build_nla_prompt_input_ids(_TinyNLATokenizer(), config) == [11, 29, 99, 522, 13]
+    assert build_nla_prompt_input_ids(
+        _TinyNLATokenizer(),
+        config,
+        prompt=f"custom <concept>{INJECT_PLACEHOLDER}</concept>",
+    ) == [11, 29, 99, 522, 13]
+    assert find_nla_injection_positions([11, 29, 99, 522, 13], config) == [(0, 2)]
+
+    vector = torch.tensor([3.0, 4.0, 0.0, 0.0])
+    scaled = normalize_nla_activation(vector, config.injection_scale)
+    assert torch.allclose(scaled.norm(), torch.tensor(3.0))
+
+    embeddings = torch.zeros(1, 5, 4)
+    injected = inject_nla_vectors(torch.tensor([[11, 29, 99, 522, 13]]), embeddings, vector, config)
+    assert torch.equal(injected[0, 2], vector)
+    assert torch.equal(injected[0, 1], torch.zeros(4))
+
+    assert extract_nla_explanation("x <explanation>semantic feature</explanation> y") == (
+        "semantic feature"
+    )
+    assert extract_nla_explanation("<explanation>semantic feature without close") == (
+        "semantic feature without close"
+    )
+
+
+def test_nla_profiles_and_top_level_exports() -> None:
+    profiles = list_nla_profiles()
+
+    assert profiles[0]["name"] == "qwen2.5-7b-l20"
+    assert get_nla_profile("qwen").av_repo == "kitft/nla-qwen2.5-7b-L20-av"
+    assert SafeLens.NLAResult is NLAResult
+    assert SafeLens.NLAClient.__name__ == "NLAClient"
+    assert SafeLens.list_nla_profiles()[1]["name"] == "gemma3-12b-l32"
+
+    with pytest.raises(ValueError, match="unknown NLA profile"):
+        get_nla_profile("missing")

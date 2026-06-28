@@ -12,6 +12,7 @@ from SafeLens.core.base import (
     SafetyReport,
     TokenAttribution,
 )
+from SafeLens.nla import NLAResult
 from SafeLens.viz import (
     Visualization,
     colored_tokens,
@@ -31,9 +32,15 @@ from SafeLens.viz import (
     plot_histogram,
     plot_line,
     plot_logit_lens,
+    plot_mlp_component_browser,
+    plot_mlp_logit_contribution_browser,
+    plot_mlp_neuron_topk_browser,
+    plot_mlp_output_direction_viewer,
     plot_model_performance,
     plot_neuron_activations,
     plot_next_token_browser,
+    plot_nla_fidelity_heatmap,
+    plot_nla_result_browser,
     plot_scatter,
     plot_text_neuron_activations,
     plot_text_neuron_browser,
@@ -280,7 +287,81 @@ def test_token_log_probs_text_neurons_and_topk_views() -> None:
     )
     assert_visualization(text_browser, "Text Neuron Browser")
     assert 'data-filter="layer"' in text_browser.html
+    assert "click a token to inspect its value" in text_browser.html
+    assert "data-token-index" in text_browser.html
     assert text_browser.data["shape"] == (2, 2, 2)
+
+    mlp_browser = plot_mlp_component_browser(
+        ["A", "B"],
+        {
+            "mlp_out": [
+                [[0.1, -0.2], [0.3, -0.4]],
+                [[0.5, -0.6], [0.7, -0.8]],
+            ],
+            "post": [
+                [[1.1, 1.2], [1.3, 1.4]],
+                [[1.5, 1.6], [1.7, 1.8]],
+            ],
+        },
+        layer_labels=["L0", "L1"],
+        dimension_labels={
+            "mlp_out": ["resid_d0", "resid_d1"],
+            "post": ["mlp_n0", "mlp_n1"],
+        },
+    )
+    assert_visualization(mlp_browser, "MLP Component Browser")
+    assert 'data-filter="component"' in mlp_browser.html
+    assert 'data-filter="dimension"' in mlp_browser.html
+    assert "click a token to inspect its MLP value" in mlp_browser.html
+    assert "mlp_n1" in mlp_browser.html
+    assert mlp_browser.data["shape"] == (2, 1, 2, 2, 2)
+
+    mlp_topk = plot_mlp_neuron_topk_browser(
+        ["A", "B"],
+        [
+            [[0.1, -0.2, 0.9], [0.3, -0.4, 0.5]],
+            [[0.5, -0.6, 0.2], [0.7, -0.8, 0.1]],
+        ],
+        layer_labels=["L0", "L1"],
+        neuron_labels=["mlp_n0", "mlp_n1", "mlp_n2"],
+        max_k=2,
+    )
+    assert_visualization(mlp_topk, "MLP Neuron Top-K Browser")
+    assert 'data-filter="mode"' in mlp_topk.html
+    assert "safelens-rank-list" in mlp_topk.html
+    assert mlp_topk.data["shape"] == (2, 2, 3)
+
+    direction_viewer = plot_mlp_output_direction_viewer(
+        [
+            [
+                [0.1, -0.4, 0.3],
+                [-0.2, 0.5, 0.0],
+            ]
+        ],
+        layer_labels=["L0"],
+        neuron_labels=["mlp_n0", "mlp_n1"],
+        residual_labels=["resid_d0", "resid_d1", "resid_d2"],
+        vocab_positive=[[[("safe", 1.2), ("answer", 0.8)], [("block", 0.7)]]],
+        vocab_negative=[[[("unsafe", -1.1)], [("ignore", -0.6)]]],
+        max_items=2,
+    )
+    assert_visualization(direction_viewer, "MLP Output Direction Viewer")
+    assert "Positive residual directions" in direction_viewer.html
+    assert "Promoted vocab tokens" in direction_viewer.html
+    assert direction_viewer.data["shape"] == (1, 2, 3)
+    assert direction_viewer.data["has_vocab"] is True
+
+    contribution_browser = plot_mlp_logit_contribution_browser(
+        {
+            "actual next token": [[0.1, -0.2], [0.3, -0.4]],
+            "model top token": [[0.5, 0.6], [-0.7, 0.8]],
+        },
+        layer_labels=["L0", "L1"],
+        token_labels=["A", "B"],
+    )
+    assert_visualization(contribution_browser, "MLP Logit Contribution Browser")
+    assert 'data-filter="target"' in contribution_browser.html
+    assert contribution_browser.data["matrix_labels"] == ["actual next token", "model top token"]
 
     variable_length_text_browser = plot_text_neuron_browser(
         [["A", "B", "C"], ["D"]],
@@ -374,6 +455,53 @@ def test_token_log_probs_text_neurons_and_topk_views() -> None:
     assert 'data-filter="neuron"' in top_sample_browser.html
 
 
+def test_nla_result_visualizations() -> None:
+    rows = [
+        NLAResult(
+            explanation="This activation tracks safe refusal language.",
+            sample_id="demo",
+            token_index=0,
+            token="Safe",
+            source="layer_20.resid_post",
+            model_name="Qwen/Qwen2.5-7B-Instruct",
+            layer=20,
+            component="resid_post",
+            profile="qwen2.5-7b-l20",
+            activation_norm=123.0,
+            mse_nrm=0.2,
+            cosine=0.9,
+        ),
+        {
+            "explanation": "This activation is weaker and less reconstructable.",
+            "sample_id": "demo",
+            "token_index": 1,
+            "token": "Lens",
+            "source": "layer_20.resid_post",
+            "model_name": "Qwen/Qwen2.5-7B-Instruct",
+            "layer": 20,
+            "component": "resid_post",
+            "activation_norm": 80.0,
+            "mse_nrm": 1.2,
+            "cosine": 0.4,
+        },
+    ]
+
+    browser = plot_nla_result_browser(rows)
+    assert_visualization(browser, "NLA Result Browser")
+    assert "safelens-nla-browser" in browser.html
+    assert 'data-filter="metric"' in browser.html
+    assert "safe refusal language" in browser.html
+    assert browser.data["rows"][0]["cosine"] == 0.9
+
+    heatmap = plot_nla_fidelity_heatmap(rows, metric="cosine")
+    assert_visualization(heatmap, "NLA Fidelity Heatmap")
+    assert heatmap.data["metric"] == "cosine"
+    assert heatmap.data["x_labels"] == ["0: Safe", "1: Lens"]
+
+    with pytest.raises(ValueError, match="metric"):
+        plot_nla_fidelity_heatmap(rows, metric="missing")
+
+
 def test_report_renderers() -> None:
     report = SafetyReport(
         sample_id="unsafe",
@@ -407,8 +535,14 @@ def test_top_level_exports_and_circuitsvis_bridge_error() -> None:
     assert SafeLens.plot_bar is plot_bar
     assert SafeLens.plot_histogram is plot_histogram
     assert SafeLens.plot_next_token_browser is plot_next_token_browser
+    assert SafeLens.plot_mlp_component_browser is plot_mlp_component_browser
+    assert SafeLens.plot_mlp_neuron_topk_browser is plot_mlp_neuron_topk_browser
+    assert SafeLens.plot_mlp_output_direction_viewer is plot_mlp_output_direction_viewer
+    assert SafeLens.plot_mlp_logit_contribution_browser is plot_mlp_logit_contribution_browser
     assert SafeLens.plot_text_neuron_browser is plot_text_neuron_browser
     assert SafeLens.plot_topk_tokens_browser is plot_topk_tokens_browser
+    assert SafeLens.plot_nla_result_browser is plot_nla_result_browser
+    assert SafeLens.plot_nla_fidelity_heatmap is plot_nla_fidelity_heatmap
 
     if importlib.util.find_spec("circuitsvis") is None:
         with pytest.raises(ImportError, match="circuitsvis is not installed"):

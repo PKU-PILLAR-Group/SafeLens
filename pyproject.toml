@@ -54,6 +54,12 @@ models = [
   "torch>=2",
   "transformers>=5.8"
 ]
+nla = [
+  "huggingface-hub>=0.24",
+  "safetensors>=0.4",
+  "torch>=2",
+  "transformers>=5.8"
+]
 modelscope = [
   "modelscope>=1.15",
   "torch>=2",

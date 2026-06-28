@@ -27,6 +27,8 @@ safety_scan.json
 outputs/
 REPORT.md
 report_*.md
+presentations/SafeLens_Project_Overview.pptx
+presentations/SafeLens_Visualization_Overview.pptx
 tests/.hf-real-flow/
 tests/hf-real-flow-artifacts/
 tests/.qwen3-real-flow/

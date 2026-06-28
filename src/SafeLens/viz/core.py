@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import math
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from html import escape
 from itertools import count
@@ -12,10 +12,12 @@ from pathlib import Path
 from typing import Any
 
 from SafeLens.core.base import RunReport, SafetyReport
+from SafeLens.nla import NLAResult
 
 Number = int | float
 _VIZ_ID_COUNTER = count()
 _TOPK_SAMPLE_HEADERS = ["layer", "neuron", "rank", "sample", "max_token", "max_value"]
+_NLA_METRICS = ("cosine", "mse_nrm", "activation_norm")
 
 
 @dataclass(slots=True)
@@ -1006,6 +1008,389 @@ def plot_text_neuron_browser(
     )
 
 
+def plot_mlp_component_browser(
+    tokens: Sequence[Any],
+    components: Mapping[Any, Any] | Any,
+    *,
+    sample_labels: Sequence[Any] | None = None,
+    component_labels: Sequence[Any] | None = None,
+    layer_labels: Sequence[Any] | None = None,
+    dimension_labels: Sequence[Any] | Mapping[Any, Sequence[Any]] | None = None,
+    title: str | None = "MLP Component Browser",
+) -> Visualization:
+    """Interactively browse MLP component activations by component, token, layer, and dimension.
+
+    `components` may be a mapping like `{"mlp_out": acts, "post": acts}` where each
+    activation tensor has shape `[token, layer, dimension]` or
+    `[sample, token, layer, dimension]`. Non-mapping inputs may have shape
+    `[component, token, layer, dimension]` or
+    `[component, sample, token, layer, dimension]`.
+    """
+
+    component_keys, component_names, component_sources = _normalize_mlp_component_sources(
+        components,
+        component_labels=component_labels,
+    )
+    normalized_components: list[list[list[list[list[float]]]]] = []
+    reference_tokens: list[list[str]] | None = None
+    reference_shape: tuple[int, int, int] | None = None
+    for source in component_sources:
+        token_samples, normalized, shape = _normalize_text_neuron_inputs(tokens, source)
+        if reference_tokens is None:
+            reference_tokens = token_samples
+            reference_shape = shape
+        else:
+            if token_samples != reference_tokens:
+                raise ValueError("all MLP components must use the same token samples.")
+            if reference_shape is not None and shape[1:] != reference_shape[1:]:
+                raise ValueError("all MLP components must share layer and dimension counts.")
+        normalized_components.append(normalized)
+
+    if reference_tokens is None or reference_shape is None:
+        raise ValueError("components must contain at least one MLP component.")
+
+    sample_names = _labels_or_indices(sample_labels, len(reference_tokens), "sample")
+    layer_names = _labels_or_indices(layer_labels, reference_shape[1], "layer")
+    dimension_names = _dimension_labels_for_components(
+        dimension_labels,
+        component_keys=component_keys,
+        component_labels=component_names,
+        dimension_count=reference_shape[2],
+    )
+    all_values = [
+        value
+        for component in normalized_components
+        for sample in component
+        for token_values in sample
+        for layer_values in token_values
+        for value in layer_values
+    ]
+    min_value, max_value = _value_range(all_values)
+    viz_id = _next_viz_id("mlp-component-browser")
+    payload = {
+        "tokens": reference_tokens,
+        "activations": normalized_components,
+        "sampleLabels": sample_names,
+        "componentLabels": component_names,
+        "layerLabels": layer_names,
+        "dimensionLabels": dimension_names,
+        "min": min_value,
+        "max": max_value,
+    }
+    controls = (
+        '<div class="safelens-controls">'
+        f"{_select_control(viz_id, 'component', component_names)}"
+        f"{_select_control(viz_id, 'sample', sample_names)}"
+        f"{_select_control(viz_id, 'layer', layer_names)}"
+        f"{_select_control(viz_id, 'dimension', dimension_names[0])}"
+        "</div>"
+    )
+    body = (
+        f'<div id="{viz_id}" class="safelens-mlp-component-browser">'
+        f'{controls}<div class="safelens-token-strip" data-role="tokens"></div>'
+        '<div class="safelens-focus-readout" data-role="readout"></div>'
+        f"{_legend(min_value, max_value)}"
+        f"{_json_script(viz_id, payload)}"
+        f"{_mlp_component_browser_script(viz_id)}</div>"
+    )
+    return Visualization(
+        html=_wrap_panel("mlp-component-browser", title, body),
+        title=title,
+        data={
+            "tokens": reference_tokens,
+            "shape": (
+                len(normalized_components),
+                len(reference_tokens),
+                *reference_shape,
+            ),
+            "sample_labels": sample_names,
+            "component_labels": component_names,
+            "layer_labels": layer_names,
+            "dimension_labels": dimension_names,
+        },
+    )
+
+
+def plot_mlp_neuron_topk_browser(
+    tokens: Sequence[Any],
+    activations: Any,
+    *,
+    max_k: int = 10,
+    sample_labels: Sequence[Any] | None = None,
+    layer_labels: Sequence[Any] | None = None,
+    neuron_labels: Sequence[Any] | None = None,
+    title: str | None = "MLP Neuron Top-K Browser",
+) -> Visualization:
+    """Browse the most active MLP hidden neurons for each token and layer.
+
+    `activations` should contain MLP hidden activations such as Qwen's `post` hook,
+    with shape `[token, layer, neuron]` or `[sample, token, layer, neuron]`.
+    """
+
+    if max_k < 1:
+        raise ValueError("max_k must be at least 1.")
+    token_samples, activation_samples, shape = _normalize_text_neuron_inputs(
+        tokens,
+        activations,
+    )
+    sample_names = _labels_or_indices(sample_labels, len(activation_samples), "sample")
+    layer_names = _labels_or_indices(layer_labels, shape[1], "layer")
+    neuron_names = _labels_or_indices(neuron_labels, shape[2], "neuron")
+    all_values = [
+        value
+        for sample in activation_samples
+        for token_values in sample
+        for layer_values in token_values
+        for value in layer_values
+    ]
+    min_value, max_value = _value_range(all_values)
+    viz_id = _next_viz_id("mlp-neuron-topk-browser")
+    first_tokens = token_samples[0] if token_samples else []
+    token_control = (
+        f'<label class="safelens-control-label" for="{viz_id}-token">token '
+        f'<select id="{viz_id}-token" class="safelens-select" data-filter="token">'
+        + "".join(
+            f'<option value="{idx}">{escape(f"{idx}: {token}")}</option>'
+            for idx, token in enumerate(first_tokens)
+        )
+        + "</select></label>"
+    )
+    mode_control = (
+        '<label class="safelens-control-label">rank by '
+        '<select class="safelens-select" data-filter="mode">'
+        '<option value="absolute">absolute</option>'
+        '<option value="positive">positive</option>'
+        '<option value="negative">negative</option>'
+        "</select></label>"
+    )
+    payload = {
+        "tokens": token_samples,
+        "activations": activation_samples,
+        "sampleLabels": sample_names,
+        "layerLabels": layer_names,
+        "neuronLabels": neuron_names,
+        "maxK": max_k,
+        "min": min_value,
+        "max": max_value,
+    }
+    controls = (
+        '<div class="safelens-controls">'
+        f"{_select_control(viz_id, 'sample', sample_names)}"
+        f"{_select_control(viz_id, 'layer', layer_names)}"
+        f"{token_control}"
+        f"{mode_control}"
+        "</div>"
+    )
+    body = (
+        f'<div id="{viz_id}" class="safelens-mlp-neuron-topk-browser">'
+        f'{controls}<div class="safelens-token-strip" data-role="tokens"></div>'
+        '<div class="safelens-focus-readout" data-role="readout"></div>'
+        '<div class="safelens-rank-list" data-role="rank-list"></div>'
+        f"{_json_script(viz_id, payload)}"
+        f"{_mlp_neuron_topk_browser_script(viz_id)}</div>"
+    )
+    return Visualization(
+        html=_wrap_panel("mlp-neuron-topk-browser", title, body),
+        title=title,
+        data={
+            "tokens": token_samples,
+            "shape": shape,
+            "sample_labels": sample_names,
+            "layer_labels": layer_names,
+            "neuron_labels": neuron_names,
+            "max_k": max_k,
+        },
+    )
+
+
+def plot_mlp_output_direction_viewer(
+    output_directions: Any,
+    *,
+    layer_labels: Sequence[Any] | None = None,
+    neuron_labels: Sequence[Any] | None = None,
+    residual_labels: Sequence[Any] | None = None,
+    vocab_scores: Any | None = None,
+    vocab_labels: Sequence[Any] | None = None,
+    vocab_positive: Any | None = None,
+    vocab_negative: Any | None = None,
+    max_items: int = 10,
+    title: str | None = "MLP Output Direction Viewer",
+) -> Visualization:
+    """Show where MLP hidden neurons write in residual and optional vocab space.
+
+    `output_directions` should have shape `[layer, neuron, residual_dim]` or
+    `[neuron, residual_dim]`. Optional `vocab_scores` can have shape
+    `[layer, neuron, vocab]`; for large vocabularies, pass precomputed
+    `vocab_positive` and `vocab_negative` entry grids instead.
+    """
+
+    if max_items < 1:
+        raise ValueError("max_items must be at least 1.")
+    directions, shape = _normalize_3d_numeric(output_directions, name="output_directions")
+    layer_count, neuron_count, residual_count = shape
+    layer_names = _labels_or_indices(layer_labels, layer_count, "layer")
+    neuron_names = _labels_or_indices(neuron_labels, neuron_count, "neuron")
+    residual_names = _labels_or_indices(residual_labels, residual_count, "residual")
+
+    residual_positive = []
+    residual_negative = []
+    for layer in directions:
+        layer_positive = []
+        layer_negative = []
+        for direction in layer:
+            layer_positive.append(
+                _ranked_value_entries(direction, residual_names, max_items=max_items, largest=True)
+            )
+            layer_negative.append(
+                _ranked_value_entries(direction, residual_names, max_items=max_items, largest=False)
+            )
+        residual_positive.append(layer_positive)
+        residual_negative.append(layer_negative)
+
+    vocab_positive_entries = None
+    vocab_negative_entries = None
+    if vocab_scores is not None:
+        vocab_data, vocab_shape = _normalize_3d_numeric(vocab_scores, name="vocab_scores")
+        if vocab_shape[:2] != shape[:2]:
+            raise ValueError("vocab_scores must share layer and neuron dimensions.")
+        vocab_names = _labels_or_indices(vocab_labels, vocab_shape[2], "vocab")
+        vocab_positive_entries = []
+        vocab_negative_entries = []
+        for layer in vocab_data:
+            layer_positive = []
+            layer_negative = []
+            for scores in layer:
+                layer_positive.append(
+                    _ranked_value_entries(scores, vocab_names, max_items=max_items, largest=True)
+                )
+                layer_negative.append(
+                    _ranked_value_entries(scores, vocab_names, max_items=max_items, largest=False)
+                )
+            vocab_positive_entries.append(layer_positive)
+            vocab_negative_entries.append(layer_negative)
+    if vocab_positive is not None:
+        vocab_positive_entries = _normalize_ranked_entry_grid(
+            vocab_positive,
+            layer_count=layer_count,
+            neuron_count=neuron_count,
+            name="vocab_positive",
+        )
+    if vocab_negative is not None:
+        vocab_negative_entries = _normalize_ranked_entry_grid(
+            vocab_negative,
+            layer_count=layer_count,
+            neuron_count=neuron_count,
+            name="vocab_negative",
+        )
+
+    viz_id = _next_viz_id("mlp-output-direction-viewer")
+    payload = {
+        "layerLabels": layer_names,
+        "neuronLabels": neuron_names,
+        "residualPositive": residual_positive,
+        "residualNegative": residual_negative,
+        "vocabPositive": vocab_positive_entries,
+        "vocabNegative": vocab_negative_entries,
+    }
+    controls = (
+        '<div class="safelens-controls">'
+        f"{_select_control(viz_id, 'layer', layer_names)}"
+        f"{_select_control(viz_id, 'neuron', neuron_names)}"
+        "</div>"
+    )
+    vocab_panels = ""
+    if vocab_positive_entries is not None or vocab_negative_entries is not None:
+        vocab_panels = (
+            '<section class="safelens-direction-panel">'
+            '<div class="safelens-panel-title">Promoted vocab tokens</div>'
+            '<div data-role="vocab-positive"></div></section>'
+            '<section class="safelens-direction-panel">'
+            '<div class="safelens-panel-title">Suppressed vocab tokens</div>'
+            '<div data-role="vocab-negative"></div></section>'
+        )
+    body = (
+        f'<div id="{viz_id}" class="safelens-mlp-output-direction-viewer">'
+        f"{controls}"
+        '<div class="safelens-focus-readout" data-role="readout"></div>'
+        '<div class="safelens-direction-grid">'
+        '<section class="safelens-direction-panel">'
+        '<div class="safelens-panel-title">Positive residual directions</div>'
+        '<div data-role="residual-positive"></div></section>'
+        '<section class="safelens-direction-panel">'
+        '<div class="safelens-panel-title">Negative residual directions</div>'
+        '<div data-role="residual-negative"></div></section>'
+        f"{vocab_panels}</div>"
+        f"{_json_script(viz_id, payload)}"
+        f"{_mlp_output_direction_viewer_script(viz_id)}</div>"
+    )
+    return Visualization(
+        html=_wrap_panel("mlp-output-direction-viewer", title, body),
+        title=title,
+        data={
+            "shape": shape,
+            "layer_labels": layer_names,
+            "neuron_labels": neuron_names,
+            "residual_labels": residual_names,
+            "has_vocab": vocab_positive_entries is not None or vocab_negative_entries is not None,
+        },
+    )
+
+
+def plot_mlp_logit_contribution_browser(
+    contributions: Mapping[Any, Any] | Any,
+    *,
+    target_labels: Sequence[Any] | None = None,
+    layer_labels: Sequence[Any] | None = None,
+    token_labels: Sequence[Any] | None = None,
+    title: str | None = "MLP Logit Contribution Browser",
+) -> Visualization:
+    """Browse MLP direct logit contributions as target x layer x token heatmaps."""
+
+    if isinstance(contributions, Mapping):
+        matrices = [_as_2d_numbers(value) for value in contributions.values()]
+        matrix_names = (
+            [str(label) for label in target_labels]
+            if target_labels is not None
+            else [str(key) for key in contributions.keys()]
+        )
+    else:
+        data = _to_nested(contributions)
+        shape = _shape(data)
+        if len(shape) == 2:
+            matrices = [_as_2d_numbers(data)]
+        elif len(shape) == 3:
+            matrices = [_as_2d_numbers(matrix) for matrix in data]
+        else:
+            raise ValueError(
+                "contributions must have shape [layer, token] or [target, layer, token]."
+            )
+        matrix_names = (
+            [str(label) for label in target_labels]
+            if target_labels is not None
+            else [f"target_{idx}" for idx in range(len(matrices))]
+        )
+
+    if not matrices:
+        raise ValueError("contributions must contain at least one matrix.")
+    height = len(matrices[0])
+    width = len(matrices[0][0]) if height else 0
+    y_names = _labels_or_indices(layer_labels, height, "layer")
+    x_names = _labels_or_indices(token_labels, width, "token")
+    return _matrix_browser(
+        matrices,
+        matrix_names,
+        x_labels=x_names,
+        y_labels=y_names,
+        title=title,
+        kind="mlp-logit-contribution-browser",
+        selector_label="target",
+        color="red_blue",
+        allow_transpose=False,
+        x_axis="Token position",
+        y_axis="Layer",
+    )
+
+
 def plot_topk_tokens(
     tokens: Sequence[Any],
     activations: Any,
@@ -1411,6 +1796,139 @@ def plot_topk_samples_browser(
     )
 
 
+def plot_nla_result_browser(
+    results: Sequence[NLAResult | Mapping[str, Any]],
+    *,
+    title: str | None = "NLA Result Browser",
+    default_metric: str = "cosine",
+) -> Visualization:
+    """Interactively browse Natural Language Autoencoder explanations.
+
+    The input is normally produced by ``SafeLens.nla.NLAClient``. Mappings with
+    the same fields as ``NLAResult.to_dict()`` are also accepted for saved runs.
+    """
+
+    rows = _normalize_nla_results(results)
+    if default_metric not in _NLA_METRICS:
+        raise ValueError(f"default_metric must be one of {_NLA_METRICS!r}.")
+    sample_labels = _ordered_unique(row["sample_id"] for row in rows)
+    source_labels = _ordered_unique(row["source"] for row in rows)
+    metric_ranges = {
+        metric: _value_range([row[metric] for row in rows if row[metric] is not None])
+        for metric in _NLA_METRICS
+    }
+    for metric, bounds in list(metric_ranges.items()):
+        if bounds == (0.0, 0.0):
+            metric_ranges[metric] = (0.0, 1.0)
+
+    viz_id = _next_viz_id("nla-result-browser")
+    metric_options = "".join(
+        f'<option value="{escape(metric)}"{" selected" if metric == default_metric else ""}>'
+        f"{escape(metric)}</option>"
+        for metric in _NLA_METRICS
+    )
+    controls = (
+        '<div class="safelens-controls">'
+        f"{_select_control(viz_id, 'sample', sample_labels, include_all=True)}"
+        f"{_select_control(viz_id, 'source', source_labels, include_all=True)}"
+        '<label class="safelens-control-label">metric '
+        f'<select class="safelens-select" data-filter="metric">{metric_options}</select></label>'
+        '<input class="safelens-input" data-filter="query" '
+        'placeholder="filter explanations or tokens" />'
+        "</div>"
+    )
+    body = (
+        f'<div id="{viz_id}" class="safelens-nla-browser">'
+        f"{controls}"
+        '<div class="safelens-nla-summary" data-role="summary"></div>'
+        '<div class="safelens-nla-layout">'
+        '<section class="safelens-nla-main">'
+        '<div class="safelens-nla-section-title">Token timeline</div>'
+        '<div class="safelens-nla-token-strip" data-role="tokens"></div>'
+        '<div class="safelens-focus-readout" data-role="readout"></div>'
+        '<div class="safelens-nla-list-head">'
+        "<span>Explanation rows</span>"
+        '<span data-role="metric-label"></span>'
+        "</div>"
+        '<div class="safelens-nla-list" data-role="list"></div>'
+        "</section>"
+        '<aside class="safelens-nla-detail" data-role="detail"></aside>'
+        "</div>"
+        f"{_json_script(viz_id, {'rows': rows, 'metricRanges': metric_ranges})}"
+        f"{_nla_result_browser_script(viz_id)}</div>"
+    )
+    return Visualization(
+        html=_wrap_panel("nla-result-browser", title, body),
+        title=title,
+        data={
+            "rows": rows,
+            "sample_labels": sample_labels,
+            "source_labels": source_labels,
+            "metric_ranges": metric_ranges,
+        },
+    )
+
+
+def plot_nla_fidelity_heatmap(
+    results: Sequence[NLAResult | Mapping[str, Any]],
+    *,
+    metric: str = "cosine",
+    title: str | None = "NLA Fidelity Heatmap",
+) -> Visualization:
+    """Render an NLA metric as sample/layer heatmaps over token positions."""
+
+    rows = _normalize_nla_results(results)
+    if metric not in _NLA_METRICS:
+        raise ValueError(f"metric must be one of {_NLA_METRICS!r}.")
+    sample_labels = _ordered_unique(row["sample_id"] for row in rows)
+    layer_labels = _ordered_unique(_nla_layer_label(row) for row in rows)
+    positions: list[int] = []
+    seen_positions: set[int] = set()
+    for row in rows:
+        position = int(row["token_index"])
+        if position not in seen_positions:
+            positions.append(position)
+            seen_positions.add(position)
+    token_labels = [_nla_token_label_for_position(rows, position) for position in positions]
+    matrices = []
+    matrix_labels = []
+    for sample in sample_labels:
+        matrix = []
+        for layer in layer_labels:
+            values = []
+            for position in positions:
+                match = next(
+                    (
+                        row
+                        for row in rows
+                        if row["sample_id"] == sample
+                        and _nla_layer_label(row) == layer
+                        and row["token_index"] == position
+                    ),
+                    None,
+                )
+                values.append(_nla_metric_value(match, metric) if match is not None else 0.0)
+            matrix.append(values)
+        matrices.append(matrix)
+        matrix_labels.append(sample)
+    viz = _matrix_browser(
+        matrices,
+        matrix_labels,
+        x_labels=token_labels,
+        y_labels=layer_labels,
+        title=title,
+        kind="nla-fidelity-heatmap",
+        selector_label="sample",
+        color="blue" if metric in {"cosine", "activation_norm"} else "red_blue",
+        allow_transpose=False,
+        x_axis="Token position",
+        y_axis="NLA layer",
+    )
+    viz.data["rows"] = rows
+    viz.data["metric"] = metric
+    return viz
+
+
 def to_circuitsvis_colored_tokens(
     tokens: Sequence[Any],
     values: Sequence[Any],
@@ -1751,7 +2269,8 @@ def _svg_heatmap(
     else:
         cell = 28
     left = min(180, max(78, max_y_label * 7 + 28))
-    top = min(220, max(96, max_x_label * 7 + 52))
+    rotated_label_height = int(max_x_label * 5.2 + 38)
+    top = min(220, max(70, rotated_label_height))
     right = 24
     bottom = 46
     svg_width = left + width * cell + right
@@ -2137,7 +2656,8 @@ def _matrix_browser_script(viz_id: str) -> str:
     const maxY = yLabels.reduce((acc, label) => Math.max(acc, String(label).length), 1);
     const cell = Math.max(24, Math.min(48, Math.floor(720 / Math.max(width, 1))));
     const left = Math.min(180, Math.max(78, maxY * 7 + 28));
-    const top = Math.min(220, Math.max(96, maxX * 7 + 52));
+    const rotatedLabelHeight = Math.floor(maxX * 5.2 + 38);
+    const top = Math.min(220, Math.max(70, rotatedLabelHeight));
     const right = 24;
     const bottom = 46;
     const svgWidth = left + width * cell + right;
@@ -2763,12 +3283,109 @@ def _text_neuron_browser_script(viz_id: str) -> str:
   const root = document.getElementById("{viz_id}");
   const dataNode = document.getElementById("{viz_id}-data");
   if (!root || !dataNode) return;
+    const data = JSON.parse(dataNode.textContent);
+    const tokenContainer = root.querySelector('[data-role="tokens"]');
+    const readout = root.querySelector('[data-role="readout"]');
+    const sampleSelect = root.querySelector('[data-filter="sample"]');
+    const layerSelect = root.querySelector('[data-filter="layer"]');
+    const neuronSelect = root.querySelector('[data-filter="neuron"]');
+    let selectedToken = null;
+    function valueColor(value) {{
+      const minValue = data.min;
+      const maxValue = data.max;
+      const midpoint = minValue <= 0 && maxValue >= 0 ? 0 : (minValue + maxValue) / 2;
+      let red, green, blue, intensity, denominator;
+    if (value >= midpoint) {{
+      denominator = maxValue - midpoint || 1;
+      intensity = Math.min(1, (value - midpoint) / denominator);
+      red = 255;
+      green = Math.round(245 - 105 * intensity);
+      blue = Math.round(245 - 125 * intensity);
+    }} else {{
+      denominator = midpoint - minValue || 1;
+      intensity = Math.min(1, (midpoint - value) / denominator);
+      red = Math.round(245 - 125 * intensity);
+      green = Math.round(248 - 88 * intensity);
+      blue = 255;
+    }}
+    const luminance = (0.299 * red + 0.587 * green + 0.114 * blue) / 255;
+    return [`rgb(${{red}},${{green}},${{blue}})`, luminance > 0.58 ? "#111827" : "#ffffff"];
+    }}
+    function render() {{
+      const sample = Number(sampleSelect.value);
+      const layer = Number(layerSelect.value);
+      const neuron = Number(neuronSelect.value);
+      const tokens = data.tokens[sample];
+      if (selectedToken !== null && selectedToken >= tokens.length) selectedToken = null;
+      tokenContainer.innerHTML = "";
+      tokens.forEach((token, tokenIdx) => {{
+        const value = Number(data.activations[sample][tokenIdx][layer][neuron]);
+        const colors = valueColor(value);
+        const span = document.createElement("span");
+        span.className = "safelens-token safelens-live-token";
+        if (selectedToken === tokenIdx) span.classList.add("is-active");
+        span.setAttribute("role", "button");
+        span.setAttribute("data-token-index", String(tokenIdx));
+        span.tabIndex = 0;
+        span.textContent = token;
+        span.style.background = colors[0];
+        span.style.color = colors[1];
+        span.title = `${{token}}: ${{value.toPrecision(6)}}`;
+        function selectToken() {{
+          selectedToken = tokenIdx;
+          render();
+        }}
+        span.addEventListener("click", selectToken);
+        span.addEventListener("keydown", (event) => {{
+          if (event.key === "Enter" || event.key === " ") {{
+            event.preventDefault();
+            selectToken();
+          }}
+        }});
+        tokenContainer.appendChild(span);
+      }});
+      if (readout) {{
+        const prefix =
+          `${{data.sampleLabels[sample]}} / ${{data.layerLabels[layer]}} / ` +
+          `${{data.neuronLabels[neuron]}}`;
+        if (selectedToken === null) {{
+          readout.textContent = `${{prefix}} - click a token to inspect its value.`;
+        }} else {{
+          const token = tokens[selectedToken];
+          const value = Number(data.activations[sample][selectedToken][layer][neuron]);
+          readout.textContent =
+            `${{prefix}} / token[${{selectedToken}}] "${{token}}" = ` +
+            `${{value.toPrecision(8)}}`;
+        }}
+      }}
+    }}
+    [sampleSelect, layerSelect, neuronSelect].forEach((select) => {{
+      select.addEventListener("change", () => {{
+        selectedToken = null;
+        render();
+      }});
+    }});
+  render();
+}})();
+</script>
+"""
+
+
+def _mlp_component_browser_script(viz_id: str) -> str:
+    return f"""
+<script>
+(function() {{
+  const root = document.getElementById("{viz_id}");
+  const dataNode = document.getElementById("{viz_id}-data");
+  if (!root || !dataNode) return;
   const data = JSON.parse(dataNode.textContent);
   const tokenContainer = root.querySelector('[data-role="tokens"]');
   const readout = root.querySelector('[data-role="readout"]');
+  const componentSelect = root.querySelector('[data-filter="component"]');
   const sampleSelect = root.querySelector('[data-filter="sample"]');
   const layerSelect = root.querySelector('[data-filter="layer"]');
-  const neuronSelect = root.querySelector('[data-filter="neuron"]');
+  const dimensionSelect = root.querySelector('[data-filter="dimension"]');
+  let selectedToken = null;
   function valueColor(value) {{
     const minValue = data.min;
     const maxValue = data.max;
@@ -2790,31 +3407,295 @@ def _text_neuron_browser_script(viz_id: str) -> str:
     const luminance = (0.299 * red + 0.587 * green + 0.114 * blue) / 255;
     return [`rgb(${{red}},${{green}},${{blue}})`, luminance > 0.58 ? "#111827" : "#ffffff"];
   }}
+  function syncDimensionOptions() {{
+    const component = Number(componentSelect.value);
+    const selected = Number(dimensionSelect.value);
+    const labels = data.dimensionLabels[component];
+    dimensionSelect.innerHTML = "";
+    labels.forEach((label, index) => {{
+      const option = document.createElement("option");
+      option.value = String(index);
+      option.textContent = label;
+      dimensionSelect.appendChild(option);
+    }});
+    const nextValue = Number.isFinite(selected) ? Math.min(selected, labels.length - 1) : 0;
+    dimensionSelect.value = String(Math.max(0, nextValue));
+  }}
   function render() {{
+    const component = Number(componentSelect.value);
     const sample = Number(sampleSelect.value);
     const layer = Number(layerSelect.value);
-    const neuron = Number(neuronSelect.value);
+    const dimension = Number(dimensionSelect.value);
+    const tokens = data.tokens[sample];
+    if (selectedToken !== null && selectedToken >= tokens.length) selectedToken = null;
     tokenContainer.innerHTML = "";
-    data.tokens[sample].forEach((token, tokenIdx) => {{
-      const value = Number(data.activations[sample][tokenIdx][layer][neuron]);
+    tokens.forEach((token, tokenIdx) => {{
+      const value = Number(data.activations[component][sample][tokenIdx][layer][dimension]);
       const colors = valueColor(value);
       const span = document.createElement("span");
       span.className = "safelens-token safelens-live-token";
+      if (selectedToken === tokenIdx) span.classList.add("is-active");
+      span.setAttribute("role", "button");
+      span.setAttribute("data-token-index", String(tokenIdx));
+      span.tabIndex = 0;
       span.textContent = token;
       span.style.background = colors[0];
       span.style.color = colors[1];
-      span.title = `${{token}}: ${{value.toPrecision(6)}}`;
+      span.title =
+        `${{data.componentLabels[component]}} / ${{data.layerLabels[layer]}} / ` +
+        `${{data.dimensionLabels[component][dimension]}}: ${{value.toPrecision(6)}}`;
+      function selectToken() {{
+        selectedToken = tokenIdx;
+        render();
+      }}
+      span.addEventListener("click", selectToken);
+      span.addEventListener("keydown", (event) => {{
+        if (event.key === "Enter" || event.key === " ") {{
+          event.preventDefault();
+          selectToken();
+        }}
+      }});
       tokenContainer.appendChild(span);
     }});
     if (readout) {{
-      readout.textContent =
-        `${{data.sampleLabels[sample]}} / ${{data.layerLabels[layer]}} / ` +
-        `${{data.neuronLabels[neuron]}}`;
+      const prefix =
+        `${{data.componentLabels[component]}} / ${{data.sampleLabels[sample]}} / ` +
+        `${{data.layerLabels[layer]}} / ${{data.dimensionLabels[component][dimension]}}`;
+      if (selectedToken === null) {{
+        readout.textContent = `${{prefix}} - click a token to inspect its MLP value.`;
+      }} else {{
+        const token = tokens[selectedToken];
+        const value = Number(data.activations[component][sample][selectedToken][layer][dimension]);
+        readout.textContent =
+          `${{prefix}} / token[${{selectedToken}}] "${{token}}" = ` +
+          `${{value.toPrecision(8)}}`;
+      }}
     }}
   }}
-  [sampleSelect, layerSelect, neuronSelect].forEach((select) => {{
+  componentSelect.addEventListener("change", () => {{
+    selectedToken = null;
+    syncDimensionOptions();
+    render();
+  }});
+  [sampleSelect, layerSelect, dimensionSelect].forEach((select) => {{
+    select.addEventListener("change", () => {{
+      selectedToken = null;
+      render();
+    }});
+  }});
+  syncDimensionOptions();
+  render();
+}})();
+</script>
+"""
+
+
+def _mlp_neuron_topk_browser_script(viz_id: str) -> str:
+    return f"""
+<script>
+(function() {{
+  const root = document.getElementById("{viz_id}");
+  const dataNode = document.getElementById("{viz_id}-data");
+  if (!root || !dataNode) return;
+  const data = JSON.parse(dataNode.textContent);
+  const sampleSelect = root.querySelector('[data-filter="sample"]');
+  const layerSelect = root.querySelector('[data-filter="layer"]');
+  const tokenSelect = root.querySelector('[data-filter="token"]');
+  const modeSelect = root.querySelector('[data-filter="mode"]');
+  const tokenContainer = root.querySelector('[data-role="tokens"]');
+  const rankList = root.querySelector('[data-role="rank-list"]');
+  const readout = root.querySelector('[data-role="readout"]');
+  function formatValue(value) {{
+    const absValue = Math.abs(value);
+    if (absValue === 0) return "0";
+    if (absValue >= 0.01 && absValue < 1000) {{
+      return value.toFixed(4).replace(/(\\.\\d*?[1-9])0+$/, "$1").replace(/\\.0+$/, "");
+    }}
+    return value.toExponential(2);
+  }}
+  function valueColor(value, minValue, maxValue) {{
+    const midpoint = minValue <= 0 && maxValue >= 0 ? 0 : (minValue + maxValue) / 2;
+    let red, green, blue, intensity, denominator;
+    if (value >= midpoint) {{
+      denominator = maxValue - midpoint || 1;
+      intensity = Math.min(1, (value - midpoint) / denominator);
+      red = 255;
+      green = Math.round(245 - 105 * intensity);
+      blue = Math.round(245 - 125 * intensity);
+    }} else {{
+      denominator = midpoint - minValue || 1;
+      intensity = Math.min(1, (midpoint - value) / denominator);
+      red = Math.round(245 - 125 * intensity);
+      green = Math.round(248 - 88 * intensity);
+      blue = 255;
+    }}
+    const luminance = (0.299 * red + 0.587 * green + 0.114 * blue) / 255;
+    return [`rgb(${{red}},${{green}},${{blue}})`, luminance > 0.58 ? "#111827" : "#ffffff"];
+  }}
+  function scoreForMode(values, mode) {{
+    if (mode === "positive") return Math.max(...values);
+    if (mode === "negative") return Math.min(...values);
+    let best = 0;
+    values.forEach((value) => {{
+      if (Math.abs(value) > Math.abs(best)) best = value;
+    }});
+    return best;
+  }}
+  function syncTokenOptions() {{
+    const sample = Number(sampleSelect.value);
+    const selected = Number(tokenSelect.value);
+    tokenSelect.innerHTML = "";
+    data.tokens[sample].forEach((token, index) => {{
+      const option = document.createElement("option");
+      option.value = String(index);
+      option.textContent = `${{index}}: ${{token}}`;
+      tokenSelect.appendChild(option);
+    }});
+    const nextValue = Number.isFinite(selected)
+      ? Math.min(selected, data.tokens[sample].length - 1)
+      : 0;
+    tokenSelect.value = String(Math.max(0, nextValue));
+  }}
+  function ranked(values, mode) {{
+    return values
+      .map((value, index) => ({{ value: Number(value), index }}))
+      .sort((left, right) => {{
+        if (mode === "positive") return right.value - left.value;
+        if (mode === "negative") return left.value - right.value;
+        return Math.abs(right.value) - Math.abs(left.value);
+      }})
+      .slice(0, data.maxK);
+  }}
+  function renderTokenStrip(sample, layer, tokenIndex, mode) {{
+    const scores = data.tokens[sample].map((_, index) =>
+      scoreForMode(data.activations[sample][index][layer].map(Number), mode)
+    );
+    const minValue = Math.min(...scores);
+    const maxValue = Math.max(...scores);
+    tokenContainer.innerHTML = "";
+    data.tokens[sample].forEach((token, index) => {{
+      const colors = valueColor(scores[index], minValue, maxValue);
+      const span = document.createElement("span");
+      span.className = "safelens-token safelens-live-token";
+      if (index === tokenIndex) span.classList.add("is-active");
+      span.textContent = token;
+      span.style.background = colors[0];
+      span.style.color = colors[1];
+      span.title = `${{token}}: ${{formatValue(scores[index])}}`;
+      span.addEventListener("click", () => {{
+        tokenSelect.value = String(index);
+        render();
+      }});
+      tokenContainer.appendChild(span);
+    }});
+  }}
+  function renderRanks(items) {{
+    const maxAbs = Math.max(...items.map((item) => Math.abs(item.value)), 1e-12);
+    rankList.innerHTML = "";
+    items.forEach((item, rank) => {{
+      const row = document.createElement("div");
+      row.className = "safelens-rank-item";
+      const valueClass = item.value >= 0 ? "is-positive" : "is-negative";
+      row.innerHTML =
+        `<div class="safelens-rank-main">` +
+        `<span class="safelens-rank-label">#${{rank + 1}} ` +
+        `${{data.neuronLabels[item.index]}}</span>` +
+        `<span class="safelens-rank-value ${{valueClass}}">${{formatValue(item.value)}}</span>` +
+        `</div>` +
+        `<div class="safelens-rank-track">` +
+        `<span class="safelens-rank-fill ${{valueClass}}" ` +
+        `style="width:${{Math.max(4, (Math.abs(item.value) / maxAbs) * 100)}}%"></span>` +
+        `</div>`;
+      rankList.appendChild(row);
+    }});
+  }}
+  function render() {{
+    const sample = Number(sampleSelect.value);
+    const layer = Number(layerSelect.value);
+    const tokenIndex = Number(tokenSelect.value);
+    const mode = modeSelect.value;
+    renderTokenStrip(sample, layer, tokenIndex, mode);
+    const values = data.activations[sample][tokenIndex][layer].map(Number);
+    const items = ranked(values, mode);
+    renderRanks(items);
+    if (readout) {{
+      const token = data.tokens[sample][tokenIndex];
+      readout.textContent =
+        `${{data.sampleLabels[sample]}} / ${{data.layerLabels[layer]}} / ` +
+        `token[${{tokenIndex}}] "${{token}}" / rank by ${{mode}}`;
+    }}
+  }}
+  sampleSelect.addEventListener("change", () => {{
+    syncTokenOptions();
+    render();
+  }});
+  [layerSelect, tokenSelect, modeSelect].forEach((select) => {{
     select.addEventListener("change", render);
   }});
+  syncTokenOptions();
+  render();
+}})();
+</script>
+"""
+
+
+def _mlp_output_direction_viewer_script(viz_id: str) -> str:
+    return f"""
+<script>
+(function() {{
+  const root = document.getElementById("{viz_id}");
+  const dataNode = document.getElementById("{viz_id}-data");
+  if (!root || !dataNode) return;
+  const data = JSON.parse(dataNode.textContent);
+  const layerSelect = root.querySelector('[data-filter="layer"]');
+  const neuronSelect = root.querySelector('[data-filter="neuron"]');
+  const readout = root.querySelector('[data-role="readout"]');
+  function formatValue(value) {{
+    const absValue = Math.abs(value);
+    if (absValue === 0) return "0";
+    if (absValue >= 0.01 && absValue < 1000) {{
+      return value.toFixed(4).replace(/(\\.\\d*?[1-9])0+$/, "$1").replace(/\\.0+$/, "");
+    }}
+    return value.toExponential(2);
+  }}
+  function renderEntries(role, entries) {{
+    const host = root.querySelector(`[data-role="${{role}}"]`);
+    if (!host) return;
+    host.innerHTML = "";
+    if (!entries || entries.length === 0) {{
+      host.innerHTML = '<div class="safelens-muted">not available</div>';
+      return;
+    }}
+    const maxAbs = Math.max(...entries.map((entry) => Math.abs(Number(entry.value))), 1e-12);
+    entries.forEach((entry, index) => {{
+      const value = Number(entry.value);
+      const valueClass = value >= 0 ? "is-positive" : "is-negative";
+      const row = document.createElement("div");
+      row.className = "safelens-rank-item";
+      row.innerHTML =
+        `<div class="safelens-rank-main">` +
+        `<span class="safelens-rank-label">#${{index + 1}} ${{entry.label}}</span>` +
+        `<span class="safelens-rank-value ${{valueClass}}">${{formatValue(value)}}</span>` +
+        `</div>` +
+        `<div class="safelens-rank-track">` +
+        `<span class="safelens-rank-fill ${{valueClass}}" ` +
+        `style="width:${{Math.max(4, (Math.abs(value) / maxAbs) * 100)}}%"></span>` +
+        `</div>`;
+      host.appendChild(row);
+    }});
+  }}
+  function render() {{
+    const layer = Number(layerSelect.value);
+    const neuron = Number(neuronSelect.value);
+    renderEntries("residual-positive", data.residualPositive[layer][neuron]);
+    renderEntries("residual-negative", data.residualNegative[layer][neuron]);
+    if (data.vocabPositive) renderEntries("vocab-positive", data.vocabPositive[layer][neuron]);
+    if (data.vocabNegative) renderEntries("vocab-negative", data.vocabNegative[layer][neuron]);
+    if (readout) {{
+      readout.textContent = `${{data.layerLabels[layer]}} / ${{data.neuronLabels[neuron]}}`;
+    }}
+  }}
+  [layerSelect, neuronSelect].forEach((select) => select.addEventListener("change", render));
   render();
 }})();
 </script>
@@ -2982,6 +3863,366 @@ def _topk_sample_browser_script(viz_id: str) -> str:
   }});
   queryInput.addEventListener("input", applyFilters);
   applyFilters();
+}})();
+</script>
+"""
+
+
+def _nla_result_browser_script(viz_id: str) -> str:
+    return f"""
+<script>
+(function() {{
+  const root = document.getElementById("{viz_id}");
+  const dataNode = document.getElementById("{viz_id}-data");
+  if (!root || !dataNode) return;
+  const data = JSON.parse(dataNode.textContent);
+  const rows = data.rows || [];
+  const METRIC_LABELS = {{
+    cosine: "cosine fidelity",
+    mse_nrm: "normalized MSE",
+    activation_norm: "activation norm",
+  }};
+  const tokenHost = root.querySelector('[data-role="tokens"]');
+  const listHost = root.querySelector('[data-role="list"]');
+  const detailHost = root.querySelector('[data-role="detail"]');
+  const summaryHost = root.querySelector('[data-role="summary"]');
+  const readout = root.querySelector('[data-role="readout"]');
+  const metricLabel = root.querySelector('[data-role="metric-label"]');
+  const sampleSelect = root.querySelector('[data-filter="sample"]');
+  const sourceSelect = root.querySelector('[data-filter="source"]');
+  const metricSelect = root.querySelector('[data-filter="metric"]');
+  const queryInput = root.querySelector('[data-filter="query"]');
+  let selectedId = rows.length ? rows[0].row_id : null;
+
+  function escapeHtml(value) {{
+    return String(value ?? "").replace(/[&<>"']/g, (char) => ({{
+      "&": "&amp;",
+      "<": "&lt;",
+      ">": "&gt;",
+      '"': "&quot;",
+      "'": "&#39;",
+    }}[char]));
+  }}
+  function formatValue(value) {{
+    if (value === null || value === undefined) return "n/a";
+    const number = Number(value);
+    if (!Number.isFinite(number)) return "n/a";
+    const absValue = Math.abs(number);
+    if (absValue === 0) return "0";
+    if (absValue >= 0.001 && absValue < 1000) {{
+      return number.toPrecision(4).replace(/(\\.\\d*?[1-9])0+$/, "$1").replace(/\\.0+$/, "");
+    }}
+    return number.toExponential(2);
+  }}
+  function clamp01(value) {{
+    return Math.max(0, Math.min(1, value));
+  }}
+  function metricScore(row, metric) {{
+    const value = row[metric];
+    if (value === null || value === undefined) return null;
+    const number = Number(value);
+    if (!Number.isFinite(number)) return null;
+    if (metric === "cosine") return clamp01(number);
+    if (metric === "mse_nrm") return clamp01(1 - number / 2);
+    const range = data.metricRanges[metric] || [0, 1];
+    const minValue = Number(range[0]);
+    const maxValue = Number(range[1]);
+    return clamp01((number - minValue) / (maxValue - minValue || 1));
+  }}
+  function blend(start, end, score) {{
+    return start.map((value, index) =>
+      Math.round(value + (end[index] - value) * score)
+    );
+  }}
+  function metricColor(row, metric) {{
+    const score = metricScore(row, metric);
+    if (score === null) return ["#f8fafc", "#475569", "#dbe3ee"];
+    const low = [255, 241, 242];
+    const middle = [239, 246, 255];
+    const high = [30, 64, 175];
+    const rgb = score < 0.58
+      ? blend(low, middle, score / 0.58)
+      : blend(middle, high, (score - 0.58) / 0.42);
+    const red = rgb[0];
+    const green = rgb[1];
+    const blue = rgb[2];
+    const lum = (0.299 * red + 0.587 * green + 0.114 * blue) / 255;
+    const border = score < 0.45 ? "#fda4af" : score > 0.72 ? "#93c5fd" : "#dbe3ee";
+    return [
+      `rgb(${{red}},${{green}},${{blue}})`,
+      lum > 0.58 ? "#111827" : "#ffffff",
+      border,
+    ];
+  }}
+  function fidelityStatus(row) {{
+    const lowCosine = row.cosine !== null && row.cosine < 0.5;
+    const highMse = row.mse_nrm !== null && row.mse_nrm > 1.0;
+    if (lowCosine || highMse) {{
+      return {{
+        className: "is-low-fidelity",
+        label: "low fidelity",
+        note: "AV explanation and AR reconstruction disagree here; inspect manually.",
+      }};
+    }}
+    return {{
+      className: "is-good-fidelity",
+      label: "stable",
+      note: "Reconstruction metrics are in the reliable range for this row.",
+    }};
+  }}
+  function numericValues(items, key) {{
+    return items
+      .map((row) => Number(row[key]))
+      .filter((value) => Number.isFinite(value));
+  }}
+  function average(items, key) {{
+    const values = numericValues(items, key);
+    if (!values.length) return null;
+    return values.reduce((total, value) => total + value, 0) / values.length;
+  }}
+  function uniqueCount(items, key) {{
+    return new Set(items.map((row) => row[key])).size;
+  }}
+  function metricWidth(row, metric) {{
+    const score = metricScore(row, metric);
+    return score === null ? 0 : Math.round(score * 100);
+  }}
+  function optionalBlock(label, value, className = "") {{
+    if (!value) return "";
+    const extra = className ? ` ${{className}}` : "";
+    return (
+      `<div class="safelens-nla-info${{extra}}">` +
+      `<div class="safelens-nla-info-label">${{escapeHtml(label)}}</div>` +
+      `<div class="safelens-nla-info-body">${{escapeHtml(value)}}</div>` +
+      `</div>`
+    );
+  }}
+  function previewText(value, maxLength = 180) {{
+    const text = String(value || "").replace(/\\s+/g, " ").trim();
+    if (text.length <= maxLength) return text;
+    return `${{text.slice(0, maxLength - 1)}}...`;
+  }}
+  function meterHtml(label, value, score, helper, kind) {{
+    const width = score === null ? 0 : Math.max(3, Math.round(score * 100));
+    const valueText = formatValue(value);
+    const modifier = kind ? ` is-${{kind}}` : "";
+    return (
+      `<div class="safelens-nla-meter${{modifier}}">` +
+      `<div class="safelens-nla-meter-top">` +
+      `<span>${{escapeHtml(label)}}</span>` +
+      `<strong>${{escapeHtml(valueText)}}</strong>` +
+      `</div>` +
+      `<div class="safelens-nla-meter-track">` +
+      `<span class="safelens-nla-meter-fill" style="width:${{width}}%;"></span>` +
+      `</div>` +
+      `<div class="safelens-nla-meter-help">${{escapeHtml(helper)}}</div>` +
+      `</div>`
+    );
+  }}
+  function renderSummary(visible, metric) {{
+    if (!summaryHost) return;
+    if (!visible.length) {{
+      summaryHost.innerHTML =
+        '<div class="safelens-nla-empty">No explanations match the current filters.</div>';
+      return;
+    }}
+    const lowCount = visible.filter((row) =>
+      fidelityStatus(row).className === "is-low-fidelity"
+    ).length;
+    const avgCosine = average(visible, "cosine");
+    const avgMse = average(visible, "mse_nrm");
+    const selectedMetric = METRIC_LABELS[metric] || metric;
+    summaryHost.innerHTML =
+      `<div class="safelens-nla-stat">` +
+      `<span class="safelens-nla-stat-label">visible rows</span>` +
+      `<strong class="safelens-nla-stat-value">${{visible.length}}</strong>` +
+      `<span class="safelens-nla-stat-help">` +
+      `${{uniqueCount(visible, "sample_id")}} samples</span>` +
+      `</div>` +
+      `<div class="safelens-nla-stat">` +
+      `<span class="safelens-nla-stat-label">avg cosine</span>` +
+      `<strong class="safelens-nla-stat-value">${{formatValue(avgCosine)}}</strong>` +
+      `<span class="safelens-nla-stat-help">higher is better</span>` +
+      `</div>` +
+      `<div class="safelens-nla-stat">` +
+      `<span class="safelens-nla-stat-label">avg mse</span>` +
+      `<strong class="safelens-nla-stat-value">${{formatValue(avgMse)}}</strong>` +
+      `<span class="safelens-nla-stat-help">lower is better</span>` +
+      `</div>` +
+      `<div class="safelens-nla-stat${{lowCount ? " is-warning" : ""}}">` +
+      `<span class="safelens-nla-stat-label">review flags</span>` +
+      `<strong class="safelens-nla-stat-value">${{lowCount}}</strong>` +
+      `<span class="safelens-nla-stat-help">${{escapeHtml(selectedMetric)}}</span>` +
+      `</div>`;
+  }}
+  function currentRows() {{
+    const sample = sampleSelect.value;
+    const source = sourceSelect.value;
+    const sampleLabel = sampleSelect.options[sampleSelect.selectedIndex].text;
+    const sourceLabel = sourceSelect.options[sourceSelect.selectedIndex].text;
+    const query = queryInput.value.trim().toLowerCase();
+    return rows.filter((row) => {{
+      const sampleMatch = sample === "__all__" || row.sample_id === sampleLabel;
+      const sourceMatch = source === "__all__" || row.source === sourceLabel;
+      const queryMatch = !query || row.row_text.includes(query);
+      return sampleMatch && sourceMatch && queryMatch;
+    }});
+  }}
+  function selectRow(rowId) {{
+    selectedId = rowId;
+    render();
+  }}
+  function renderDetail(row, metric) {{
+    if (!detailHost) return;
+    if (!row) {{
+      detailHost.innerHTML = '<div class="safelens-muted">No NLA row selected.</div>';
+      return;
+    }}
+    const status = fidelityStatus(row);
+    const selectedScore = metricScore(row, metric);
+    const cosineScore = metricScore(row, "cosine");
+    const mseScore = metricScore(row, "mse_nrm");
+    const normScore = metricScore(row, "activation_norm");
+    const chips = [
+      ["sample", row.sample_id],
+      ["layer", row.layer_label],
+      ["source", row.source],
+      ["component", row.component],
+    ];
+    detailHost.innerHTML =
+      `<div class="safelens-nla-detail-head">` +
+      `<div>` +
+      `<div class="safelens-nla-detail-kicker">Selected token</div>` +
+      `<div class="safelens-nla-selected-token">` +
+      `<span class="safelens-nla-token-index">#${{escapeHtml(row.token_index)}}</span>` +
+      `<strong>${{escapeHtml(row.token)}}</strong>` +
+      `</div>` +
+      `</div>` +
+      `<span class="safelens-nla-status ${{status.className}}">` +
+      `${{escapeHtml(status.label)}}</span>` +
+      `</div>` +
+      `<div class="safelens-chip-row">` +
+      chips.map(([key, value]) =>
+        `<span class="safelens-chip">${{escapeHtml(key)}}: ${{escapeHtml(value)}}</span>`
+      ).join("") +
+      `</div>` +
+      optionalBlock("Local context", row.context, "is-context") +
+      optionalBlock("Why this token", row.why_selected) +
+      `<div class="safelens-nla-meter-grid">` +
+      meterHtml(
+        "selected metric",
+        row[metric],
+        selectedScore,
+        METRIC_LABELS[metric] || metric,
+        "selected"
+      ) +
+      meterHtml("cosine", row.cosine, cosineScore, "semantic reconstruction agreement", "cosine") +
+      meterHtml("mse_nrm", row.mse_nrm, mseScore, "lower reconstruction error is better", "mse") +
+      meterHtml(
+        "activation norm",
+        row.activation_norm,
+        normScore,
+        "relative magnitude among visible NLA rows",
+        "norm"
+      ) +
+      `</div>` +
+      `<div class="safelens-nla-explanation-label">Natural-language explanation</div>` +
+      `<div class="safelens-nla-explanation" tabindex="0">` +
+      `${{escapeHtml(row.explanation)}}</div>` +
+      optionalBlock("Sequence", row.sequence) +
+      `<div class="safelens-nla-status-note">${{escapeHtml(status.note)}}</div>` +
+      `<div class="safelens-muted">${{escapeHtml(row.model_name || row.profile || "")}}</div>`;
+  }}
+  function render() {{
+    const metric = metricSelect.value;
+    const visible = currentRows();
+    if (!visible.some((row) => row.row_id === selectedId)) {{
+      selectedId = visible.length ? visible[0].row_id : null;
+    }}
+    renderSummary(visible, metric);
+    if (metricLabel) {{
+      metricLabel.textContent = METRIC_LABELS[metric] || metric;
+    }}
+    if (tokenHost) {{
+      tokenHost.innerHTML = "";
+      visible.forEach((row) => {{
+        const colors = metricColor(row, metric);
+        const status = fidelityStatus(row);
+        const width = metricWidth(row, metric);
+        const span = document.createElement("span");
+        span.className = "safelens-token safelens-live-token safelens-nla-token";
+        if (row.row_id === selectedId) span.classList.add("is-active");
+        span.classList.add(status.className);
+        span.tabIndex = 0;
+        span.setAttribute("role", "button");
+        span.dataset.rowId = row.row_id;
+        span.innerHTML =
+          `<span class="safelens-nla-token-text">${{escapeHtml(row.token)}}</span>` +
+          `<span class="safelens-nla-token-score">` +
+          `${{escapeHtml(formatValue(row[metric]))}}</span>` +
+          `<span class="safelens-nla-token-rail">` +
+          `<span style="width:${{Math.max(3, width)}}%;"></span>` +
+          `</span>`;
+        span.title =
+          `${{row.sample_id}} / ${{row.layer_label}} / ` +
+          `${{metric}}=${{formatValue(row[metric])}}`;
+        span.style.background = colors[0];
+        span.style.color = colors[1];
+        span.style.borderColor = colors[2];
+        span.addEventListener("click", () => selectRow(row.row_id));
+        span.addEventListener("keydown", (event) => {{
+          if (event.key === "Enter" || event.key === " ") {{
+            event.preventDefault();
+            selectRow(row.row_id);
+          }}
+        }});
+        tokenHost.appendChild(span);
+      }});
+    }}
+    if (listHost) {{
+      listHost.innerHTML = "";
+      visible.forEach((row) => {{
+        const button = document.createElement("button");
+        const status = fidelityStatus(row);
+        const width = metricWidth(row, metric);
+        button.type = "button";
+        button.className = "safelens-nla-row";
+        if (row.row_id === selectedId) button.classList.add("is-active");
+        button.classList.add(status.className);
+        const contextPreview = previewText(row.context || row.explanation, 190);
+        button.innerHTML =
+          `<span class="safelens-nla-row-main">` +
+          `<span class="safelens-nla-row-token">` +
+          `<span>#${{escapeHtml(row.token_index)}}</span>` +
+          `<strong>${{escapeHtml(row.token)}}</strong>` +
+          `</span>` +
+          `<strong>${{escapeHtml(formatValue(row[metric]))}}</strong>` +
+          `</span>` +
+          `<span class="safelens-nla-row-meta">` +
+          `${{escapeHtml(row.sample_id)}} · ${{escapeHtml(row.source)}} · ` +
+          `${{escapeHtml(row.layer_label)}}` +
+          `</span>` +
+          `<span class="safelens-nla-row-metric-track">` +
+          `<span class="safelens-nla-row-metric-fill" style="width:${{Math.max(3, width)}}%;">` +
+          `</span></span>` +
+          `<span class="safelens-nla-row-sub">${{escapeHtml(contextPreview)}}</span>`;
+        button.addEventListener("click", () => selectRow(row.row_id));
+        listHost.appendChild(button);
+      }});
+    }}
+    const selected = rows.find((row) => row.row_id === selectedId);
+    renderDetail(selected, metric);
+    if (readout) {{
+      readout.textContent = visible.length
+        ? "Click a token to inspect its AV explanation and AR reconstruction metrics."
+        : "No NLA explanations match the current filters.";
+    }}
+  }}
+  [sampleSelect, sourceSelect, metricSelect].forEach((select) => {{
+    select.addEventListener("change", render);
+  }});
+  queryInput.addEventListener("input", render);
+  render();
 }})();
 </script>
 """
@@ -3183,6 +4424,155 @@ def _normalize_text_neuron_inputs(
             sample_values.append(layer_values_list)
         normalized.append(sample_values)
     return token_samples, normalized, (max_token_count, layer_count, neuron_count)
+
+
+def _normalize_mlp_component_sources(
+    components: Mapping[Any, Any] | Any,
+    *,
+    component_labels: Sequence[Any] | None,
+) -> tuple[list[Any], list[str], list[Any]]:
+    if isinstance(components, Mapping):
+        component_keys = list(components.keys())
+        component_sources = [components[key] for key in component_keys]
+        default_labels = [str(key) for key in component_keys]
+    else:
+        data = _to_nested(components)
+        shape = _shape(data)
+        if len(shape) == 4:
+            component_sources = [data]
+        elif len(shape) == 5:
+            component_sources = list(data)
+        else:
+            raise ValueError(
+                "components must be a mapping of activations or have shape "
+                "[component, token, layer, dimension] / "
+                "[component, sample, token, layer, dimension]."
+            )
+        component_keys = list(range(len(component_sources)))
+        default_labels = [f"component_{idx}" for idx in component_keys]
+
+    if not component_sources:
+        raise ValueError("components must contain at least one MLP component.")
+    if component_labels is None:
+        return component_keys, default_labels, component_sources
+
+    labels = [str(label) for label in component_labels]
+    if len(labels) != len(component_sources):
+        raise ValueError("component_labels length must match the component count.")
+    return component_keys, labels, component_sources
+
+
+def _normalize_3d_numeric(
+    data: Any,
+    *,
+    name: str,
+) -> tuple[list[list[list[float]]], tuple[int, int, int]]:
+    nested = _to_nested(data)
+    shape = _shape(nested)
+    if len(shape) == 2:
+        nested = [nested]
+        shape = (1, *shape)
+    if len(shape) != 3:
+        raise ValueError(f"{name} must have shape [layer, item, dimension].")
+    layer_count, item_count, dimension_count = shape
+    normalized = []
+    for layer in nested:
+        if len(layer) != item_count:
+            raise ValueError(f"{name} must have consistent item dimensions.")
+        layer_rows = []
+        for row in layer:
+            if len(row) != dimension_count:
+                raise ValueError(f"{name} must have consistent dimension lengths.")
+            layer_rows.append([_scalar(value) for value in row])
+        normalized.append(layer_rows)
+    return normalized, (layer_count, item_count, dimension_count)
+
+
+def _ranked_value_entries(
+    values: Sequence[float],
+    labels: Sequence[str],
+    *,
+    max_items: int,
+    largest: bool,
+) -> list[dict[str, Any]]:
+    order = sorted(range(len(values)), key=lambda index: values[index], reverse=largest)
+    return [{"label": labels[index], "value": float(values[index])} for index in order[:max_items]]
+
+
+def _normalize_ranked_entry_grid(
+    entries: Any,
+    *,
+    layer_count: int,
+    neuron_count: int,
+    name: str,
+) -> list[list[list[dict[str, Any]]]]:
+    nested = _to_nested(entries)
+    if not isinstance(nested, Sequence) or isinstance(nested, str | bytes):
+        raise ValueError(f"{name} must have shape [layer, neuron, entry].")
+    if len(nested) != layer_count:
+        raise ValueError(f"{name} must have one entry list per layer.")
+    normalized = []
+    for layer_entries in nested:
+        if not isinstance(layer_entries, Sequence) or isinstance(layer_entries, str | bytes):
+            raise ValueError(f"{name} layer entries must contain neuron entry lists.")
+        if len(layer_entries) != neuron_count:
+            raise ValueError(f"{name} must have one entry list per neuron.")
+        normalized.append(
+            [
+                _normalize_ranked_entries(neuron_entries, name=name)
+                for neuron_entries in layer_entries
+            ]
+        )
+    return normalized
+
+
+def _normalize_ranked_entries(entries: Sequence[Any], *, name: str) -> list[dict[str, Any]]:
+    normalized = []
+    for entry in entries:
+        if isinstance(entry, Mapping):
+            label = entry.get("label")
+            value = entry.get("value")
+        elif isinstance(entry, Sequence) and not isinstance(entry, str | bytes) and len(entry) >= 2:
+            label = entry[0]
+            value = entry[1]
+        else:
+            raise ValueError(f"{name} entries must be mappings or (label, value) pairs.")
+        normalized.append({"label": str(label), "value": _scalar(value)})
+    return normalized
+
+
+def _dimension_labels_for_components(
+    dimension_labels: Sequence[Any] | Mapping[Any, Sequence[Any]] | None,
+    *,
+    component_keys: Sequence[Any],
+    component_labels: Sequence[str],
+    dimension_count: int,
+) -> list[list[str]]:
+    if dimension_labels is None:
+        return [[f"dimension_{idx}" for idx in range(dimension_count)] for _ in component_keys]
+
+    if isinstance(dimension_labels, Mapping):
+        labels_by_component = []
+        for key, label in zip(component_keys, component_labels, strict=True):
+            raw_labels = None
+            for candidate in (key, str(key), label):
+                if candidate in dimension_labels:
+                    raw_labels = dimension_labels[candidate]
+                    break
+            if raw_labels is None:
+                raise ValueError(f"dimension_labels is missing labels for component {label!r}.")
+            labels_by_component.append(_validate_dimension_labels(raw_labels, dimension_count))
+        return labels_by_component
+
+    labels = _validate_dimension_labels(dimension_labels, dimension_count)
+    return [labels[:] for _ in component_keys]
+
+
+def _validate_dimension_labels(labels: Sequence[Any], dimension_count: int) -> list[str]:
+    label_list = [str(label) for label in labels]
+    if len(label_list) != dimension_count:
+        raise ValueError("dimension_labels length must match the dimension count.")
+    return label_list
 
 
 def _labels_or_indices(
@@ -3492,6 +4882,107 @@ def _topk_sample_rows(
     return rows, {"layer_labels": layer_names, "neuron_labels": neuron_names}
 
 
+def _normalize_nla_results(
+    results: Sequence[NLAResult | Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    if not results:
+        raise ValueError("NLA result visualization needs at least one result row.")
+    rows: list[dict[str, Any]] = []
+    for idx, result in enumerate(results):
+        raw = result.to_dict() if isinstance(result, NLAResult) else dict(result)
+        explanation = str(raw.get("explanation") or raw.get("raw_text") or "").strip()
+        if not explanation:
+            raise ValueError("each NLA result row must include an explanation.")
+        token_index = raw.get("token_index")
+        if token_index is not None:
+            token_index = int(token_index)
+        token = str(raw.get("token") if raw.get("token") is not None else token_index)
+        row = {
+            "row_id": f"nla-row-{idx}",
+            "sample_id": str(raw.get("sample_id", "0")),
+            "token_index": token_index if token_index is not None else idx,
+            "token": token,
+            "source": str(raw.get("source") or "activation"),
+            "model_name": str(raw.get("model_name") or ""),
+            "profile": None if raw.get("profile") is None else str(raw.get("profile")),
+            "layer": _optional_int_for_viz(raw.get("layer")),
+            "component": str(raw.get("component") or "resid_post"),
+            "explanation": explanation,
+            "raw_text": str(raw.get("raw_text") or ""),
+            "activation_norm": _optional_float_for_viz(raw.get("activation_norm")),
+            "mse_nrm": _optional_float_for_viz(raw.get("mse_nrm")),
+            "cosine": _optional_float_for_viz(raw.get("cosine")),
+            "metadata": dict(raw.get("metadata") or {}),
+        }
+        row["context"] = str(row["metadata"].get("context", "") or "")
+        row["role"] = str(row["metadata"].get("role", "") or "")
+        row["why_selected"] = str(row["metadata"].get("why_selected", "") or "")
+        row["sequence"] = str(row["metadata"].get("sequence", "") or "")
+        row["layer_label"] = _nla_layer_label(row)
+        row["row_text"] = " ".join(
+            str(value).lower()
+            for value in (
+                row["sample_id"],
+                row["token_index"],
+                row["token"],
+                row["source"],
+                row["model_name"],
+                row["profile"],
+                row["layer_label"],
+                row["explanation"],
+                row["context"],
+                row["role"],
+                row["why_selected"],
+            )
+            if value is not None
+        )
+        rows.append(row)
+    return rows
+
+
+def _nla_layer_label(row: Mapping[str, Any]) -> str:
+    layer = row.get("layer")
+    component = row.get("component") or "resid_post"
+    return f"L{layer} {component}" if layer is not None else str(component)
+
+
+def _nla_metric_value(row: Mapping[str, Any] | None, metric: str) -> float:
+    if row is None:
+        return 0.0
+    value = row.get(metric)
+    return 0.0 if value is None else float(value)
+
+
+def _nla_token_label_for_position(rows: Sequence[Mapping[str, Any]], position: int) -> str:
+    for row in rows:
+        if row.get("token_index") == position and row.get("token") is not None:
+            return f"{position}: {row['token']}"
+    return str(position)
+
+
+def _ordered_unique(values: Iterable[Any]) -> list[str]:
+    seen: set[str] = set()
+    ordered = []
+    for value in values:
+        label = str(value)
+        if label not in seen:
+            ordered.append(label)
+            seen.add(label)
+    return ordered
+
+
+def _optional_float_for_viz(value: Any) -> float | None:
+    if value is None:
+        return None
+    return _scalar(value)
+
+
+def _optional_int_for_viz(value: Any) -> int | None:
+    if value is None:
+        return None
+    return int(value)
+
+
 def _token_samples(tokens: Sequence[Any]) -> list[list[str]]:
     data = _to_nested(tokens)
     if not isinstance(data, Sequence) or isinstance(data, str | bytes):
@@ -3622,7 +5113,10 @@ def _wrap_panel(kind: str, title: str | None, body: str) -> str:
         ".safelens-token-strip{display:flex;flex-wrap:wrap;gap:0.08rem;margin:0.35rem 0;}"
         ".safelens-token{padding:0.15rem 0.22rem;margin:0.08rem;border-radius:4px;"
         "display:inline-block;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;}"
-        ".safelens-live-token{transition:background 120ms ease,color 120ms ease;}"
+        ".safelens-live-token{cursor:pointer;transition:background 120ms ease,color 120ms ease,"
+        "box-shadow 120ms ease;}"
+        ".safelens-live-token:hover,.safelens-live-token.is-active{"
+        "box-shadow:0 0 0 2px rgba(15,23,42,0.22);position:relative;z-index:1;}"
         ".safelens-heatmap-scroller{overflow:auto;background:#ffffff;border:1px solid #edf0f5;"
         "border-radius:6px;padding:0.35rem;max-width:100%;width:max-content;margin:0 auto;}"
         ".safelens-heatmap-svg{display:block;background:#ffffff;width:auto;height:auto;"
@@ -3642,6 +5136,151 @@ def _wrap_panel(kind: str, title: str | None, body: str) -> str:
         ".safelens-x-axis{margin-left:2.4rem;}"
         ".safelens-focus-readout{min-height:1rem;font-size:0.78rem;color:#374151;"
         "margin:0.3rem 0;}"
+        ".safelens-muted{font-size:0.78rem;color:#64748b;padding:0.35rem 0;}"
+        ".safelens-rank-list{display:grid;gap:0.42rem;margin-top:0.55rem;}"
+        ".safelens-rank-item{border:1px solid #e5e7eb;background:#ffffff;border-radius:6px;"
+        "padding:0.48rem 0.55rem;}"
+        ".safelens-rank-main{display:flex;justify-content:space-between;align-items:baseline;"
+        "gap:0.75rem;min-width:0;}"
+        ".safelens-rank-label{font-size:0.8rem;font-weight:650;color:#111827;overflow:hidden;"
+        "text-overflow:ellipsis;white-space:nowrap;}"
+        ".safelens-rank-value{font-size:0.78rem;font-family:ui-monospace,SFMono-Regular,"
+        "Consolas,monospace;font-weight:700;white-space:nowrap;}"
+        ".safelens-rank-value.is-positive{color:#be123c;}"
+        ".safelens-rank-value.is-negative{color:#1d4ed8;}"
+        ".safelens-rank-track{height:0.42rem;background:#f1f5f9;border-radius:999px;"
+        "overflow:hidden;margin-top:0.38rem;}"
+        ".safelens-rank-fill{display:block;height:100%;border-radius:999px;}"
+        ".safelens-rank-fill.is-positive{background:#e11d48;}"
+        ".safelens-rank-fill.is-negative{background:#2563eb;}"
+        ".safelens-direction-grid{display:grid;grid-template-columns:repeat(auto-fit,"
+        "minmax(230px,1fr));gap:0.7rem;margin-top:0.55rem;align-items:start;}"
+        ".safelens-direction-panel{border:1px solid #e5e7eb;background:#ffffff;border-radius:6px;"
+        "padding:0.55rem;min-width:0;}"
+        ".safelens-panel-title{font-size:0.82rem;font-weight:700;color:#0f172a;"
+        "margin:0 0 0.5rem 0;}"
+        ".safelens-nla-browser{max-width:100%;overflow:hidden;}"
+        ".safelens-nla-summary{display:grid;grid-template-columns:repeat(auto-fit,"
+        "minmax(8.75rem,1fr));gap:0.55rem;margin:0.15rem 0 0.8rem 0;}"
+        ".safelens-nla-stat{border:1px solid #e5e7eb;background:#ffffff;border-radius:7px;"
+        "padding:0.55rem 0.65rem;min-width:0;}"
+        ".safelens-nla-stat.is-warning{border-color:#fecdd3;background:#fffafa;}"
+        ".safelens-nla-stat-label{display:block;font-size:0.7rem;color:#64748b;"
+        "font-weight:700;text-transform:uppercase;letter-spacing:0.02em;}"
+        ".safelens-nla-stat-value{display:block;margin-top:0.12rem;color:#0f172a;"
+        "font-size:1.05rem;line-height:1.1;font-family:ui-monospace,SFMono-Regular,"
+        "Consolas,monospace;}"
+        ".safelens-nla-stat-help{display:block;margin-top:0.2rem;font-size:0.72rem;"
+        "color:#64748b;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}"
+        ".safelens-nla-empty{border:1px dashed #cbd5e1;background:#ffffff;border-radius:7px;"
+        "padding:0.65rem;color:#64748b;font-size:0.84rem;}"
+        ".safelens-nla-layout{display:grid;grid-template-columns:minmax(0,1fr) minmax(20rem,25rem);"
+        "gap:0.9rem;align-items:start;}"
+        ".safelens-nla-main{min-width:0;overflow:hidden;}"
+        ".safelens-nla-section-title,.safelens-nla-list-head{display:flex;"
+        "justify-content:space-between;align-items:center;gap:0.75rem;color:#0f172a;"
+        "font-size:0.82rem;font-weight:750;margin:0.05rem 0 0.4rem 0;}"
+        ".safelens-nla-list-head{margin-top:0.75rem;color:#334155;}"
+        ".safelens-nla-list-head span:last-child{font-size:0.72rem;color:#64748b;"
+        "font-weight:650;text-transform:uppercase;letter-spacing:0.02em;}"
+        ".safelens-nla-token-strip{display:flex;flex-wrap:wrap;gap:0.38rem;margin:0.35rem 0;"
+        "padding:0.3rem;border:1px solid #edf2f7;background:#fbfdff;border-radius:8px;}"
+        ".safelens-nla-token{display:inline-grid;grid-template-rows:auto auto 0.18rem;"
+        "gap:0.18rem;width:4.35rem;min-height:3.05rem;border:1px solid #dbe3ee;"
+        "border-radius:7px;padding:0.38rem 0.45rem 0.32rem 0.45rem;margin:0;"
+        "box-shadow:0 1px 2px rgba(15,23,42,0.05);white-space:nowrap;text-align:left;}"
+        ".safelens-nla-token:hover,.safelens-nla-token.is-active{"
+        "box-shadow:0 0 0 2px rgba(37,99,235,0.18),0 4px 12px rgba(15,23,42,0.08);}"
+        ".safelens-nla-token.is-active{border-color:#1d4ed8!important;}"
+        ".safelens-nla-token.is-low-fidelity{border-style:dashed;}"
+        ".safelens-nla-token-text{font-size:0.78rem;font-weight:700;overflow:hidden;"
+        "text-overflow:ellipsis;max-width:100%;}"
+        ".safelens-nla-token-score{font-size:0.68rem;font-weight:700;opacity:0.82;}"
+        ".safelens-nla-token-rail{display:block;height:0.18rem;border-radius:999px;"
+        "overflow:hidden;background:rgba(15,23,42,0.15);}"
+        ".safelens-nla-token-rail span{display:block;height:100%;background:currentColor;"
+        "opacity:0.68;border-radius:999px;}"
+        ".safelens-nla-detail{border:1px solid #e5e7eb;background:#ffffff;border-radius:8px;"
+        "padding:0.78rem;min-width:0;max-width:100%;position:sticky;top:0.5rem;"
+        "max-height:calc(100vh - 1.25rem);overflow:auto;overscroll-behavior:contain;"
+        "box-shadow:0 8px 24px rgba(15,23,42,0.07);}"
+        ".safelens-nla-detail-head{display:flex;justify-content:space-between;"
+        "align-items:flex-start;gap:0.75rem;margin-bottom:0.45rem;}"
+        ".safelens-nla-detail-kicker{font-size:0.7rem;color:#64748b;font-weight:700;"
+        "text-transform:uppercase;letter-spacing:0.02em;}"
+        ".safelens-nla-selected-token{display:flex;align-items:baseline;gap:0.4rem;"
+        "min-width:0;margin-top:0.12rem;}"
+        ".safelens-nla-selected-token strong{font-size:1.05rem;color:#0f172a;"
+        "font-family:ui-monospace,SFMono-Regular,Consolas,monospace;overflow-wrap:anywhere;}"
+        ".safelens-nla-token-index{font-size:0.76rem;color:#64748b;font-weight:700;}"
+        ".safelens-nla-status{display:inline-flex;align-items:center;border:1px solid #bfdbfe;"
+        "background:#eff6ff;color:#1d4ed8;border-radius:999px;padding:0.18rem 0.5rem;"
+        "font-size:0.72rem;font-weight:750;white-space:nowrap;}"
+        ".safelens-nla-status.is-low-fidelity{border-color:#fecdd3;background:#fff1f2;"
+        "color:#9f1239;}"
+        ".safelens-chip-row{display:flex;flex-wrap:wrap;gap:0.32rem;margin:0.35rem 0 0.55rem 0;}"
+        ".safelens-chip{display:inline-flex;align-items:center;border:1px solid #dbe3ee;"
+        "background:#f8fafc;color:#334155;border-radius:999px;padding:0.16rem 0.42rem;"
+        "font-size:0.72rem;max-width:100%;overflow:hidden;text-overflow:ellipsis;}"
+        ".safelens-chip.is-warning{border-color:#fecdd3;background:#fff1f2;color:#9f1239;}"
+        ".safelens-nla-info{border:1px solid #e5e7eb;background:#ffffff;border-radius:7px;"
+        "padding:0.5rem 0.55rem;margin:0.42rem 0;}"
+        ".safelens-nla-info.is-context{background:#f8fafc;border-color:#dbeafe;}"
+        ".safelens-nla-info-label{font-size:0.68rem;font-weight:750;color:#475569;"
+        "text-transform:uppercase;letter-spacing:0.02em;margin-bottom:0.22rem;}"
+        ".safelens-nla-info-body{font-size:0.82rem;line-height:1.42;color:#111827;"
+        "overflow-wrap:anywhere;white-space:pre-wrap;}"
+        ".safelens-nla-meter-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));"
+        "gap:0.48rem;margin:0.55rem 0 0.65rem 0;}"
+        ".safelens-nla-meter{border:1px solid #e5e7eb;background:#ffffff;border-radius:7px;"
+        "padding:0.46rem 0.5rem;min-width:0;}"
+        ".safelens-nla-meter-top{display:flex;justify-content:space-between;gap:0.6rem;"
+        "font-size:0.74rem;color:#475569;font-weight:700;}"
+        ".safelens-nla-meter-top strong{font-family:ui-monospace,SFMono-Regular,Consolas,"
+        "monospace;color:#0f172a;white-space:nowrap;}"
+        ".safelens-nla-meter-track{height:0.42rem;background:#f1f5f9;border-radius:999px;"
+        "overflow:hidden;margin-top:0.32rem;}"
+        ".safelens-nla-meter-fill{display:block;height:100%;border-radius:999px;"
+        "background:#2563eb;}"
+        ".safelens-nla-meter.is-mse .safelens-nla-meter-fill{background:#0f766e;}"
+        ".safelens-nla-meter.is-norm .safelens-nla-meter-fill{background:#7c3aed;}"
+        ".safelens-nla-meter.is-selected .safelens-nla-meter-fill{background:#0f172a;}"
+        ".safelens-nla-meter-help{margin-top:0.22rem;font-size:0.68rem;color:#64748b;}"
+        ".safelens-nla-explanation-label{font-size:0.72rem;font-weight:750;color:#475569;"
+        "text-transform:uppercase;letter-spacing:0.02em;margin:0.35rem 0 0.25rem 0;}"
+        ".safelens-nla-explanation{font-size:0.88rem;line-height:1.48;color:#111827;"
+        "background:#ffffff;border:1px solid #e5e7eb;border-radius:7px;padding:0.62rem;"
+        "white-space:pre-wrap;overflow-wrap:anywhere;max-height:18rem;overflow:auto;}"
+        ".safelens-nla-status-note{font-size:0.76rem;line-height:1.42;color:#475569;"
+        "background:#f8fafc;border:1px solid #edf0f5;border-radius:6px;padding:0.45rem 0.5rem;"
+        "margin-top:0.5rem;}"
+        ".safelens-nla-list{display:grid;gap:0.42rem;margin-top:0.45rem;max-height:35rem;"
+        "overflow:auto;padding-right:0.2rem;}"
+        ".safelens-nla-row{display:block;width:100%;max-width:100%;text-align:left;"
+        "border:1px solid #e5e7eb;"
+        "background:#ffffff;color:#111827;border-radius:7px;padding:0.55rem 0.62rem;"
+        "cursor:pointer;border-left-width:0.24rem;overflow:hidden;}"
+        ".safelens-nla-row.is-low-fidelity{border-left-color:#fb7185;}"
+        ".safelens-nla-row.is-good-fidelity{border-left-color:#60a5fa;}"
+        ".safelens-nla-row:hover,.safelens-nla-row.is-active{border-color:#2563eb;"
+        "box-shadow:0 0 0 2px rgba(37,99,235,0.12);}"
+        ".safelens-nla-row-main{display:flex;justify-content:space-between;gap:0.75rem;"
+        "align-items:baseline;font-size:0.82rem;min-width:0;}"
+        ".safelens-nla-row-main strong{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;"
+        "font-size:0.78rem;white-space:nowrap;}"
+        ".safelens-nla-row-token{display:flex;align-items:baseline;gap:0.36rem;min-width:0;}"
+        ".safelens-nla-row-token>span{font-size:0.72rem;color:#64748b;font-weight:700;}"
+        ".safelens-nla-row-token strong{font-size:0.86rem;color:#0f172a;overflow:hidden;"
+        "text-overflow:ellipsis;}"
+        ".safelens-nla-row-meta{display:block;margin-top:0.16rem;font-size:0.7rem;"
+        "color:#64748b;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}"
+        ".safelens-nla-row-metric-track{display:block;height:0.3rem;background:#f1f5f9;"
+        "border-radius:999px;overflow:hidden;margin-top:0.36rem;}"
+        ".safelens-nla-row-metric-fill{display:block;height:100%;background:#2563eb;"
+        "border-radius:999px;}"
+        ".safelens-nla-row-sub{display:-webkit-box;margin-top:0.26rem;font-size:0.76rem;"
+        "line-height:1.35;color:#475569;overflow:hidden;-webkit-line-clamp:2;"
+        "-webkit-box-orient:vertical;overflow-wrap:anywhere;}"
         ".safelens-legend{display:grid;grid-template-columns:auto minmax(7rem,14rem) auto;"
         "align-items:center;gap:0.45rem;font-size:0.75rem;color:#4b5563;margin-top:0.45rem;}"
         ".safelens-legend-gradient{display:block;height:0.45rem;border-radius:999px;"
@@ -3693,7 +5332,10 @@ def _wrap_panel(kind: str, title: str | None, body: str) -> str:
         ".safelens-cv-token:hover,.safelens-cv-token.is-active{"
         "box-shadow:0 0 0 2px rgba(15,23,42,0.22);"
         "position:relative;z-index:1;}"
-        "@media(max-width:760px){.safelens-cv-layout{grid-template-columns:1fr;}.safelens-cv-selector{min-width:0;}}"
+        "@media(max-width:900px){.safelens-cv-layout,.safelens-nla-layout{grid-template-columns:1fr;}"
+        ".safelens-cv-selector{min-width:0;}.safelens-nla-detail{position:static;"
+        "max-height:none;}.safelens-nla-list{max-height:none;}.safelens-nla-meter-grid{"
+        "grid-template-columns:1fr;}}"
         ".safelens-summary{border-collapse:collapse;font-size:0.86rem;margin:0.35rem 0;}"
         ".safelens-summary th,.safelens-summary td{border:1px solid #e5e7eb;"
         "padding:0.35rem 0.5rem;text-align:left;vertical-align:top;}"
