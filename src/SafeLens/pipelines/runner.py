@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Iterable, Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from SafeLens.config import validate_pipeline_config_file
 from SafeLens.core.base import (
@@ -65,23 +65,28 @@ class PipelineRunner:
 
     def run(self, dataset: Iterable[Mapping[str, Any]] | None = None) -> RunReport:
         """Run the configured safety pipeline and write a JSON report."""
-        batches = list(dataset if dataset is not None else self.config.dataset)
+        batches: list[Mapping[str, Any]] = list(
+            dataset if dataset is not None else self.config.dataset
+        )
         if not batches:
             batches = [{"id": "demo", "text": "This is a benign SafeLens demo sample."}]
         self._provide_dataset_to_methods(batches)
         batches = self._filter_dataset_for_methods(batches)
-        self.setup()
+        primary_error = False
         try:
-            reports = [self._run_one(index, batch) for index, batch in enumerate(batches)]
-            run_report = RunReport(reports=reports, summary=self._summarize(reports))
-            self._write_report(run_report)
-            return run_report
+            try:
+                self.setup()
+                reports = [self._run_one(index, batch) for index, batch in enumerate(batches)]
+                run_report = RunReport(reports=reports, summary=self._summarize(reports))
+                self._write_report(run_report)
+                return run_report
+            except BaseException:
+                primary_error = True
+                raise
         finally:
-            for attributor in self.attributors:
-                attributor.detach()
-            for probe in self.probes:
-                probe.detach()
-            self.model.remove_hooks()
+            cleanup_error = self._cleanup_after_run()
+            if cleanup_error is not None and not primary_error:
+                raise cleanup_error
 
     def _run_one(self, index: int, batch: Mapping[str, Any]) -> SafetyReport:
         model_output, _cache = self.model.run_with_cache(batch)
@@ -131,10 +136,7 @@ class PipelineRunner:
         categories: set[str] = set()
         for result in probe_results:
             raw_category = result.details.get("risk_category", [])
-            if isinstance(raw_category, str):
-                categories.add(raw_category)
-            else:
-                categories.update(str(category) for category in raw_category)
+            categories.update(str(category) for category in _iter_detail_values(raw_category))
         for signal in monitoring_signals:
             categories.update(signal.risk_category)
         return sorted(categories)
@@ -147,7 +149,11 @@ class PipelineRunner:
     ) -> list[int]:
         tokens: set[int] = set()
         for result in probe_results:
-            tokens.update(int(token) for token in result.details.get("evidence_tokens", []))
+            for token in _iter_detail_values(result.details.get("evidence_tokens", [])):
+                try:
+                    tokens.add(int(token))
+                except (TypeError, ValueError):
+                    continue
         for signal in monitoring_signals:
             tokens.update(signal.evidence_tokens)
         for attribution in attributions:
@@ -167,6 +173,27 @@ class PipelineRunner:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(run_report.to_dict(), indent=2), encoding="utf-8")
 
+    def _cleanup_after_run(self) -> Exception | None:
+        first_error: Exception | None = None
+        for attributor in self.attributors:
+            try:
+                attributor.detach()
+            except Exception as exc:
+                if first_error is None:
+                    first_error = exc
+        for probe in self.probes:
+            try:
+                probe.detach()
+            except Exception as exc:
+                if first_error is None:
+                    first_error = exc
+        try:
+            self.model.remove_hooks()
+        except Exception as exc:
+            if first_error is None:
+                first_error = exc
+        return first_error
+
     def _provide_dataset_to_methods(self, batches: list[Mapping[str, Any]]) -> None:
         for method in [*self.probes, *self.monitors, *self.attributors]:
             set_dataset = getattr(method, "set_dataset", None)
@@ -181,8 +208,19 @@ class PipelineRunner:
         for method in [*self.probes, *self.monitors, *self.attributors]:
             filter_dataset = getattr(method, "filter_dataset", None)
             if callable(filter_dataset):
-                filtered = list(filter_dataset(filtered))
+                filtered = list(cast(Iterable[Mapping[str, Any]], filter_dataset(filtered)))
         return filtered
+
+
+def _iter_detail_values(value: Any) -> list[Any]:
+    if value is None:
+        return []
+    if isinstance(value, str | bytes | Mapping):
+        return [value]
+    try:
+        return list(value)
+    except TypeError:
+        return [value]
 
 
 def run_from_config(

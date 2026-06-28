@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import math
-from typing import Any
+import random as random_module
+from typing import Any, cast
 
 import pytest
 
@@ -107,7 +108,7 @@ def assert_nested_close(left: Any, right: Any, *, abs_tol: float = 1e-9) -> None
         for left_item, right_item in zip(left, right, strict=True):
             assert_nested_close(left_item, right_item, abs_tol=abs_tol)
         return
-    assert math.isclose(float(left), float(right), abs_tol=abs_tol)
+    assert math.isclose(float(cast(Any, left)), float(cast(Any, right)), abs_tol=abs_tol)
 
 
 def test_top_level_exports_common_transformerlens_helpers() -> None:
@@ -214,17 +215,18 @@ def test_hooked_root_setup_discovers_hookpoint_attributes() -> None:
             self.hook_resid_pre = HookPoint()
 
     root = HookedRoot()
-    root.blocks = [Block()]
-    root.extra_hooks = {"mlp": HookPoint()}
+    root_dynamic: Any = root
+    root_dynamic.blocks = [Block()]
+    root_dynamic.extra_hooks = {"mlp": HookPoint()}
 
     root.setup()
 
     assert set(root.hook_dict) == {"blocks.0.hook_resid_pre", "extra_hooks.mlp"}
-    assert root.blocks[0].hook_resid_pre.name == "blocks.0.hook_resid_pre"
+    assert root_dynamic.blocks[0].hook_resid_pre.name == "blocks.0.hook_resid_pre"
     with root.hooks(
         fwd_hooks=[("blocks.0.hook_resid_pre", lambda activation, _hook: activation + [1])]
     ):
-        assert root.blocks[0].hook_resid_pre([0]) == [0, 1]
+        assert root_dynamic.blocks[0].hook_resid_pre([0]) == [0, 1]
 
 
 def test_hooked_root_nested_hooks_keep_context_levels_separate() -> None:
@@ -350,17 +352,16 @@ def test_hooked_root_check_and_add_hook_accepts_official_hookpoint_signature() -
         lambda activation, _hook: activation,
         dir="fwd",
     )
-    root.check_and_add_hook(
-        resid,
-        "blocks.0.hook_resid_pre",
-        lambda activation, _hook: seen.append("second") or activation + [2],
-    )
-    root.check_and_add_hook(
-        resid,
-        "blocks.0.hook_resid_pre",
-        lambda activation, _hook: seen.append("first") or activation + [1],
-        prepend=True,
-    )
+    def add_second(activation: Any, _hook: Any) -> Any:
+        seen.append("second")
+        return activation + [2]
+
+    def add_first(activation: Any, _hook: Any) -> Any:
+        seen.append("first")
+        return activation + [1]
+
+    root.check_and_add_hook(resid, "blocks.0.hook_resid_pre", add_second)
+    root.check_and_add_hook(resid, "blocks.0.hook_resid_pre", add_first, prepend=True)
 
     assert resid([0]) == [0, 1, 2]
     assert seen == ["first", "second"]
@@ -370,16 +371,21 @@ def test_hooked_root_hooks_context_accepts_prepend() -> None:
     root = HookedRoot()
     resid = root.add_hook_point("blocks.0.hook_resid_pre")
     seen: list[str] = []
-    root.add_hook(
-        "blocks.0.hook_resid_pre",
-        lambda activation, _hook: seen.append("base") or activation + ["base"],
-    )
+    def add_base(activation: Any, _hook: Any) -> Any:
+        seen.append("base")
+        return activation + ["base"]
+
+    def add_temp(activation: Any, _hook: Any) -> Any:
+        seen.append("temp")
+        return activation + ["temp"]
+
+    root.add_hook("blocks.0.hook_resid_pre", add_base)
 
     with root.hooks(
         fwd_hooks=[
             (
                 "blocks.0.hook_resid_pre",
-                lambda activation, _hook: seen.append("temp") or activation + ["temp"],
+                add_temp,
             )
         ],
         prepend=True,
@@ -1101,8 +1107,9 @@ def test_hooked_root_run_with_cache_can_slice_positions_and_remove_batch_dim() -
 def test_hooked_root_run_with_cache_preserves_external_empty_cache() -> None:
     root = HookedRoot()
     resid = root.add_hook_point("blocks.0.hook_resid_pre")
-    root.normalization_type = "none"
-    root.W_U = [[1.0, 0.0], [0.0, 1.0]]
+    root_dynamic: Any = root
+    root_dynamic.normalization_type = "none"
+    root_dynamic.W_U = [[1.0, 0.0], [0.0, 1.0]]
     external_cache = ActivationCache()
 
     _output, cache = root.run_with_cache(lambda: resid([1]), cache=external_cache)
@@ -1418,7 +1425,7 @@ def test_activation_cache_apply_ln_can_recompute_final_layernorm() -> None:
 def test_activation_cache_decoder_apply_ln_recomputes_decoder_final_layernorm() -> None:
     torch = pytest.importorskip("torch")
 
-    class ScaleNorm(torch.nn.Module):
+    class ScaleNorm(torch.nn.Module):  # type: ignore[name-defined, misc]
         def __init__(self, scale: float) -> None:
             super().__init__()
             self.scale = scale
@@ -2581,6 +2588,8 @@ def test_kv_cache_preserves_numpy_arrays_when_appending() -> None:
     assert isinstance(entry.keys, np.ndarray)
     assert isinstance(entry.values, np.ndarray)
     assert entry.sequence_length == 3
+    assert entry.keys is not None
+    assert entry.values is not None
     assert entry.keys.tolist() == [[[1], [2], [3]]]
     assert entry.values.tolist() == [[[10], [20], [30]]]
 
@@ -2631,6 +2640,9 @@ def test_kv_cache_init_cache_attention_mask_and_freeze_match_transformerlens() -
     cache = KeyValueCache.init_cache(_Cfg(), device="cpu", batch_size=2)
 
     assert len(cache.entries) == 2
+    assert cache[0].past_keys is not None
+    assert cache[1].past_values is not None
+    assert cache.previous_attention_mask is not None
     assert cache[0].past_keys.shape == (2, 0, 3, 4)
     assert cache[0].past_keys.dtype is torch.float16
     assert cache[1].past_values.shape == (2, 0, 3, 4)
@@ -2879,7 +2891,7 @@ def test_sample_logits_torch_promotes_integer_logits_for_penalties() -> None:
 def test_sample_logits_python_top_p_keeps_only_first_token_when_it_exceeds_threshold(
     monkeypatch: Any,
 ) -> None:
-    monkeypatch.setattr(analysis.random, "random", lambda: 0.999999)
+    monkeypatch.setattr(random_module, "random", lambda: 0.999999)
 
     assert analysis.sample_logits([[10.0, 0.0, -10.0]], top_p=0.5) == [0]
 
@@ -3802,7 +3814,7 @@ def test_detect_head_runs_model_when_cache_is_not_supplied() -> None:
         cfg = _Cfg()
 
         def __init__(self) -> None:
-            self.seen_tokens = None
+            self.seen_tokens: tuple[Any, bool] | None = None
 
         def to_tokens(self, seq: Any) -> Any:
             assert seq == "abcd"

@@ -29,10 +29,23 @@ def _load_jsonl(path: str | None) -> list[dict[str, Any]] | None:
     if path is None:
         return None
     rows: list[dict[str, Any]] = []
-    with Path(path).open("r", encoding="utf-8") as handle:
-        for line in handle:
-            if line.strip():
-                rows.append(json.loads(line))
+    input_path = Path(path)
+    with input_path.open("r", encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, start=1):
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    f"Invalid JSONL input {input_path} line {line_number}: {exc.msg}"
+                ) from exc
+            if not isinstance(row, dict):
+                raise ValueError(
+                    f"Invalid JSONL input {input_path} line {line_number}: "
+                    "each row must be a JSON object."
+                )
+            rows.append(row)
     return rows
 
 
@@ -114,7 +127,10 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.command == "run":
-        dataset = _load_jsonl(args.input_jsonl)
+        try:
+            dataset = _load_jsonl(args.input_jsonl)
+        except (OSError, ValueError) as exc:
+            parser.exit(1, f"{exc}\n")
         report = PipelineRunner.from_yaml(args.config).run(dataset=dataset)
         print(json.dumps(report.summary, indent=2))
     elif args.command == "validate":

@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import json
 import math
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from SafeLens.core.base import LayerRef, ModelWrapper
 
@@ -206,12 +206,21 @@ class _ActivationHelper:
 def _cache_to_dict(cache: Any) -> dict[Any, Any]:
     to_dict = getattr(cache, "to_dict", None)
     if callable(to_dict):
-        return dict(to_dict())
+        result = to_dict()
+        if isinstance(result, Mapping):
+            return dict(result)
+        try:
+            return dict(cast(Iterable[tuple[Any, Any]], result))
+        except TypeError:
+            return {}
     if isinstance(cache, Mapping):
         return dict(cache)
     items = getattr(cache, "items", None)
     if callable(items):
-        return dict(items())
+        try:
+            return dict(cast(Iterable[tuple[Any, Any]], items()))
+        except TypeError:
+            return {}
     return {}
 
 

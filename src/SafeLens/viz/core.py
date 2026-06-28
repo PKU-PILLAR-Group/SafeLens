@@ -1,3 +1,4 @@
+# pyright: reportMissingImports=false
 """Dependency-light visualization primitives for interpretability workflows."""
 
 from __future__ import annotations
@@ -2307,10 +2308,10 @@ def _svg_heatmap(
             f'transform="rotate(-45 {x:.1f} {y:.1f})">{escape(label)}</text>'
         )
     for row_idx, label in enumerate(y_labels):
-        y = top + row_idx * cell + cell / 2 + 4
+        label_y = top + row_idx * cell + cell / 2 + 4
         parts.append(
             f'<text class="safelens-heatmap-label safelens-y-label" '
-            f'x="{left - 10}" y="{y:.1f}" text-anchor="end">{escape(label)}</text>'
+            f'x="{left - 10}" y="{label_y:.1f}" text-anchor="end">{escape(label)}</text>'
         )
 
     for row_idx, row in enumerate(rows):
@@ -4339,13 +4340,14 @@ def _to_nested(value: Any) -> Any:
 
 
 def _flatten_nested(value: Any) -> list[Any]:
+    items: Iterable[Any]
     if isinstance(value, Mapping):
         items = value.values()
     elif isinstance(value, Sequence) and not isinstance(value, str | bytes):
         items = value
     else:
         return [value]
-    flattened = []
+    flattened: list[Any] = []
     for item in items:
         flattened.extend(_flatten_nested(item))
     return flattened
@@ -4897,7 +4899,9 @@ def _normalize_nla_results(
         if token_index is not None:
             token_index = int(token_index)
         token = str(raw.get("token") if raw.get("token") is not None else token_index)
-        row = {
+        metadata_value = raw.get("metadata")
+        metadata = dict(metadata_value) if isinstance(metadata_value, Mapping) else {}
+        row: dict[str, Any] = {
             "row_id": f"nla-row-{idx}",
             "sample_id": str(raw.get("sample_id", "0")),
             "token_index": token_index if token_index is not None else idx,
@@ -4912,12 +4916,12 @@ def _normalize_nla_results(
             "activation_norm": _optional_float_for_viz(raw.get("activation_norm")),
             "mse_nrm": _optional_float_for_viz(raw.get("mse_nrm")),
             "cosine": _optional_float_for_viz(raw.get("cosine")),
-            "metadata": dict(raw.get("metadata") or {}),
+            "metadata": metadata,
         }
-        row["context"] = str(row["metadata"].get("context", "") or "")
-        row["role"] = str(row["metadata"].get("role", "") or "")
-        row["why_selected"] = str(row["metadata"].get("why_selected", "") or "")
-        row["sequence"] = str(row["metadata"].get("sequence", "") or "")
+        row["context"] = str(metadata.get("context", "") or "")
+        row["role"] = str(metadata.get("role", "") or "")
+        row["why_selected"] = str(metadata.get("why_selected", "") or "")
+        row["sequence"] = str(metadata.get("sequence", "") or "")
         row["layer_label"] = _nla_layer_label(row)
         row["row_text"] = " ".join(
             str(value).lower()

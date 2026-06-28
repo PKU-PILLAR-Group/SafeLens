@@ -5,7 +5,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from SafeLens.core.base import Batch, LayerRef, ModelWrapper
+from SafeLens.core.base import Batch, HookFn, LayerRef, ModelWrapper
 from SafeLens.steering import ContrastiveSteeringVector, add_steering_vector
 
 
@@ -80,9 +80,22 @@ class _TextActivationModel(ModelWrapper):
     def load_model(self) -> _TextActivationModel:
         return self
 
-    def add_hook(self, layer: LayerRef, hook_fn: Any, **kwargs: Any) -> _Handle:
-        _ = kwargs
-        item = (layer, hook_fn)
+    def add_hook(
+        self,
+        layer: LayerRef,
+        hook_fn: HookFn | None = None,
+        *,
+        hook: HookFn | None = None,
+        dir: str = "fwd",
+        is_permanent: bool = False,
+        level: int | None = None,
+        prepend: bool = False,
+    ) -> _Handle:
+        _ = dir, is_permanent, level, prepend
+        resolved_hook = hook_fn or hook
+        if resolved_hook is None:
+            raise TypeError("add_hook requires hook_fn or hook")
+        item = (layer, resolved_hook)
         self._hooks.append(item)
         return _Handle(lambda: self._hooks.remove(item))
 

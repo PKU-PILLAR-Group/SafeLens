@@ -10,6 +10,8 @@ plugins:
 nav:
   - Home: index.md
   - Configuration: configuration.md
+  - Supported Models: supported_models.md
+  - NLA Research Notes: nla_research.md
   - Guides:
       - Add A Probe: guides/add_probe.md
       - Add A Monitor: guides/add_monitor.md

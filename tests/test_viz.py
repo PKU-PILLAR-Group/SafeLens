@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import importlib.util
+from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -63,7 +65,7 @@ def assert_visualization(viz: Visualization, expected: str) -> None:
     assert "<!doctype html>" in viz.to_html(full_document=True)
 
 
-def test_colored_tokens_and_multi_track_export_html(tmp_path) -> None:
+def test_colored_tokens_and_multi_track_export_html(tmp_path: Path) -> None:
     viz = colored_tokens(["A", "<B>"], [0.1, -0.2], labels=["low", "high"])
     assert_visualization(viz, "&lt;B&gt;")
     assert viz.data["values"] == [0.1, -0.2]
@@ -456,7 +458,7 @@ def test_token_log_probs_text_neurons_and_topk_views() -> None:
 
 
 def test_nla_result_visualizations() -> None:
-    rows = [
+    rows: list[NLAResult | dict[str, Any]] = [
         NLAResult(
             explanation="This activation tracks safe refusal language.",
             sample_id="demo",

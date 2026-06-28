@@ -77,6 +77,7 @@ class _FakeAttention(_FakeModule):
         self.o_proj = _FakeModule(torch.arange(16, dtype=torch.float32).reshape(4, 4))
 
     def forward(self, scores: Any | None = None) -> Any:
+        pattern: Any
         try:
             import torch
         except ImportError:
@@ -97,7 +98,7 @@ class _FakeLayer(_FakeModule):
         self.input_layernorm = _FakeModule()
         self.post_attention_layernorm = _FakeModule()
         self.self_attn = _FakeAttention()
-        self.mlp = _FakeModule()
+        self.mlp: Any = _FakeModule()
 
 
 class _FakeConfig:
@@ -114,7 +115,7 @@ class _FakeBackbone:
 
 class _FakeQwen3CausalLM:
     def __init__(self) -> None:
-        self.model = _FakeBackbone()
+        self.model: Any = _FakeBackbone()
         self.config = _FakeConfig()
         self.attn_implementation_calls: list[str] = []
 

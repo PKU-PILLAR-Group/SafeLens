@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from inspect import Parameter, signature
 from itertools import product
 from numbers import Integral
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from SafeLens.core.base import Batch, HookFn, LayerRef, ModelWrapper
 from SafeLens.core.hooks import (
@@ -177,7 +177,7 @@ def transformer_lens_activation_name_for_component(component: str, layer: LayerR
     try:
         from SafeLens.utils.model_bridge import transformer_lens_component_name
 
-        return transformer_lens_component_name(normalized_component, int(layer))
+        return transformer_lens_component_name(normalized_component, _layer_ref_to_int(layer))
     except (ImportError, TypeError, ValueError):
         template = TRANSFORMER_LENS_ACTIVATION_TEMPLATES.get(
             normalized_component,
@@ -331,7 +331,7 @@ def run_activation_patch(
             fwd_hooks=[(spec.layer, patch_hook)],
             **_patch_run_return_type_kwargs(wrapper_run_with_hooks, metric, model),
         )
-        cache = {}
+        cache: Any = {}
     else:
         with temporary_hooks(model, [(spec.layer, patch_hook)]):
             output, cache = model.run_with_cache(
@@ -351,7 +351,7 @@ def _metric_to_float(value: Any) -> float:
     except (TypeError, ValueError):
         item = getattr(value, "item", None)
         if callable(item):
-            return float(item())
+            return float(cast(Any, item()))
         raise
 
 
@@ -359,7 +359,7 @@ def generic_activation_patch(
     model: ModelWrapper,
     corrupted_batch: Any,
     clean_cache: ActivationCache,
-    specs: Iterable[PatchSpec] | PatchMetric | None = None,
+    specs: PatchSpec | Iterable[PatchSpec] | PatchMetric | None = None,
     metric: PatchMetric | PatchSetter | TransformerLensPatchSetter | None = None,
     activation_name: str | None = None,
     index_axis_names: Sequence[AxisName] | None = None,
@@ -382,7 +382,7 @@ def generic_activation_patch(
             if patching_metric is not None:
                 raise TypeError("Pass patching_metric either positionally or by keyword, not both.")
             patching_metric = specs
-            patch_setter = metric
+            patch_setter = cast(PatchSetter | TransformerLensPatchSetter, metric)
             specs = None
             metric = None
             transformer_lens_style = True
@@ -393,11 +393,11 @@ def generic_activation_patch(
             specs = None
             transformer_lens_style = True
     if metric is not None and callable(metric) and specs is None and patch_setter is None:
-        patch_setter = metric
+        patch_setter = cast(PatchSetter | TransformerLensPatchSetter, metric)
         metric = None
         transformer_lens_style = True
 
-    metric_fn = metric or patching_metric
+    metric_fn = cast(PatchMetric | None, metric) or patching_metric
     if metric_fn is None:
         raise TypeError("generic_activation_patch requires `metric` or `patching_metric`.")
 
@@ -437,7 +437,9 @@ def generic_activation_patch(
             "Pass either SafeLens `specs` or TL-style `patch_setter`/`activation_name`, not both."
         )
     if isinstance(specs, PatchSpec):
-        specs = [specs]
+        resolved_specs: Iterable[PatchSpec] = [specs]
+    else:
+        resolved_specs = cast(Iterable[PatchSpec], specs)
 
     if return_details is None:
         return_details = not transformer_lens_style
@@ -453,7 +455,7 @@ def generic_activation_patch(
             metric_fn,
             layers=layers,
         )
-        for spec in specs
+        for spec in resolved_specs
     ]
     return format_patch_results(
         results,
@@ -603,7 +605,7 @@ def make_component_patch_specs(
     layers: Iterable[LayerRef],
     component: str,
     index_axis_names: Sequence[AxisName],
-    axis_values: Mapping[AxisName, Iterable[int]],
+    axis_values: Mapping[AxisName, Iterable[Any]],
     *,
     patch_setter: PatchSetter | TransformerLensPatchSetter,
     mode: PatchMode = "replace",
@@ -613,7 +615,10 @@ def make_component_patch_specs(
 ) -> list[PatchSpec]:
     """Create component-level patch specs using TransformerLens-style index axes."""
     layer_values = list(layers)
-    non_layer_axis_names = [name for name in index_axis_names if name != "layer"]
+    non_layer_axis_names: list[AxisName] = []
+    for name in index_axis_names:
+        if name != "layer":
+            non_layer_axis_names.append(name)
     non_layer_values = [_axis_values(axis_values, name) for name in non_layer_axis_names]
     specs: list[PatchSpec] = []
     adapted_patch_setter = adapt_transformer_lens_patch_setter(patch_setter)
@@ -695,17 +700,21 @@ def adapt_transformer_lens_patch_setter(
         clean_activation = spec.value if spec.value is not None else clean_cache[spec.clean_name]
         index = normalize_index(spec.target_index)
         if call_style == "safelens":
-            return patch_setter(corrupted_activation, spec, clean_cache)
+            safelens_patch_setter = cast(PatchSetter, patch_setter)
+            return safelens_patch_setter(corrupted_activation, spec, clean_cache)
         if call_style == "transformer_lens":
-            return patch_setter(
+            tl_patch_setter = cast(TransformerLensPatchSetter, patch_setter)
+            return tl_patch_setter(
                 clone_patch_target_if_requires_grad(corrupted_activation),
                 list(index),
                 clean_activation,
             )
         inferred_call_style = infer_patch_setter_bind_style(patch_setter)
         if inferred_call_style == "safelens":
-            return patch_setter(corrupted_activation, spec, clean_cache)
-        return patch_setter(
+            safelens_patch_setter = cast(PatchSetter, patch_setter)
+            return safelens_patch_setter(corrupted_activation, spec, clean_cache)
+        tl_patch_setter = cast(TransformerLensPatchSetter, patch_setter)
+        return tl_patch_setter(
             clone_patch_target_if_requires_grad(corrupted_activation),
             list(index),
             clean_activation,
@@ -842,7 +851,7 @@ def component_activation_patch(
         if layers is not None
         else infer_layers(model, clean_cache, patch_component, name_style=name_style)
     )
-    axis_values: dict[AxisName, Iterable[int]] = {}
+    axis_values: dict[AxisName, Iterable[Any]] = {}
     if "pos" in index_axis_names:
         axis_values["pos"] = _values_or_range(
             positions,
@@ -938,6 +947,7 @@ def layer_pos_patch_setter(
     )
     if tl_output is not None:
         return tl_output
+    spec = _require_patch_spec(spec, "layer_pos_patch_setter")
     index = require_patch_index(spec, 2, "layer_pos_patch_setter")
     source_index = source_index_or_target(spec, index)
     target_has_batch = patch_target_has_batch_dim(corrupted_activation, spec, clean_cache)
@@ -969,6 +979,7 @@ def layer_pos_head_vector_patch_setter(
     )
     if tl_output is not None:
         return tl_output
+    spec = _require_patch_spec(spec, "layer_pos_head_vector_patch_setter")
     index = require_patch_index(spec, 3, "layer_pos_head_vector_patch_setter")
     source_index = source_index_or_target(spec, index)
     target_has_batch = patch_target_has_batch_dim(corrupted_activation, spec, clean_cache)
@@ -1000,6 +1011,7 @@ def layer_head_vector_patch_setter(
     )
     if tl_output is not None:
         return tl_output
+    spec = _require_patch_spec(spec, "layer_head_vector_patch_setter")
     index = require_patch_index(spec, 2, "layer_head_vector_patch_setter")
     source_index = source_index_or_target(spec, index)
     target_has_batch = patch_target_has_batch_dim(corrupted_activation, spec, clean_cache)
@@ -1031,6 +1043,7 @@ def layer_head_pattern_patch_setter(
     )
     if tl_output is not None:
         return tl_output
+    spec = _require_patch_spec(spec, "layer_head_pattern_patch_setter")
     index = require_patch_index(spec, 2, "layer_head_pattern_patch_setter")
     source_index = source_index_or_target(spec, index)
     target_has_batch = patch_target_has_batch_dim(corrupted_activation, spec, clean_cache)
@@ -1067,6 +1080,7 @@ def layer_head_pos_pattern_patch_setter(
     )
     if tl_output is not None:
         return tl_output
+    spec = _require_patch_spec(spec, "layer_head_pos_pattern_patch_setter")
     index = require_patch_index(spec, 3, "layer_head_pos_pattern_patch_setter")
     source_index = source_index_or_target(spec, index)
     target_has_batch = patch_target_has_batch_dim(corrupted_activation, spec, clean_cache)
@@ -1103,6 +1117,7 @@ def layer_head_dest_src_pos_pattern_patch_setter(
     )
     if tl_output is not None:
         return tl_output
+    spec = _require_patch_spec(spec, "layer_head_dest_src_pos_pattern_patch_setter")
     index = require_patch_index(
         spec,
         4,
@@ -1667,7 +1682,7 @@ def _resolve_patching_metric(
         raise TypeError(f"{helper_name} requires `metric` or `patching_metric`.")
     if not callable(resolved_metric):
         raise TypeError(f"{helper_name} expected a callable metric.")
-    return resolved_metric
+    return cast(PatchMetric, resolved_metric)
 
 
 def _returns_details(kwargs: Mapping[str, Any]) -> bool:
@@ -1978,6 +1993,13 @@ def require_patch_index(spec: PatchSpec, expected_length: int, setter_name: str)
             f"{setter_name} expects an index of length {expected_length}; got {index!r}."
         )
     return index
+
+
+def _require_patch_spec(index_or_spec: PatchSpec | Sequence[int], setter_name: str) -> PatchSpec:
+    """Return a PatchSpec after the direct TL-index path has been handled."""
+    if isinstance(index_or_spec, PatchSpec):
+        return index_or_spec
+    raise TypeError(f"{setter_name} expected a PatchSpec after TL-style index handling.")
 
 
 def source_index_or_target(spec: PatchSpec, target_index: tuple[Any, ...]) -> tuple[Any, ...]:
@@ -2369,7 +2391,7 @@ def is_sequence(value: Any) -> bool:
 
 
 def infer_layers(
-    model: ModelWrapper,
+    model: Any,
     clean_cache: ActivationCache,
     component: str,
     *,
@@ -2520,9 +2542,15 @@ def _same_layer_ref(layer: LayerRef, explicit_layer: int) -> bool:
     if layer_ref is not None:
         return layer_ref[0] == explicit_layer
     try:
-        return int(layer) == explicit_layer
+        return _layer_ref_to_int(layer) == explicit_layer
     except (TypeError, ValueError):
         return False
+
+
+def _layer_ref_to_int(layer: LayerRef) -> int:
+    if isinstance(layer, tuple):
+        raise TypeError(f"Layer reference {layer!r} cannot be coerced to int.")
+    return int(layer)
 
 
 def _explicit_layer_ref(layer: LayerRef) -> tuple[int, str] | None:
@@ -2699,7 +2727,7 @@ def infer_index_table(
 ) -> list[dict[str, Any]]:
     """Infer a TL-style patch index table from axis names."""
     layers = infer_layers(model, clean_cache, activation_name, name_style=name_style)
-    axis_values: dict[AxisName, Iterable[int]] = {"layer": layers}
+    axis_values: dict[AxisName, Iterable[Any]] = {"layer": layers}
     if "pos" in index_axis_names:
         axis_values["pos"] = range(
             infer_positions(
@@ -2739,7 +2767,7 @@ def infer_index_table(
 
 def make_index_table(
     index_axis_names: Sequence[AxisName],
-    axis_values: Mapping[AxisName, Iterable[int]],
+    axis_values: Mapping[AxisName, Iterable[Any]],
 ) -> list[dict[str, Any]]:
     """Create an ordered list of index rows from named axis values."""
     rows: list[dict[str, Any]] = []
@@ -2761,7 +2789,8 @@ def normalize_index_table(
             records = to_dict("records")
             if columns is None:
                 columns = list(index_df.columns)
-            return [dict(record) for record in records], tuple(columns)
+            record_rows = cast(Iterable[Mapping[Any, Any]], records)
+            return [dict(record) for record in record_rows], tuple(columns)
         except TypeError:
             pass
 
@@ -2919,7 +2948,7 @@ def _values_or_range(values: Iterable[int] | None, inferred_size: int, name: str
     return range(inferred_size)
 
 
-def _axis_values(axis_values: Mapping[AxisName, Iterable[int]], axis_name: AxisName) -> list[int]:
+def _axis_values(axis_values: Mapping[AxisName, Iterable[Any]], axis_name: AxisName) -> list[Any]:
     try:
         return list(axis_values[axis_name])
     except KeyError as exc:

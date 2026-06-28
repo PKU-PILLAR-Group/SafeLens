@@ -1,3 +1,4 @@
+# pyright: reportMissingImports=false
 """Captum-based input attribution for response tokens."""
 
 from __future__ import annotations
@@ -114,7 +115,7 @@ class CaptumInputAttributor(BaseAttributor):
             raise ValueError("target_response_index must be non-negative.")
 
         prompt_tokens = _ensure_single_token_tensor(
-            model.to_tokens(prompt),
+            _model_to_tokens(model, prompt),
             torch=torch,
             device=_model_device(model),
         )
@@ -223,7 +224,7 @@ class CaptumInputAttributor(BaseAttributor):
             )
         if response is not None:
             return _ensure_single_token_tensor(
-                model.to_tokens(response, prepend_bos=False),
+                _model_to_tokens(model, response, prepend_bos=False),
                 torch=torch,
                 device=prompt_tokens.device,
             )
@@ -262,6 +263,15 @@ def _load_layer_integrated_gradients() -> Any:
             "`pip install -e '.[attribution]'`."
         ) from exc
     return LayerIntegratedGradients
+
+
+def _model_to_tokens(model: ModelWrapper, text: str, *, prepend_bos: bool | None = None) -> Any:
+    to_tokens = getattr(model, "to_tokens", None)
+    if not callable(to_tokens):
+        raise TypeError("Captum input attribution requires a model wrapper with `to_tokens`.")
+    if prepend_bos is None:
+        return to_tokens(text)
+    return to_tokens(text, prepend_bos=prepend_bos)
 
 
 def _require_hf_model(model: ModelWrapper) -> Any:

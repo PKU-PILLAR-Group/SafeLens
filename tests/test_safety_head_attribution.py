@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any
 
 import pytest
 
 from SafeLens.attribution import SafetyHeadAttributor, attribute_safety_heads
 from SafeLens.attribution.safety_heads import _activation_norms
+from SafeLens.core.base import Batch, HookFn, LayerRef, ModelWrapper
 from SafeLens.core.hooks import ActivationCache
 
 torch = pytest.importorskip("torch")
@@ -16,18 +18,35 @@ class _FakeCfg:
     n_heads = 2
 
 
-class _SafetyHeadWrapper:
+class _SafetyHeadWrapper(ModelWrapper):
     cfg = _FakeCfg()
 
     def __init__(self) -> None:
         self.activation = torch.tensor([[[[1.0, 0.0], [0.0, 1.0]], [[2.0, 0.0], [0.0, 3.0]]]])
         self.hook_calls: list[str] = []
 
+    def load_model(self) -> _SafetyHeadWrapper:
+        return self
+
+    def add_hook(
+        self,
+        layer: LayerRef,
+        hook_fn: HookFn | None = None,
+        *,
+        hook: HookFn | None = None,
+        dir: str = "fwd",
+        is_permanent: bool = False,
+        level: int | None = None,
+        prepend: bool = False,
+    ) -> Any:
+        _ = layer, hook_fn, hook, dir, is_permanent, level, prepend
+        raise NotImplementedError
+
     def run_with_cache(
         self,
-        batch: Any,
+        batch: Batch,
+        layers: Sequence[LayerRef] | None = None,
         *,
-        layers: Any = None,
         return_cache_object: bool = False,
         return_type: str = "logits",
         **kwargs: Any,
@@ -53,6 +72,13 @@ class _SafetyHeadWrapper:
             if patched is not None:
                 activation = patched
         return self._logits_from_activation(activation)
+
+    def generate(self, prompt: str, **generation_kwargs: Any) -> Any:
+        _ = prompt, generation_kwargs
+        raise NotImplementedError
+
+    def remove_hooks(self) -> None:
+        return None
 
     @staticmethod
     def _logits_from_activation(activation: Any) -> Any:

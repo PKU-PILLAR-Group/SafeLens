@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
@@ -31,7 +32,7 @@ class _TinyNLATokenizer:
 
     def apply_chat_template(
         self,
-        messages,
+        messages: list[dict[str, Any]],
         tokenize: bool,
         add_generation_prompt: bool,
     ) -> list[int]:

@@ -5,7 +5,7 @@ from __future__ import annotations
 import warnings
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from SafeLens.core.hooks import (
     ActivationCache,
@@ -156,14 +156,16 @@ class HookedRoot:
                 alias_names=tuple(alias_names) if alias_names is not None else None,
             )
         name = name_or_hook_point
+        candidate_hook: object
         if hook_point_name_or_hook_fn is _MISSING:
-            hook_fn = hook
+            candidate_hook = hook
         elif hook is not None:
             raise TypeError("Pass only one hook function.")
         else:
-            hook_fn = hook_point_name_or_hook_fn
-        if not callable(hook_fn):
+            candidate_hook = hook_point_name_or_hook_fn
+        if not callable(candidate_hook):
             raise TypeError("hook must be callable.")
+        hook_fn = candidate_hook
         resolved_name = self._resolve_hook_name(name)
         if resolved_name is None:
             available = ", ".join(self.hook_dict)
@@ -411,11 +413,11 @@ class HookedRoot:
         if _looks_like_external_cache(cache_or_names_filter):
             if cache is not None:
                 raise TypeError("Pass external cache either positionally or by keyword, not both.")
-            cache = cache_or_names_filter
+            cache = cast(ActivationCache | dict[str, Any], cache_or_names_filter)
         elif cache_or_names_filter is not None:
             if names_filter is not None:
                 raise TypeError("Pass only one names filter.")
-            names_filter = cache_or_names_filter
+            names_filter = cast(NamesFilter, cache_or_names_filter)
         if names_filter is None:
             names_filter = names
         elif names is not None:
@@ -496,6 +498,7 @@ class HookedRoot:
         clear_contexts: bool = False,
     ) -> Iterator[HookedRoot]:
         """Temporarily add forward/backward hooks."""
+        level: int | None = None
         try:
             self.context_level += 1
             self._next_hook_level += 1
@@ -504,7 +507,7 @@ class HookedRoot:
             self._add_hook_specs(bwd_hooks, dir="bwd", level=level, prepend=prepend)
             yield self
         finally:
-            if reset_hooks_end:
+            if reset_hooks_end and level is not None:
                 self.reset_hooks(
                     clear_contexts=clear_contexts,
                     including_permanent=False,
@@ -801,7 +804,7 @@ def _looks_like_scalar(value: Any) -> bool:
     dim = getattr(value, "dim", None)
     if callable(dim):
         try:
-            return int(dim()) == 0
+            return int(cast(Any, dim())) == 0
         except (TypeError, ValueError):
             pass
     shape = getattr(value, "shape", None)

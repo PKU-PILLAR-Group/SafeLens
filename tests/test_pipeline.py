@@ -5,20 +5,24 @@ import sys
 import types
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
+import pytest
 from pytest import MonkeyPatch
 
 from SafeLens.adapters import FlagSafeAdapter
 from SafeLens.core.base import (
     AttributionResult,
     BaseAttributor,
+    BaseProbe,
     Batch,
+    HookFn,
     LayerRef,
     ModelWrapper,
     PipelineConfig,
+    ProbeResult,
 )
-from SafeLens.core.registry import register_attributor
+from SafeLens.core.registry import register_attributor, register_probe
 from SafeLens.pipelines.runner import PipelineRunner
 from SafeLens.probes.linear import LinearProbe
 from SafeLens.utils import (
@@ -99,6 +103,120 @@ def test_pipeline_runner_calls_attributor_lifecycle(tmp_path: Path) -> None:
     PipelineRunner(config).run()
 
     assert events == ["attach:DummyModelWrapper", "attribute", "detach"]
+
+
+def test_pipeline_runner_cleans_up_hooks_when_setup_fails(tmp_path: Path) -> None:
+    @register_probe("setup_failure_probe", replace=True)
+    class SetupFailureProbe(BaseProbe):
+        def attach(self, model: ModelWrapper, layers: Sequence[LayerRef]) -> None:
+            _ = model, layers
+            raise RuntimeError("probe attach failed")
+
+        def detect(self, batch: Batch) -> ProbeResult:
+            _ = batch
+            return ProbeResult(risk_score=0.0)
+
+        def intervene(self, batch: Batch, direction: Any, scale: float) -> None:
+            _ = batch, direction, scale
+
+        def detach(self) -> None:
+            return None
+
+    config = PipelineConfig.model_validate(
+        {
+            "model": {"name": "dummy"},
+            "pipeline": {
+                "probes": [
+                    {"name": "dummy_probe", "config": {"layers": [0]}},
+                    {"name": "setup_failure_probe"},
+                ]
+            },
+            "dataset": [{"id": "sample", "text": "hello"}],
+            "output": {"report_path": str(tmp_path / "report.json")},
+        }
+    )
+    runner = PipelineRunner(config)
+
+    with pytest.raises(RuntimeError, match="probe attach failed"):
+        runner.run()
+
+    assert cast(Any, runner.model)._hooks == []
+
+
+def test_pipeline_runner_removes_hooks_when_attributor_detach_fails(tmp_path: Path) -> None:
+    @register_attributor("detach_failure_attributor", replace=True)
+    class DetachFailureAttributor(BaseAttributor):
+        def detach(self) -> None:
+            raise RuntimeError("attributor detach failed")
+
+        def attribute_training(
+            self,
+            batch: Batch,
+            model_output: Any = None,
+        ) -> AttributionResult:
+            _ = batch, model_output
+            return AttributionResult(method=self.name, attribution_score=0.0)
+
+        def attribute_input(
+            self,
+            batch: Batch,
+            model_output: Any = None,
+        ) -> AttributionResult:
+            _ = batch, model_output
+            return AttributionResult(method=self.name, attribution_score=0.0)
+
+    config = PipelineConfig.model_validate(
+        {
+            "model": {"name": "dummy"},
+            "pipeline": {
+                "probes": [{"name": "dummy_probe", "config": {"layers": [0]}}],
+                "attributors": [{"name": "detach_failure_attributor"}],
+            },
+            "dataset": [{"id": "sample", "text": "hello"}],
+            "output": {"report_path": str(tmp_path / "report.json")},
+        }
+    )
+    runner = PipelineRunner(config)
+
+    with pytest.raises(RuntimeError, match="attributor detach failed"):
+        runner.run()
+
+    assert cast(Any, runner.model)._hooks == []
+
+
+def test_pipeline_runner_handles_null_probe_detail_collections(tmp_path: Path) -> None:
+    @register_probe("null_detail_probe", replace=True)
+    class NullDetailProbe(BaseProbe):
+        def attach(self, model: ModelWrapper, layers: Sequence[LayerRef]) -> None:
+            _ = model, layers
+
+        def detect(self, batch: Batch) -> ProbeResult:
+            _ = batch
+            return ProbeResult(
+                risk_score=0.9,
+                details={"risk_category": None, "evidence_tokens": None},
+            )
+
+        def intervene(self, batch: Batch, direction: Any, scale: float) -> None:
+            _ = batch, direction, scale
+
+        def detach(self) -> None:
+            return None
+
+    config = PipelineConfig.model_validate(
+        {
+            "model": {"name": "dummy"},
+            "pipeline": {"probes": [{"name": "null_detail_probe"}]},
+            "dataset": [{"id": "sample", "text": "hello"}],
+            "output": {"report_path": str(tmp_path / "report.json")},
+        }
+    )
+
+    report = PipelineRunner(config).run()
+
+    assert report.reports[0].flagged is True
+    assert report.reports[0].risk_category == ["unknown"]
+    assert report.reports[0].evidence_tokens == []
 
 
 def test_dummy_probe_reports_string_component_layers(tmp_path: Path) -> None:
@@ -352,8 +470,22 @@ class _TextActivationModel(ModelWrapper):
     def load_model(self) -> _TextActivationModel:
         return self
 
-    def add_hook(self, layer: LayerRef, hook_fn: Any) -> _Handle:
-        self._hooks.append((layer, hook_fn))
+    def add_hook(
+        self,
+        layer: LayerRef,
+        hook_fn: HookFn | None = None,
+        *,
+        hook: HookFn | None = None,
+        dir: str = "fwd",
+        is_permanent: bool = False,
+        level: int | None = None,
+        prepend: bool = False,
+    ) -> _Handle:
+        _ = dir, is_permanent, level, prepend
+        resolved_hook = hook_fn or hook
+        if resolved_hook is None:
+            raise TypeError("add_hook requires hook_fn or hook")
+        self._hooks.append((layer, resolved_hook))
         return _Handle()
 
     def run_with_cache(
@@ -407,3 +539,12 @@ def test_modelscope_wrapper_resolves_snapshot(monkeypatch: MonkeyPatch, tmp_path
         "local_dir": "./models/qwen",
         "allow_file_pattern": "*.json",
     }
+
+
+def test_linear_probe_train_jsonl_requires_object_rows(tmp_path: Path) -> None:
+    train_path = tmp_path / "train.jsonl"
+    train_path.write_text("[1, 2, 3]\n", encoding="utf-8")
+    probe = LinearProbe({"train_jsonl": str(train_path)})
+
+    with pytest.raises(ValueError, match="line 1.*JSON object"):
+        probe.attach(_TextActivationModel(), [])

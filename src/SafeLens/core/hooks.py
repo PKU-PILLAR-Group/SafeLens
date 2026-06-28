@@ -7,7 +7,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping, MutableMappin
 from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, Protocol, cast
 
 from SafeLens.core.base import Batch, HookFn, LayerRef, ModelWrapper
 from SafeLens.core.hook_call import call_user_hook
@@ -337,7 +337,7 @@ def activation_name_for_layer(layer: LayerRef) -> str:
     """Return the canonical cache name for a layer reference."""
     if isinstance(layer, int):
         return f"layer_{layer}"
-    return layer
+    return str(layer)
 
 
 def get_act_name(
@@ -495,21 +495,27 @@ class ActivationCache(MutableMapping[Any, Any]):
             return self.resolve_key(key)
         except KeyError:
             if isinstance(key, tuple) and key:
-                if len(key) == 1:
-                    top_level_name = _TOP_LEVEL_ACT_NAMES.get(str(key[0]))
+                tuple_key = list(key)
+                if len(tuple_key) == 1:
+                    top_level_name = _TOP_LEVEL_ACT_NAMES.get(str(tuple_key[0]))
                     if top_level_name is not None:
                         return top_level_name
-                layer = key[1] if len(key) >= 2 else None
-                raw_name = _strip_hook_prefix(str(key[0]))
+                layer = tuple_key[1] if len(tuple_key) >= 2 else None
+                raw_name = _strip_hook_prefix(str(tuple_key[0]))
                 name = _ACT_NAME_ALIASES.get(raw_name, raw_name)
                 if layer == -1:
                     stack = _activation_key_stack_name(name)
                     n_layers = self._infer_stack_n_layers(stack)
                     if n_layers > 0:
                         layer = n_layers - 1
-                layer_type = str(key[2]) if len(key) >= 3 and key[2] is not None else None
-                layer_type = _LAYER_TYPE_ALIASES.get(layer_type, layer_type)
-                if layer_type:
+                layer_type = (
+                    str(tuple_key[2])
+                    if len(tuple_key) >= 3 and tuple_key[2] is not None
+                    else None
+                )
+                if layer_type is not None:
+                    layer_type = _LAYER_TYPE_ALIASES.get(layer_type, layer_type)
+                if layer_type and layer is not None:
                     return f"{activation_name_for_layer(layer)}.{layer_type}.{name}"
                 return safelens_act_name(name, layer)
             if isinstance(key, str):
@@ -1361,9 +1367,10 @@ class ActivationCache(MutableMapping[Any, Any]):
                 return recomputed
 
         resolved_scale_key = scale_key
+        candidates: list[ActivationKey] = []
         if resolved_scale_key is None:
             if target_layer == n_layers:
-                candidates: list[ActivationKey] = ["ln_final.hook_scale"]
+                candidates = ["ln_final.hook_scale"]
             else:
                 requested_layer_norm = _residual_stack_ln_name(stack, mlp_input)
                 fallback_layer_norm = _residual_stack_fallback_ln_name(stack, mlp_input)
@@ -1740,7 +1747,9 @@ def activation_name_candidates(
     layer = original_layer
     layer_type = str(key[2]) if len(key) >= 3 and key[2] is not None else None
     aliased_name = _ACT_NAME_ALIASES.get(name, name)
-    aliased_layer_type = _LAYER_TYPE_ALIASES.get(layer_type, layer_type)
+    aliased_layer_type = (
+        _LAYER_TYPE_ALIASES.get(layer_type, layer_type) if layer_type is not None else None
+    )
     if layer == -1:
         stack_n_layers = (
             decoder_n_layers if _activation_key_stack_name(aliased_name) == "decoder" else n_layers
@@ -2216,7 +2225,7 @@ def _layer_indices_from_cache_keys(
     return layers
 
 
-def _call_hookpoint_fn(hook_fn: HookFn, activation: Any, hook: HookPoint) -> Any:
+def _call_hookpoint_fn(hook_fn: HookFn, activation: Any, hook: Any) -> Any:
     return call_user_hook(
         hook_fn,
         {"activation": activation, "output": activation, "hook": hook},
@@ -3357,7 +3366,7 @@ def _apply_final_layer_norm_to_stack(residual_stack: Any, ln_final: Any) -> Any:
                 component = component.unsqueeze(1)
             normalized = ln_final(component)
             if not had_pos_dim:
-                normalized = normalized.squeeze(1)
+                normalized = cast(Any, normalized).squeeze(1)
             components.append(normalized)
         return torch.stack(components, dim=0)
     except Exception:
@@ -3541,7 +3550,7 @@ class _ScaledGradientValue:
         numel = getattr(result, "numel", None)
         if callable(numel):
             try:
-                if int(numel()) == 1:
+                if int(cast(Any, numel())) == 1:
                     return result * self._scale
             except Exception:
                 return result

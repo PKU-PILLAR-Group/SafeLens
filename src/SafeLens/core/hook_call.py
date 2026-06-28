@@ -74,7 +74,7 @@ def _select_positional_call(
     seen: set[tuple[int, tuple[str, ...]]] = set()
     for positional_args in positional_arg_options:
         args = tuple(positional_args)
-        keyword_variants = (
+        keyword_variants: tuple[dict[str, Any], dict[str, Any]] = (
             _keyword_kwargs_for_signature(
                 hook_signature,
                 hook_kwargs,

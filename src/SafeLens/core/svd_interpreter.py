@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from collections.abc import Iterable, Mapping
+from typing import Any, Literal, cast
 
 from SafeLens.core.factored_matrix import (
     FactoredMatrix,
@@ -28,13 +29,23 @@ class SVDInterpreter:
     def __init__(self, model: Any) -> None:
         self.model = model
         self.cfg = getattr(model, "cfg", getattr(model, "config", None))
+        self.params: dict[str, Any]
         tl_parameters = getattr(model, "tl_parameters", None)
         if callable(tl_parameters):
-            self.params = dict(tl_parameters())
+            params = tl_parameters()
+            if isinstance(params, Mapping):
+                self.params = {str(name): value for name, value in params.items()}
+            else:
+                self.params = {
+                    str(name): value for name, value in cast(Iterable[tuple[Any, Any]], params)
+                }
             return
         named_parameters = getattr(model, "named_parameters", None)
         if callable(named_parameters):
-            self.params = {name: param for name, param in named_parameters()}
+            self.params = {
+                str(name): param
+                for name, param in cast(Iterable[tuple[Any, Any]], named_parameters())
+            }
             return
         raise ValueError(
             "SVDInterpreter requires a model exposing tl_parameters() or named_parameters()."

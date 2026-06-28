@@ -6,6 +6,10 @@ import math
 from collections.abc import Callable, Sequence
 from typing import Any
 
+_torch: Any
+_nn: Any
+_F: Any
+
 try:
     import torch as _torch
     import torch.nn as _nn
@@ -116,7 +120,7 @@ def xielu(input: Any) -> Any:
 
 if _nn is not None:
 
-    class XIELU(_nn.Module):
+    class _XIELUModule(_nn.Module):  # type: ignore[misc]
         """Trainable xIELU activation matching TransformerLens' parameterization."""
 
         def __init__(
@@ -135,6 +139,8 @@ if _nn is not None:
                     _torch.expm1(_torch.tensor(alpha_n_init - beta_init, dtype=_torch.float32))
                 )
             )
+            self.beta: Any
+            self.eps: Any
             self.register_buffer("beta", _torch.tensor(beta_init, dtype=_torch.float32))
             self.register_buffer("eps", _torch.tensor(eps, dtype=_torch.float32))
 
@@ -147,13 +153,17 @@ if _nn is not None:
                 (_torch.expm1(_torch.min(input, self.eps)) - input) * alpha_n + self.beta * input,
             )
 
+    XIELU: Any = _XIELUModule
+
 else:
 
-    class XIELU:
+    class _MissingXIELU:
         """Placeholder that reports the optional torch dependency when constructed."""
 
         def __init__(self, *_args: Any, **_kwargs: Any) -> None:
             raise ImportError("torch is required to instantiate XIELU.")
+
+    XIELU = _MissingXIELU
 
 
 SUPPORTED_ACTIVATIONS: dict[str, ActivationFunction] = {

@@ -25,6 +25,16 @@ _RUN_HF_REAL_FLOW = os.environ.get("SAFELENS_RUN_HF_REAL_FLOW") == "1"
 _MODEL_ID = os.environ.get("SAFELENS_HF_REAL_FLOW_MODEL", "sshleifer/tiny-gpt2")
 
 
+def _as_activation_cache(
+    cache: dict[str, Any] | ActivationCache,
+    *,
+    model: HuggingFaceModelWrapper | None = None,
+) -> ActivationCache:
+    if isinstance(cache, ActivationCache):
+        return cache
+    return ActivationCache(cache, model=model)
+
+
 def _skip_unless_enabled() -> None:
     if not _RUN_HF_REAL_FLOW:
         pytest.skip("Set SAFELENS_RUN_HF_REAL_FLOW=1 to run real HuggingFace download tests.")
@@ -235,7 +245,7 @@ def test_huggingface_wrapper_real_direct_logit_attribution_workflow() -> None:
             {"id": "hf-dla", "text": "SafeLens checks direct logit attribution."},
             layers=("layer_0.z", "layer_0.result", "layer_0.post"),
         )
-        cache = ActivationCache(cache_dict, model=wrapper)
+        cache = _as_activation_cache(cache_dict, model=wrapper)
         z = cache["layer_0.z"]
         result = cache["layer_0.result"]
 

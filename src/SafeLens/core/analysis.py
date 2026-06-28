@@ -7,7 +7,7 @@ import math
 import random
 import re
 from collections.abc import Callable, Mapping, Sequence
-from typing import Any
+from typing import Any, cast
 
 from SafeLens.core.hooks import ActivationCache, HookPoint, clone_activation
 
@@ -274,7 +274,7 @@ def logit_diff(logits: Any, correct_token: int, incorrect_token: int, *, pos: in
         else:
             value = logits[correct_token] - logits[incorrect_token]
         item = getattr(value, "item", None)
-        return float(item() if callable(item) else value)
+        return float(cast(Any, item() if callable(item) else value))
 
     if _is_sequence(logits) and logits and _is_sequence(logits[0]):
         if logits[0] and _is_sequence(logits[0][0]):
@@ -363,7 +363,7 @@ def _test_prompt_structured(
     return result
 
 
-test_prompt.__test__ = False
+test_prompt.__test__ = False  # type: ignore[attr-defined]
 
 
 def _test_prompt_transformerlens(
@@ -579,11 +579,11 @@ def attention_pattern_score(
 
         if hasattr(pattern, "shape"):
             array = np.asarray(pattern)
-            diag = np.diagonal(array, offset=offset, axis1=-2, axis2=-1)
-            diag = _slice_diagonal_by_dest_pos(diag, offset, min_dest_pos)
-            if diag.shape[-1] == 0:
+            numpy_diag = np.diagonal(array, offset=offset, axis1=-2, axis2=-1)
+            numpy_diag = _slice_diagonal_by_dest_pos(numpy_diag, offset, min_dest_pos)
+            if numpy_diag.shape[-1] == 0:
                 return np.zeros(array.shape[:-2], dtype=array.dtype)
-            return diag.mean(axis=-1)
+            return numpy_diag.mean(axis=-1)
     except Exception:
         pass
     return _attention_pattern_score_nested(pattern, offset, min_dest_pos)
@@ -677,7 +677,12 @@ def detect_head(
         run_with_cache = getattr(model, "run_with_cache", None)
         if not callable(run_with_cache):
             raise TypeError("detect_head requires `cache` or a model with `run_with_cache`.")
-        _output, cache = run_with_cache(tokens, remove_batch_dim=True)
+        cache_result = run_with_cache(tokens, remove_batch_dim=True)
+        if not isinstance(cache_result, tuple | list) or len(cache_result) < 2:
+            raise TypeError("model.run_with_cache must return an (output, cache) pair.")
+        cache = cache_result[1]
+        if cache is None:
+            raise TypeError("model.run_with_cache returned None for cache.")
     resolved_cache = _ensure_activation_cache(cache, model)
     n_layers, n_heads = _infer_head_score_shape(model, resolved_cache, heads)
     layer_to_heads = _normalize_head_selection(heads, n_layers=n_layers, n_heads=n_heads)
@@ -721,10 +726,10 @@ def get_previous_token_head_detection_pattern(tokens: Any) -> Any:
         import numpy as np
 
         if hasattr(tokens, "shape"):
-            pattern = np.zeros((seq_len, seq_len), dtype=float)
+            numpy_pattern = np.zeros((seq_len, seq_len), dtype=float)
             if seq_len > 1:
-                pattern[1:, :-1] = np.eye(seq_len - 1)
-            return np.tril(pattern)
+                numpy_pattern[1:, :-1] = np.eye(seq_len - 1)
+            return np.tril(numpy_pattern)
     except Exception:
         pass
     return [[1.0 if dest == src + 1 else 0.0 for src in range(seq_len)] for dest in range(seq_len)]
@@ -776,9 +781,9 @@ def get_induction_head_detection_pattern(tokens: Any) -> Any:
         import numpy as np
 
         if hasattr(duplicate_pattern, "shape"):
-            shifted = np.roll(np.asarray(duplicate_pattern), shift=1, axis=1)
-            shifted[:, 0] = 0
-            return np.tril(shifted)
+            numpy_shifted = np.roll(np.asarray(duplicate_pattern), shift=1, axis=1)
+            numpy_shifted[:, 0] = 0
+            return np.tril(numpy_shifted)
     except Exception:
         pass
     seq_len = len(duplicate_pattern)
@@ -793,7 +798,7 @@ def get_induction_head_detection_pattern(tokens: Any) -> Any:
 
 def get_supported_heads() -> list[str]:
     """Print and return supported TransformerLens-style head detector names."""
-    heads = list(HEAD_NAMES)
+    heads = [str(name) for name in HEAD_NAMES]
     print(f"Supported heads: {heads}")
     return heads
 
@@ -853,16 +858,16 @@ def compute_head_attention_similarity_score(
                 return float(
                     np.nan if denominator == 0 else (attention * detection).sum() / denominator
                 )
-            abs_diff = np.abs(attention - detection)
-            if not np.allclose(abs_diff, np.tril(abs_diff)):
+            numpy_abs_diff = np.abs(attention - detection)
+            if not np.allclose(numpy_abs_diff, np.tril(numpy_abs_diff)):
                 raise AssertionError(
                     "Attention pattern and detection pattern differ above the diagonal."
                 )
             if exclude_bos:
-                abs_diff[:, 0] = 0
+                numpy_abs_diff[:, 0] = 0
             if exclude_current_token:
-                np.fill_diagonal(abs_diff, 0)
-            return 1 - round(float(abs_diff.mean() * len(abs_diff)), 3)
+                np.fill_diagonal(numpy_abs_diff, 0)
+            return 1 - round(float(numpy_abs_diff.mean() * len(numpy_abs_diff)), 3)
     except ImportError:
         pass
 
@@ -881,7 +886,7 @@ def compute_head_attention_similarity_score(
                 denominator += value
         return numerator / denominator if denominator else float("nan")
 
-    abs_diff: list[list[float]] = []
+    nested_abs_diff: list[list[float]] = []
     for dest, row in enumerate(attention):
         diff_row = []
         for src, value in enumerate(row):
@@ -895,9 +900,9 @@ def compute_head_attention_similarity_score(
             if exclude_current_token and src == dest:
                 diff = 0.0
             diff_row.append(diff)
-        abs_diff.append(diff_row)
-    total = sum(sum(row) for row in abs_diff)
-    size = len(abs_diff)
+        nested_abs_diff.append(diff_row)
+    total = sum(sum(row) for row in nested_abs_diff)
+    size = len(nested_abs_diff)
     return 1 - round(total / max(1, size * size) * size, 3)
 
 
@@ -1026,10 +1031,13 @@ def _token_sequence_values(tokens: Any) -> list[Any]:
     tolist = getattr(value, "tolist", None)
     if callable(tolist):
         value = tolist()
-    while _is_sequence(value) and value and _is_sequence(value[0]):
-        value = value[0]
+    while _is_sequence(value) and value:
+        sequence_value = cast(Sequence[Any], value)
+        if not _is_sequence(sequence_value[0]):
+            break
+        value = sequence_value[0]
     if _is_sequence(value):
-        return list(value)
+        return list(cast(Sequence[Any], value))
     return [value]
 
 
@@ -1102,7 +1110,8 @@ def _pattern_values_are_binary(pattern: Any) -> bool:
         import torch
 
         if isinstance(pattern, torch.Tensor):
-            unique_values = set(pattern.detach().cpu().unique().tolist())
+            detached_pattern = cast(Any, pattern.detach().cpu())
+            unique_values = set(detached_pattern.unique().tolist())
             return unique_values.issubset({0, 1})
     except Exception:
         pass
@@ -1213,7 +1222,7 @@ def _normalize_head_selection(
             int(layer): [int(head) for head in layer_heads] for layer, layer_heads in heads.items()
         }
     else:
-        layer_to_heads: dict[int, list[int]] = {}
+        layer_to_heads = {}
         for layer, head in heads:
             layer_to_heads.setdefault(int(layer), []).append(int(head))
     for layer, layer_heads in layer_to_heads.items():
@@ -1305,7 +1314,7 @@ def _get_cached_attention_pattern(cache: ActivationCache, layer: int) -> Any:
         if key in raw_cache:
             return raw_cache[key]
         try:
-            return cache[key]
+            return cache[tuple(key)]
         except KeyError:
             continue
     raise KeyError(f"Could not find cached attention pattern for layer {layer}.")
@@ -1417,17 +1426,20 @@ def _model_to_str_tokens(model: Any, text: Any, *, prepend_bos: bool | None) -> 
     to_str_tokens = getattr(model, "to_str_tokens", None)
     if callable(to_str_tokens):
         try:
-            return list(to_str_tokens(text, prepend_bos=prepend_bos))
+            return list(cast(Sequence[str], to_str_tokens(text, prepend_bos=prepend_bos)))
         except TypeError:
             if prepend_bos is None:
-                return list(to_str_tokens(text))
+                return list(cast(Sequence[str], to_str_tokens(text)))
             raise
     tokens = _model_to_tokens(model, text, prepend_bos=prepend_bos)
     if _is_sequence(text) and not isinstance(text, str | bytes):
         first_row = _row(tokens, 0)
-        return [_decode_single_token_if_possible(model, int(token_id)) for token_id in first_row]
+        return [
+            str(_decode_single_token_if_possible(model, int(token_id)))
+            for token_id in first_row
+        ]
     row = _row(tokens, 0) if _rank(tokens) >= 2 else tokens
-    return [_decode_single_token_if_possible(model, int(token_id)) for token_id in row]
+    return [str(_decode_single_token_if_possible(model, int(token_id))) for token_id in row]
 
 
 def _slice_last_dim(value: Any, *, stop: int) -> Any:
@@ -1513,8 +1525,8 @@ def _column(value: Any, index: int) -> list[int]:
     if callable(tolist):
         selected = tolist()
     if not _is_sequence(selected):
-        return [int(selected)]
-    return [int(item) for item in selected]
+        return [int(cast(Any, selected))]
+    return [int(item) for item in cast(Sequence[Any], selected)]
 
 
 def _row(value: Any, index: int) -> Any:
@@ -1569,7 +1581,7 @@ def _resolve_single_token(model: Any, token: str | int) -> int:
     if isinstance(token, str):
         to_single_token = getattr(model, "to_single_token", None)
         if callable(to_single_token):
-            return int(to_single_token(token))
+            return int(cast(Any, to_single_token(token)))
         try:
             return int(token)
         except ValueError as exc:
@@ -1597,7 +1609,7 @@ def _final_position_logits(logits: Any) -> Any:
 def _argmax_token_id(logits: Any) -> int:
     argmax = argmax_last_dim(logits)
     item = getattr(argmax, "item", None)
-    return int(item() if callable(item) else argmax)
+    return int(cast(Any, item() if callable(item) else argmax))
 
 
 def _index_last_dim_float(values: Any, index: int) -> float:
@@ -1606,7 +1618,7 @@ def _index_last_dim_float(values: Any, index: int) -> float:
     except Exception:
         value = gather_last_dim(values, index)
     item = getattr(value, "item", None)
-    return float(item() if callable(item) else value)
+    return float(cast(Any, item() if callable(item) else value))
 
 
 def _as_flat_list(value: Any) -> list[Any]:
@@ -1727,7 +1739,8 @@ def _sample_logits_torch(
         )
         logits_for_sampling = logits_for_sampling.masked_fill(indices_to_remove, -float("inf"))
 
-    sample = torch.distributions.categorical.Categorical(
+    categorical = cast(Any, torch.distributions.categorical.Categorical)
+    sample = categorical(
         logits=logits_for_sampling.to(torch.float32)
     ).sample()
     return sample.squeeze(0) if single_row else sample
@@ -1826,10 +1839,11 @@ def _ensure_batch_tokens(tokens: Any, batch_size: int) -> list[list[int]]:
     value = tokens.tolist() if callable(getattr(tokens, "tolist", None)) else tokens
     if not _is_sequence(value):
         value = [int(value)]
-    if value and _is_sequence(value[0]):
-        rows = [[int(item) for item in row] for row in value]
+    sequence_value = cast(Sequence[Any], value)
+    if sequence_value and _is_sequence(sequence_value[0]):
+        rows = [[int(item) for item in cast(Sequence[Any], row)] for row in sequence_value]
     else:
-        rows = [[int(item) for item in value]]
+        rows = [[int(item) for item in sequence_value]]
     if len(rows) == batch_size:
         return rows
     if len(rows) == 1:
@@ -1984,7 +1998,7 @@ def gather_last_dim(values: Any, indices: Any) -> Any:
         if hasattr(values, "shape") and hasattr(indices, "shape"):
             if len(getattr(indices, "shape", ())) == 0:
                 item = getattr(indices, "item", None)
-                index = int(item() if callable(item) else indices)
+                index = int(cast(Any, item() if callable(item) else indices))
                 return values[..., index]
             return values.gather(-1, indices.unsqueeze(-1)).squeeze(-1)
     except Exception:

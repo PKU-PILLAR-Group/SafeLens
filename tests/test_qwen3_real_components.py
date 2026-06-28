@@ -68,7 +68,7 @@ _SUPPORTED_COMPONENTS = (
 _CACHE_LAYERS = tuple(f"layer_0.{component}" for component in _SUPPORTED_COMPONENTS)
 
 
-@pytest.fixture(scope="module")  # type: ignore[misc]
+@pytest.fixture(scope="module")
 def qwen3_wrapper() -> Iterable[Qwen3DenseModelWrapper]:
     if not _RUN_QWEN3_REAL_FLOW:
         pytest.skip("Set SAFELENS_RUN_QWEN3_REAL_FLOW=1 to run real Qwen3 tests.")
@@ -117,11 +117,17 @@ def _assert_finite_results(results: Iterable[PatchResult], *, expected_count: in
         assert math.isfinite(result.metric)
 
 
+def _as_activation_cache(cache: dict[str, Any] | ActivationCache) -> ActivationCache:
+    if isinstance(cache, ActivationCache):
+        return cache
+    return ActivationCache(cache)
+
+
 def _build_clean_cache(wrapper: Qwen3DenseModelWrapper) -> ActivationCache:
     output, cache = wrapper.run_with_cache({"text": _CLEAN_TEXT}, layers=_CACHE_LAYERS)
     assert output.logits.ndim == 3
     assert set(_CACHE_LAYERS) <= set(cache)
-    return ActivationCache(cache)
+    return _as_activation_cache(cache)
 
 
 def test_qwen3_real_model_caches_every_supported_component(

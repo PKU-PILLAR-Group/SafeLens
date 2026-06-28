@@ -188,12 +188,22 @@ class ModelWrapper(ABC):
         """Load and return the underlying model object."""
 
     @abstractmethod
-    def add_hook(self, layer: LayerRef, hook_fn: HookFn) -> Any:
+    def add_hook(
+        self,
+        layer: LayerRef,
+        hook_fn: HookFn | None = None,
+        *,
+        hook: HookFn | None = None,
+        dir: str = "fwd",
+        is_permanent: bool = False,
+        level: int | None = None,
+        prepend: bool = False,
+    ) -> Any:
         """Register a forward hook on a target layer."""
 
     def add_perma_hook(self, layer: LayerRef, hook_fn: HookFn) -> Any:
         """Register a persistent forward hook when the wrapper supports it."""
-        return self.add_hook(layer, hook_fn)
+        return self.add_hook(layer, hook_fn, is_permanent=True)
 
     @abstractmethod
     def run_with_cache(
@@ -235,7 +245,7 @@ class BaseProbe(ABC):
         self.config = dict(config or {})
 
     @abstractmethod
-    def attach(self, model: ModelWrapper, layers: Sequence[int]) -> None:
+    def attach(self, model: ModelWrapper, layers: Sequence[LayerRef]) -> None:
         """Register hooks on target layers."""
 
     @abstractmethod

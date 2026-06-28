@@ -20,18 +20,25 @@ from SafeLens.utils import TransformerLensCompatibleModelWrapper, build_model_wr
 pytestmark = [pytest.mark.integration, pytest.mark.slow]
 
 _RUN_MULTI_REAL_FLOW = os.environ.get("SAFELENS_RUN_MULTI_REAL_FLOW") == "1"
+_RUN_MULTI_REAL_FLOW_EXTENDED = os.environ.get("SAFELENS_RUN_MULTI_REAL_FLOW_EXTENDED") == "1"
 _CACHE_DIR = os.environ.get(
     "SAFELENS_MULTI_REAL_FLOW_CACHE",
     ".cache/safelens/test-multi-real-flow",
 )
 _TEXT = "SafeLens checks multiple architecture adapters."
 
-_CAUSAL_MODEL_CASES = (
-    ("gpt2", "sshleifer/tiny-gpt2"),
-    ("gpt_neox", "hf-internal-testing/tiny-random-GPTNeoXForCausalLM"),
-    ("opt", "hf-internal-testing/tiny-random-OPTForCausalLM"),
-    ("llama", "hf-internal-testing/tiny-random-LlamaForCausalLM"),
-    ("mistral", "hf-internal-testing/tiny-random-MistralForCausalLM"),
+_SMALL_CAUSAL_MODEL_CASES = (
+    ("gpt2", "gpt2-xs"),
+    ("gpt_neo", "tiny-stories-1m"),
+    ("gpt_neox", "pythia-14m"),
+)
+_EXTENDED_CAUSAL_MODEL_CASES = (
+    ("opt", "facebook/opt-125m"),
+    ("llama", "meta-llama/Llama-3.2-1B"),
+    ("mistral", "mistral-7b"),
+)
+_CAUSAL_MODEL_CASES = _SMALL_CAUSAL_MODEL_CASES + (
+    _EXTENDED_CAUSAL_MODEL_CASES if _RUN_MULTI_REAL_FLOW_EXTENDED else ()
 )
 _ENCODER_MODEL_CASES = (
     ("bert", "google-bert/bert-base-uncased"),
@@ -85,7 +92,13 @@ def _assert_finite_results(results: Iterable[PatchResult]) -> None:
     assert math.isfinite(result_list[0].metric)
 
 
-@pytest.mark.parametrize(  # type: ignore[misc]
+def _as_activation_cache(cache: dict[str, Any] | ActivationCache) -> ActivationCache:
+    if isinstance(cache, ActivationCache):
+        return cache
+    return ActivationCache(cache)
+
+
+@pytest.mark.parametrize(
     ("family", "model_id"), _CAUSAL_MODEL_CASES + _ENCODER_MODEL_CASES
 )
 def test_transformer_lens_real_model_caches_common_components(
@@ -112,7 +125,7 @@ def test_transformer_lens_real_model_caches_common_components(
         wrapper.remove_hooks()
 
 
-@pytest.mark.parametrize(("family", "model_id"), _CAUSAL_MODEL_CASES)  # type: ignore[misc]
+@pytest.mark.parametrize(("family", "model_id"), _CAUSAL_MODEL_CASES)
 def test_transformer_lens_real_causal_models_cache_attention_and_result_components(
     family: str,
     model_id: str,
@@ -145,7 +158,7 @@ def test_transformer_lens_real_causal_models_cache_attention_and_result_componen
         wrapper.remove_hooks()
 
 
-@pytest.mark.parametrize(("family", "model_id"), _CAUSAL_MODEL_CASES)  # type: ignore[misc]
+@pytest.mark.parametrize(("family", "model_id"), _CAUSAL_MODEL_CASES)
 def test_transformer_lens_real_causal_models_generate(
     family: str,
     model_id: str,
@@ -166,7 +179,7 @@ def test_transformer_lens_real_causal_models_generate(
         wrapper.remove_hooks()
 
 
-@pytest.mark.parametrize(  # type: ignore[misc]
+@pytest.mark.parametrize(
     ("family", "model_id"), _CAUSAL_MODEL_CASES + _ENCODER_MODEL_CASES
 )
 def test_transformer_lens_real_model_runs_core_patches(
@@ -178,7 +191,7 @@ def test_transformer_lens_real_model_runs_core_patches(
     try:
         cache_layers = ("layer_0.resid_pre", "layer_0.z")
         _output, cache = wrapper.run_with_cache({"text": _TEXT}, layers=cache_layers)
-        clean_cache = ActivationCache(cache)
+        clean_cache = _as_activation_cache(cache)
         batch = {"text": "SafeLens checks corrupted multi model adapters."}
 
         _assert_finite_results(

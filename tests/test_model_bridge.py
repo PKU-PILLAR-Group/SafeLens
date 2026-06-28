@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import builtins
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, Literal
 
 import pytest
 
@@ -71,8 +71,14 @@ class _FakeModule:
     def __init__(self, weight: Any | None = None, bias: Any | None = None) -> None:
         self.forward_hooks: list[Any] = []
         self.pre_hooks: list[Any] = []
-        self.weight = weight
-        self.bias = bias
+        self.weight: Any = weight
+        self.bias: Any = bias
+
+    def __getattr__(self, name: str) -> Any:
+        raise AttributeError(name)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        object.__setattr__(self, name, value)
 
     def register_forward_hook(self, hook_fn: Any, *, prepend: bool = False) -> _Handle:
         if prepend:
@@ -96,7 +102,8 @@ class _FakeModule:
                 current = patched
         return current
 
-    def __call__(self, value: Any) -> Any:
+    def __call__(self, value: Any, **kwargs: Any) -> Any:
+        _ = kwargs
         output = value
         weight = getattr(self, "weight", None)
         if weight is not None and hasattr(value, "matmul"):
@@ -158,7 +165,7 @@ class _FakeLayer(_FakeModule):
         super().__init__()
         self.post_attention_layernorm = _FakeModule()
         self.self_attn = _FakeAttention()
-        self.mlp = _FakeModule()
+        self.mlp: Any = _FakeModule()
 
 
 class _FakeConfig:
@@ -182,11 +189,17 @@ class _FakeBackbone:
 
 
 class _FakeQwenModel:
+    config: Any
+    model: Any
+
     def __init__(self) -> None:
         self.config = _FakeConfig()
         self.model = _FakeBackbone()
 
-    def __call__(self, **kwargs: Any) -> dict[str, Any]:
+    def eval(self) -> _FakeQwenModel:
+        return self
+
+    def __call__(self, **kwargs: Any) -> Any:
         if kwargs.get("output_attentions"):
             output = self.model.layers[0].self_attn.forward(kwargs.get("scores"))
             return {"attention": output, "output_attentions": True}
@@ -657,6 +670,12 @@ def _block_torch_and_numpy_imports(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(builtins, "__import__", blocked_import)
 
 
+def _require_component_ref(adapter: Any, name: str) -> ComponentRef:
+    ref = adapter.parse_component_ref(name)
+    assert ref is not None
+    return ref
+
+
 class _FakeTupleWeightedQwenModel(_FakeListWeightedQwenModel):
     def __init__(self) -> None:
         super().__init__()
@@ -724,7 +743,7 @@ class _FakeGpt2Block(_FakeModule):
 
 class _FakeGpt2Transformer:
     def __init__(self) -> None:
-        self.h = [_FakeGpt2Block()]
+        self.h: list[Any] = [_FakeGpt2Block()]
 
 
 class _FakeGpt2Model:
@@ -737,8 +756,10 @@ class _FakeHookableEmbedding(_FakeModule):
     def __init__(self, weight: Any) -> None:
         super().__init__(weight)
 
-    def __call__(self, input_ids: Any) -> Any:
+    def __call__(self, value: Any, **kwargs: Any) -> Any:
+        _ = kwargs
         torch = pytest.importorskip("torch")
+        input_ids = value
         ids = input_ids if hasattr(input_ids, "shape") else torch.tensor(input_ids)
         embedded = self.weight[ids]
         return self.run_forward(embedded, inputs=(input_ids,))
@@ -793,7 +814,8 @@ class _CallableGpt2Block(_FakeModule):
         self.layer_index = layer_index
         self.calls: list[dict[str, Any]] = []
 
-    def __call__(self, hidden_states: Any, **kwargs: Any) -> Any:
+    def __call__(self, value: Any, **kwargs: Any) -> Any:
+        hidden_states = value
         self.calls.append(kwargs)
         past_key_values = kwargs.get("past_key_values")
         if past_key_values is not None:
@@ -819,7 +841,9 @@ class _FakeLmHead(_FakeModule):
         torch = pytest.importorskip("torch")
         super().__init__(torch.eye(6, dtype=torch.float32), torch.arange(6, dtype=torch.float32))
 
-    def __call__(self, residual: Any) -> Any:
+    def __call__(self, value: Any, **kwargs: Any) -> Any:
+        _ = kwargs
+        residual = value
         return self.run_forward(residual @ self.weight.T + self.bias, inputs=(residual,))
 
 
@@ -1253,6 +1277,8 @@ class _FakeT5Config:
 
 
 class _FakeT5Model:
+    config: Any
+
     def __init__(self) -> None:
         self.config = _FakeT5Config()
 
@@ -1301,7 +1327,7 @@ class _FakeWeightedBertModel(_FakeBertModel):
     def __init__(self) -> None:
         super().__init__()
         torch = pytest.importorskip("torch")
-        layer = self.encoder.layer[0]
+        layer: Any = self.encoder.layer[0]
         layer.intermediate.dense = _FakeModule(
             torch.arange(12, dtype=torch.float32).reshape(3, 4),
             torch.arange(3, dtype=torch.float32),
@@ -1518,7 +1544,7 @@ class _FakeUnembeddingModel:
         self._weight = weight
         self._bias = bias
 
-    def get_output_embeddings(self) -> _FakeEmbedding:
+    def get_output_embeddings(self) -> _FakeEmbedding | None:
         return _FakeEmbedding(self._weight, self._bias)
 
 
@@ -1553,8 +1579,8 @@ class _FakeGenerateModel:
 
     def generate(self, **kwargs: Any) -> Any:
         self.calls.append(kwargs)
-        input_ids = kwargs.get("input_ids")
-        input_embeds = kwargs.get("inputs_embeds")
+        input_ids: Any = kwargs.get("input_ids")
+        input_embeds: Any = kwargs.get("inputs_embeds")
         try:
             import torch
 
@@ -1623,7 +1649,7 @@ class _FakeSeq2SeqGenerateModel:
     def generate(self, **kwargs: Any) -> Any:
         self.calls.append(kwargs)
         pytest.importorskip("torch")
-        reference = kwargs.get("input_ids", kwargs.get("inputs_embeds"))
+        reference: Any = kwargs.get("input_ids", kwargs.get("inputs_embeds"))
         sequences = self.sequences
         if hasattr(reference, "device"):
             sequences = sequences.to(reference.device)
@@ -1677,9 +1703,13 @@ class _FakeAudioProcessor:
 
 
 class _FakeTextTokenizer:
-    bos_token_id = 0
-    eos_token_id = 999
-    padding_side = "right"
+    bos_token: Any = "<bos>"
+    bos_token_id: Any = 0
+    eos_token: Any = "<eos>"
+    eos_token_id: Any = 999
+    pad_token: Any = "<pad>"
+    pad_token_id: Any = 999
+    padding_side: Any = "right"
 
     def __call__(
         self,
@@ -1757,7 +1787,10 @@ class _FakeTokenizerAddsMultipleSpecialTokens(_FakeTextTokenizer):
         return_tensors: str,
         add_special_tokens: bool = True,
         padding: bool = False,
+        truncation: bool = False,
+        max_length: int | None = None,
     ) -> Any:
+        _ = truncation, max_length
         output = super().__call__(
             text,
             return_tensors=return_tensors,
@@ -1937,9 +1970,9 @@ def test_architecture_adapter_maps_mamba2_ssm_components() -> None:
         == "mamba2_ssm"
     )
     assert (
-        adapter.parse_component_ref("blocks.0.ssm.hook_inner_norm").safelens_name
+        _require_component_ref(adapter, "blocks.0.ssm.hook_inner_norm").safelens_name
         == "layer_0.ssm_inner_norm"
-    )  # type: ignore[union-attr]
+    )
 
     adapter.register_component_hook(
         model,
@@ -2082,40 +2115,59 @@ def test_t5_architecture_adapter_supports_decoder_and_cross_attention_paths() ->
         "attn_in",
         "mlp_in",
     } <= supported
-    assert adapter.parse_component_ref("encoder.0.hook_q_input").safelens_name == "layer_0.q_input"  # type: ignore[union-attr]
-    assert adapter.parse_component_ref("encoder.0.hook_attn_in").safelens_name == "layer_0.attn_in"  # type: ignore[union-attr]
-    assert adapter.parse_component_ref("encoder.0.attn.hook_q").safelens_name == "layer_0.q"  # type: ignore[union-attr]
-    assert adapter.parse_component_ref("encoder.0.hook_mlp_in").safelens_name == "layer_0.mlp_in"  # type: ignore[union-attr]
-    assert adapter.parse_component_ref("encoder.0.mlp.hook_post").safelens_name == "layer_0.post"  # type: ignore[union-attr]
     assert (
-        adapter.parse_component_ref("decoder.0.hook_q_input").safelens_name
+        _require_component_ref(adapter, "encoder.0.hook_q_input").safelens_name
+        == "layer_0.q_input"
+    )
+    assert (
+        _require_component_ref(adapter, "encoder.0.hook_attn_in").safelens_name
+        == "layer_0.attn_in"
+    )
+    assert _require_component_ref(adapter, "encoder.0.attn.hook_q").safelens_name == "layer_0.q"
+    assert (
+        _require_component_ref(adapter, "encoder.0.hook_mlp_in").safelens_name
+        == "layer_0.mlp_in"
+    )
+    assert (
+        _require_component_ref(adapter, "encoder.0.mlp.hook_post").safelens_name
+        == "layer_0.post"
+    )
+    assert (
+        _require_component_ref(adapter, "decoder.0.hook_q_input").safelens_name
         == "layer_0.decoder_q_input"
-    )  # type: ignore[union-attr]
+    )
     assert (
-        adapter.parse_component_ref("decoder.0.hook_attn_in").safelens_name
+        _require_component_ref(adapter, "decoder.0.hook_attn_in").safelens_name
         == "layer_0.decoder_attn_in"
-    )  # type: ignore[union-attr]
-    assert adapter.parse_component_ref("decoder.0.attn.hook_q").safelens_name == "layer_0.decoder_q"  # type: ignore[union-attr]
+    )
     assert (
-        adapter.parse_component_ref("decoder.0.cross_attn.hook_q").safelens_name
+        _require_component_ref(adapter, "decoder.0.attn.hook_q").safelens_name
+        == "layer_0.decoder_q"
+    )
+    assert (
+        _require_component_ref(adapter, "decoder.0.cross_attn.hook_q").safelens_name
         == "layer_0.cross_q"
-    )  # type: ignore[union-attr]
+    )
     assert (
-        adapter.parse_component_ref("decoder.0.hook_mlp_in").safelens_name
+        _require_component_ref(adapter, "decoder.0.hook_mlp_in").safelens_name
         == "layer_0.decoder_mlp_in"
-    )  # type: ignore[union-attr]
+    )
     assert (
-        adapter.parse_component_ref("blocks.0.cross_attn.hook_q").safelens_name == "layer_0.cross_q"
-    )  # type: ignore[union-attr]
+        _require_component_ref(adapter, "blocks.0.cross_attn.hook_q").safelens_name
+        == "layer_0.cross_q"
+    )
     assert (
-        adapter.parse_component_ref("layer_0.q_input").transformer_lens_name
+        _require_component_ref(adapter, "layer_0.q_input").transformer_lens_name
         == "encoder.0.hook_q_input"
-    )  # type: ignore[union-attr]
-    assert adapter.parse_component_ref("layer_0.q").transformer_lens_name == "encoder.0.attn.hook_q"  # type: ignore[union-attr]
+    )
     assert (
-        adapter.parse_component_ref("layer_0.mlp_in").transformer_lens_name
+        _require_component_ref(adapter, "layer_0.q").transformer_lens_name
+        == "encoder.0.attn.hook_q"
+    )
+    assert (
+        _require_component_ref(adapter, "layer_0.mlp_in").transformer_lens_name
         == "encoder.0.hook_mlp_in"
-    )  # type: ignore[union-attr]
+    )
     assert transformer_lens_component_name("q_input", 0) == "blocks.0.hook_q_input"
     assert transformer_lens_component_name("attn_in", 0) == "blocks.0.hook_attn_in"
     assert transformer_lens_component_name("decoder_q", 0) == "decoder.0.attn.hook_q"
@@ -2325,6 +2377,7 @@ def test_transformer_lens_wrapper_runs_t5_decoder_cross_attention_cache_workflow
         ],
         return_cache_object=True,
     )
+    assert isinstance(cache, ActivationCache)
 
     assert tuple(output["logits"].shape) == (1, 2, 4)
     assert tuple(cache[("q_input", 0)].shape) == (1, 3, 2, 4)
@@ -2525,7 +2578,7 @@ def test_architecture_adapter_result_hook_preserves_structured_list_output() -> 
                 pos_heads[0] = [0.0 for _value in pos_heads[0]]
         return patched
 
-    spec = adapter._spec_for_ref(adapter.parse_component_ref("layer_0.result"), for_cache=False)  # type: ignore[arg-type, union-attr]
+    spec = adapter._spec_for_ref(_require_component_ref(adapter, "layer_0.result"), for_cache=False)
     original_output = append_metadata_output(z)
     original_result = compute_attention_result_activation(
         z,
@@ -2570,7 +2623,7 @@ def test_bert_architecture_adapter_supports_automodel_paths() -> None:
         lambda **kwargs: kwargs["activation"] + ["post"],
     )
 
-    layer = model.encoder.layer[0]
+    layer: Any = model.encoder.layer[0]
     assert layer.attention.self.query.run_forward(["x"]) == ["x", "q"]
     assert layer.attention.output.dense.run_pre(["x"]) == ["x", "z"]
     assert layer.intermediate.dense.run_forward(["x"]) == ["x", "pre_linear"]
@@ -2677,7 +2730,7 @@ def test_apertus_architecture_adapter_supports_decoder_paths() -> None:
         lambda **kwargs: kwargs["activation"] + ["mid"],
     )
 
-    layer = model.model.layers[0]
+    layer: Any = model.model.layers[0]
     assert layer.self_attn.q_proj.run_forward(["x"]) == ["x", "q"]
     assert layer.self_attn.o_proj.run_pre(["x"]) == ["x", "z"]
     assert layer.mlp.up_proj.run_forward(["x"]) == ["x", "pre_linear"]
@@ -2715,7 +2768,7 @@ def test_gpt_oss_architecture_adapter_supports_attention_and_residual_paths() ->
         lambda **kwargs: kwargs["activation"] + ["mid"],
     )
 
-    layer = model.model.layers[0]
+    layer: Any = model.model.layers[0]
     assert layer.self_attn.q_proj.run_forward(["x"]) == ["x", "q"]
     assert layer.self_attn.o_proj.run_pre(["x"]) == ["x", "z"]
     assert layer.mlp.run_forward(["x"]) == ["x", "mlp_out"]
@@ -3101,6 +3154,7 @@ def test_transformer_lens_compatible_wrapper_caches_final_ln_scale_hook() -> Non
         remove_batch_dim=True,
         pos_slice=1,
     )
+    assert isinstance(sliced_cache, ActivationCache)
 
     assert not sliced_cache.has_batch_dim
     assert sliced_cache["ln_final.hook_scale"].shape == (1, 1)
@@ -3113,7 +3167,7 @@ def test_transformer_lens_compatible_wrapper_prefers_decoder_final_norm_for_seq2
     class _Seq2SeqNormModel:
         def __init__(self) -> None:
             self.norm = _FakeModule()
-            self.decoder = type("Decoder", (), {"final_layer_norm": _FakeModule()})()
+            self.decoder: Any = type("Decoder", (), {"final_layer_norm": _FakeModule()})()
 
         def __call__(self, **_kwargs: Any) -> dict[str, Any]:
             encoder_resid = torch.tensor([[[1.0, 3.0], [5.0, 7.0]]])
@@ -3819,11 +3873,19 @@ def test_transformer_lens_compatible_wrapper_forward_uses_past_kv_cache() -> Non
     logits = wrapper.forward(torch.tensor([[1, 2]]), past_kv_cache=cache)
 
     assert logits.shape == (1, 2, 6)
-    assert cache[0].keys.shape == (1, 2, 2, 3)
-    assert cache[0].past_keys is cache[0].keys
-    assert cache[1].values.shape == (1, 2, 2, 3)
-    assert torch.equal(cache[0].keys[:, :, 0, :], torch.full((1, 2, 3), 10.0))
-    assert torch.equal(cache[1].values[:, -1, :, :], torch.full((1, 2, 3), -100.0))
+    assert cache[0].keys is not None
+    assert cache[1].values is not None
+    cache0_keys = cache[0].keys
+    cache1_values = cache[1].values
+    assert cache0_keys is not None
+    assert cache1_values is not None
+    cache0_keys_tensor = torch.as_tensor(cache0_keys)
+    cache1_values_tensor = torch.as_tensor(cache1_values)
+    assert cache0_keys_tensor.shape == (1, 2, 2, 3)
+    assert cache[0].past_keys is cache0_keys
+    assert cache1_values_tensor.shape == (1, 2, 2, 3)
+    assert torch.equal(cache0_keys_tensor[:, :, 0, :], torch.full((1, 2, 3), 10.0))
+    assert torch.equal(cache1_values_tensor[:, -1, :, :], torch.full((1, 2, 3), -100.0))
 
     wrapper.forward(torch.tensor([[3]]), past_kv_cache=cache)
 
@@ -3865,6 +3927,7 @@ def test_transformer_lens_compatible_wrapper_partial_forward_updates_past_kv_cac
 
     assert residual.shape == (1, 2, 6)
     assert cache[0].sequence_length == 2
+    assert cache[0].keys is not None
     assert cache[0].keys.shape == (1, 2, 2, 3)
     assert wrapper.model.transformer.h[0].calls[-1]["past_key_values"] is not None
 
@@ -3938,6 +4001,7 @@ def test_transformer_lens_cache_bridge_preserves_sparse_layer_indices() -> None:
     cache[1].past_values = torch.full((1, 2, 2, 3), 2.0)
 
     model_cache, _sync_back = _past_kv_cache_to_transformers_cache(cache)
+    assert model_cache is not None
 
     assert len(model_cache.layers) == 2
     assert model_cache.layers[0].keys is None
@@ -3952,6 +4016,9 @@ def test_transformer_lens_cache_bridge_respects_frozen_prefix_cache() -> None:
     cache = KeyValueCache.init_cache(wrapper.cfg, device="cpu", batch_size=1)
 
     wrapper.forward(torch.tensor([[1, 2]]), past_kv_cache=cache)
+    assert cache[0].past_keys is not None
+    assert cache[0].past_values is not None
+    assert cache.previous_attention_mask is not None
     original_keys = cache[0].past_keys.clone()
     original_values = cache[0].past_values.clone()
     original_mask = cache.previous_attention_mask.clone()
@@ -3975,10 +4042,14 @@ def test_transformer_lens_cache_bridge_respects_frozen_sparse_entry() -> None:
     cache[1].frozen = True
 
     model_cache, sync_back = _past_kv_cache_to_transformers_cache(cache)
+    assert model_cache is not None
     model_cache.update(torch.full((1, 2, 1, 3), 5.0), torch.full((1, 2, 1, 3), 6.0), 0)
     model_cache.update(torch.full((1, 2, 1, 3), 7.0), torch.full((1, 2, 1, 3), 8.0), 1)
     sync_back()
 
+    assert cache[0].past_keys is not None
+    assert cache[1].past_keys is not None
+    assert cache[1].past_values is not None
     assert cache[0].past_keys.shape == (1, 3, 2, 3)
     assert torch.equal(cache[0].past_keys[:, -1], torch.full((1, 2, 3), 5.0))
     assert cache[1].past_keys.shape == (1, 2, 2, 3)
@@ -4049,7 +4120,8 @@ def test_transformer_lens_compatible_wrapper_run_with_hooks_supports_backward_ho
     torch = pytest.importorskip("torch")
 
     class _DifferentiableLayer(_FakeModule):
-        def __call__(self, value: Any) -> Any:
+        def __call__(self, value: Any, **kwargs: Any) -> Any:
+            _ = kwargs
             return self.run_forward(value * 2, inputs=(value,))
 
     class _DifferentiableBackbone:
@@ -4076,13 +4148,16 @@ def test_transformer_lens_compatible_wrapper_run_with_hooks_supports_backward_ho
     x = torch.ones(1, 1, 2, requires_grad=True)
     seen_grads: list[Any] = []
 
+    def scale_grad(grad: Any, hook: Any) -> Any:
+        seen_grads.append((grad.detach().clone(), hook.name))
+        return grad * 3
+
     loss = wrapper.run_with_hooks(
         {"inputs_embeds": x},
         bwd_hooks=[
             (
                 "blocks.0.hook_resid_post",
-                lambda grad, hook: seen_grads.append((grad.detach().clone(), hook.name))
-                or grad * 3,
+                scale_grad,
             )
         ],
         return_type="logits",
@@ -4099,7 +4174,8 @@ def test_transformer_lens_compatible_wrapper_hooks_context_supports_backward_hoo
     torch = pytest.importorskip("torch")
 
     class _DifferentiableLayer(_FakeModule):
-        def __call__(self, value: Any) -> Any:
+        def __call__(self, value: Any, **kwargs: Any) -> Any:
+            _ = kwargs
             return self.run_forward(value + 1, inputs=(value,))
 
     class _DifferentiableBackbone:
@@ -4132,7 +4208,8 @@ def test_transformer_lens_compatible_run_with_cache_incl_bwd_caches_gradients() 
     torch = pytest.importorskip("torch")
 
     class _DifferentiableLayer(_FakeModule):
-        def __call__(self, value: Any) -> Any:
+        def __call__(self, value: Any, **kwargs: Any) -> Any:
+            _ = kwargs
             return self.run_forward(value * 2, inputs=(value,))
 
     class _DifferentiableBackbone:
@@ -4173,7 +4250,8 @@ def test_transformer_lens_compatible_add_caching_hooks_incl_bwd_caches_gradients
     torch = pytest.importorskip("torch")
 
     class _DifferentiableLayer(_FakeModule):
-        def __call__(self, value: Any) -> Any:
+        def __call__(self, value: Any, **kwargs: Any) -> Any:
+            _ = kwargs
             return self.run_forward(value + 1, inputs=(value,))
 
     class _DifferentiableBackbone:
@@ -4213,7 +4291,8 @@ def test_transformer_lens_compatible_reset_hooks_filters_by_direction() -> None:
     torch = pytest.importorskip("torch")
 
     class _DifferentiableLayer(_FakeModule):
-        def __call__(self, value: Any) -> Any:
+        def __call__(self, value: Any, **kwargs: Any) -> Any:
+            _ = kwargs
             return self.run_forward(value + 1, inputs=(value,))
 
     class _DifferentiableBackbone:
@@ -4532,7 +4611,6 @@ def test_transformer_lens_compatible_wrapper_load_model_processes_weights_once(
 
     def fake_from_pretrained(cls: Any, *_args: Any, **_kwargs: Any) -> Any:
         model = _FakeWeightedQwenModel()
-        model.eval = lambda: model
         return model
 
     monkeypatch.setattr(
@@ -9186,11 +9264,12 @@ def test_svd_interpreter_projects_low_precision_torch_parameters_without_list_fa
 
     interpreter = SVDInterpreter(SvdModel())
 
-    for vector_type, kwargs in (
+    vector_cases: tuple[tuple[Literal["OV", "w_in", "w_out"], dict[str, Any]], ...] = (
         ("OV", {"head_index": 0}),
         ("w_in", {}),
         ("w_out", {}),
-    ):
+    )
+    for vector_type, kwargs in vector_cases:
         vectors = interpreter.get_singular_vectors(
             vector_type, layer_index=0, num_vectors=2, **kwargs
         )
@@ -9455,6 +9534,7 @@ def test_transformer_lens_compatible_wrapper_caches_mlp_post_for_neuron_decompos
     )
 
     assert output == {"post": [[[3.0, 4.0, 5.0]]]}
+    assert isinstance(cache, ActivationCache)
     assert cache["layer_0.post"] == [[[3.0, 4.0, 5.0]]]
     torch = pytest.importorskip("torch")
     expected = torch.tensor([[[[36.0, 45.0, 54.0, 63.0], [70.0, 85.0, 100.0, 115.0]]]])

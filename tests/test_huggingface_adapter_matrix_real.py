@@ -40,12 +40,12 @@ _DECODER_CASES = (
 )
 _TOKEN_ID_DECODER_CASES = (("mixtral", "hf-internal-testing/tiny-random-MixtralForCausalLM"),)
 _ENCODER_CASES = (
-    ("roberta", "hf-internal-testing/tiny-random-RobertaModel"),
-    ("distilbert", "hf-internal-testing/tiny-random-DistilBertModel"),
+    ("roberta", "roberta-base"),
+    ("distilbert", "distilbert-base-uncased"),
 )
 _AUDIO_CASES = (
-    ("wav2vec2", "hf-internal-testing/tiny-random-Wav2Vec2Model"),
-    ("hubert", "hf-internal-testing/tiny-random-HubertModel"),
+    ("wav2vec2", "wav2vec2-base"),
+    ("hubert", "hubert-base-ls960"),
 )
 _HEAD_COMPONENTS = ("q", "k", "v", "z")
 _COMMON_COMPONENTS = (
@@ -99,7 +99,13 @@ def _token_id_batch() -> dict[str, Any]:
     return {"input_ids": torch.tensor([[1, 2, 3, 4]])}
 
 
-@pytest.mark.parametrize(("family", "model_id"), _DECODER_CASES)  # type: ignore[misc]
+def _as_activation_cache(cache: dict[str, Any] | ActivationCache) -> ActivationCache:
+    if isinstance(cache, ActivationCache):
+        return cache
+    return ActivationCache(cache)
+
+
+@pytest.mark.parametrize(("family", "model_id"), _DECODER_CASES)
 def test_real_decoder_adapter_matrix_caches_head_components_and_patches(
     family: str,
     model_id: str,
@@ -118,7 +124,7 @@ def test_real_decoder_adapter_matrix_caches_head_components_and_patches(
             assert activation.shape[0] == 1
             assert activation.shape[2] >= 1
 
-        clean_cache = ActivationCache(cache)
+        clean_cache = _as_activation_cache(cache)
         _assert_one_finite_result(
             get_act_patch_resid_pre(
                 wrapper,
@@ -156,7 +162,7 @@ def test_real_decoder_adapter_matrix_caches_head_components_and_patches(
         wrapper.remove_hooks()
 
 
-@pytest.mark.parametrize(("family", "model_id"), _TOKEN_ID_DECODER_CASES)  # type: ignore[misc]
+@pytest.mark.parametrize(("family", "model_id"), _TOKEN_ID_DECODER_CASES)
 def test_real_decoder_adapter_matrix_allows_token_id_batches_without_tokenizer(
     family: str,
     model_id: str,
@@ -176,7 +182,7 @@ def test_real_decoder_adapter_matrix_allows_token_id_batches_without_tokenizer(
             activation = cache[f"layer_0.{component}"]
             assert activation.ndim == 4, (family, component, tuple(activation.shape))
 
-        clean_cache = ActivationCache(cache)
+        clean_cache = _as_activation_cache(cache)
         _assert_one_finite_result(
             get_act_patch_attn_head_out_by_pos(
                 wrapper,
@@ -196,7 +202,7 @@ def test_real_decoder_adapter_matrix_allows_token_id_batches_without_tokenizer(
         wrapper.remove_hooks()
 
 
-@pytest.mark.parametrize(("family", "model_id"), _DECODER_CASES)  # type: ignore[misc]
+@pytest.mark.parametrize(("family", "model_id"), _DECODER_CASES)
 def test_real_decoder_adapter_matrix_caches_attention_pattern_and_scores(
     family: str,
     model_id: str,
@@ -219,7 +225,7 @@ def test_real_decoder_adapter_matrix_caches_attention_pattern_and_scores(
         wrapper.remove_hooks()
 
 
-@pytest.mark.parametrize(("family", "model_id"), _ENCODER_CASES)  # type: ignore[misc]
+@pytest.mark.parametrize(("family", "model_id"), _ENCODER_CASES)
 def test_real_encoder_adapter_matrix_caches_head_components_and_patches(
     family: str,
     model_id: str,
@@ -237,7 +243,7 @@ def test_real_encoder_adapter_matrix_caches_head_components_and_patches(
             assert activation.ndim == 4, (family, component, tuple(activation.shape))
             assert activation.shape[0] == 1
 
-        clean_cache = ActivationCache(cache)
+        clean_cache = _as_activation_cache(cache)
         _assert_one_finite_result(
             get_act_patch_resid_pre(
                 wrapper,
@@ -275,7 +281,7 @@ def test_real_encoder_adapter_matrix_caches_head_components_and_patches(
         wrapper.remove_hooks()
 
 
-@pytest.mark.parametrize(("family", "model_id"), _AUDIO_CASES)  # type: ignore[misc]
+@pytest.mark.parametrize(("family", "model_id"), _AUDIO_CASES)
 def test_real_audio_adapter_matrix_caches_head_components_and_patches(
     family: str,
     model_id: str,
@@ -296,7 +302,7 @@ def test_real_audio_adapter_matrix_caches_head_components_and_patches(
             assert activation.ndim == 4, (family, component, tuple(activation.shape))
             assert activation.shape[0] == 1
 
-        clean_cache = ActivationCache(cache)
+        clean_cache = _as_activation_cache(cache)
         _assert_one_finite_result(
             get_act_patch_resid_pre(
                 wrapper,

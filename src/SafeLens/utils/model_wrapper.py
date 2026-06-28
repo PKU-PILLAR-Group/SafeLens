@@ -1,16 +1,17 @@
+# pyright: reportMissingImports=false
 """Model wrapper implementations and hook helpers."""
 
 from __future__ import annotations
 
 import math
 import re
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, MutableMapping, Sequence
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from inspect import Parameter, signature
 from numbers import Integral
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, cast
 
 from SafeLens.core.base import (
     Batch,
@@ -457,8 +458,20 @@ class DummyModelWrapper(ModelWrapper):
         self.loaded = True
         return self
 
-    def add_hook(self, layer: LayerRef, hook_fn: HookFn) -> _RemovableHandle:
-        item = (layer, hook_fn)
+    def add_hook(
+        self,
+        layer: LayerRef,
+        hook_fn: HookFn | None = None,
+        *,
+        hook: HookFn | None = None,
+        dir: str = "fwd",
+        is_permanent: bool = False,
+        level: int | None = None,
+        prepend: bool = False,
+    ) -> _RemovableHandle:
+        _ = dir, is_permanent, level, prepend
+        resolved_hook = _resolve_hook_argument(hook_fn, hook=hook)
+        item = (layer, resolved_hook)
         self._hooks.append(item)
         return _RemovableHandle(lambda: self._remove_hook(item))
 
@@ -470,6 +483,7 @@ class DummyModelWrapper(ModelWrapper):
         names_filter: NamesFilter = None,
         return_cache_object: bool = False,
         remove_batch_dim: bool = False,
+        **_kwargs: Any,
     ) -> tuple[dict[str, Any], dict[str, Any] | ActivationCache]:
         if not self.loaded:
             self.load_model()
@@ -616,6 +630,7 @@ class HuggingFaceModelWrapper(ModelWrapper):
         self._temporary_backward_hook_depth = 0
         self._attention_hook_count = 0
         self._run_requires_output_attentions = False
+        self.default_prepend_bos: bool | None = None
         self._transformer_lens_runtime_flags = dict(_TRANSFORMER_LENS_RUNTIME_FLAG_DEFAULTS)
 
     @property
@@ -675,6 +690,21 @@ class HuggingFaceModelWrapper(ModelWrapper):
 
     def _uses_decoder_text_input_semantics(self) -> bool:
         return transformer_lens_model_kind(self.name) == "decoder"
+
+    def _transformer_lens_model_kind(
+        self,
+        *,
+        pretrained_path: str | None = None,
+        probe_pretrained_path: bool = False,
+    ) -> str:
+        _ = probe_pretrained_path
+        model = getattr(self, "model", None)
+        config = _core_model_config(_config_attr(model, "config"))
+        model_type = _config_attr(config, "model_type")
+        if isinstance(model_type, str) and model_type:
+            return transformer_lens_model_kind(model_type)
+        candidate = pretrained_path or self.pretrained_path or self.name
+        return transformer_lens_model_kind(candidate)
 
     def check_hooks_to_add(
         self,
@@ -806,8 +836,9 @@ class HuggingFaceModelWrapper(ModelWrapper):
                     input = text
         if isinstance(input, str) or _is_text_batch(input):
             resolved_truncate = True if truncate is None else bool(truncate)
+            text_input = cast(str | Sequence[str], input)
             tokens = self.to_tokens(
-                input,
+                text_input,
                 prepend_bos=prepend_bos,
                 padding_side=padding_side,
                 truncate=resolved_truncate,
@@ -1248,7 +1279,7 @@ class HuggingFaceModelWrapper(ModelWrapper):
     def load_sample_training_dataset(self, *args: Any, **kwargs: Any) -> None:
         """Store an empty sample dataset placeholder for TL notebook compatibility."""
         _ = args, kwargs
-        self.dataset = []
+        self.dataset: list[Any] = []
 
     def sample_datapoint(self, *args: Any, **kwargs: Any) -> Any:
         """Return one datapoint from a previously loaded sample dataset."""
@@ -1286,7 +1317,7 @@ class HuggingFaceModelWrapper(ModelWrapper):
         num_parameters = getattr(model, "num_parameters", None)
         if callable(num_parameters):
             try:
-                return int(num_parameters())
+                return int(cast(Any, num_parameters()))
             except TypeError:
                 pass
         return sum(_parameter_numel(parameter) for parameter in self.parameters())
@@ -1451,7 +1482,7 @@ class HuggingFaceModelWrapper(ModelWrapper):
         cfg = self.cfg
         n_layers = int(cfg.n_layers or 0)
         stacked: dict[str, Any] = {}
-        for template, getter in (
+        parameter_getters: tuple[tuple[str, Callable[[], Any]], ...] = (
             ("blocks.{layer}.attn.W_Q", lambda: self.W_Q),
             ("blocks.{layer}.attn.W_K", lambda: self.W_K),
             ("blocks.{layer}.attn.W_V", lambda: self.W_V),
@@ -1460,7 +1491,8 @@ class HuggingFaceModelWrapper(ModelWrapper):
             ("blocks.{layer}.attn.b_K", lambda: self.b_K),
             ("blocks.{layer}.attn.b_V", lambda: self.b_V),
             ("blocks.{layer}.attn.b_O", lambda: self.b_O),
-        ):
+        )
+        for template, getter in parameter_getters:
             try:
                 stacked[template] = getter()
             except (KeyError, RuntimeError, ValueError):
@@ -1656,7 +1688,7 @@ class HuggingFaceModelWrapper(ModelWrapper):
 
     def add_hook(
         self,
-        layer: LayerRef,
+        layer: LayerRef | Callable[[str], bool],
         hook_fn: HookFn | None = None,
         *,
         hook: HookFn | None = None,
@@ -1698,7 +1730,7 @@ class HuggingFaceModelWrapper(ModelWrapper):
 
     def _add_managed_hook(
         self,
-        layer: LayerRef,
+        layer: LayerRef | Callable[[str], bool],
         hook_fn: HookFn,
         *,
         is_permanent: bool = False,
@@ -1732,7 +1764,7 @@ class HuggingFaceModelWrapper(ModelWrapper):
 
     def _add_managed_backward_hook(
         self,
-        layer: LayerRef,
+        layer: LayerRef | Callable[[str], bool],
         hook_fn: HookFn,
         *,
         is_permanent: bool = False,
@@ -2339,11 +2371,11 @@ class HuggingFaceModelWrapper(ModelWrapper):
         if _looks_like_external_cache(cache_or_names_filter):
             if cache is not None:
                 raise TypeError("Pass external cache either positionally or by keyword, not both.")
-            cache = cache_or_names_filter
+            cache = cast(ActivationCache | dict[str, Any], cache_or_names_filter)
         else:
             if names_filter is not None:
                 raise TypeError("Pass only one names filter.")
-            names_filter = cache_or_names_filter
+            names_filter = cast(NamesFilter, cache_or_names_filter)
         if names_filter is None:
             raise TypeError("cache_some() missing required argument: 'names_filter' or 'names'")
         return self.add_caching_hooks(
@@ -2535,6 +2567,8 @@ class HuggingFaceModelWrapper(ModelWrapper):
         )
         input_is_text = isinstance(prompt, str) or _is_text_batch(prompt)
         input_is_embeds = _looks_like_input_embeds(prompt)
+        input_ids: Any | None = None
+        input_embeds: Any | None = None
         default_padding_side = "left" if _is_text_batch(prompt) else None
         padding_side = generation_kwargs.pop("padding_side", default_padding_side)
         truncate = bool(generation_kwargs.pop("truncate", True))
@@ -3008,14 +3042,17 @@ class HuggingFaceModelWrapper(ModelWrapper):
                 Sequence | str,
             )
         ):
-            return [
-                self.to_str_tokens(
-                    item,
-                    prepend_bos=resolved_prepend_bos,
-                    padding_side=padding_side,
-                )
-                for item in text_or_tokens
-            ]
+            return cast(
+                list[list[str]],
+                [
+                    self.to_str_tokens(
+                        item,
+                        prepend_bos=resolved_prepend_bos,
+                        padding_side=padding_side,
+                    )
+                    for item in text_or_tokens
+                ],
+            )
         tokens = (
             self.to_tokens(
                 text_or_tokens,
@@ -3050,7 +3087,8 @@ class HuggingFaceModelWrapper(ModelWrapper):
             converted = convert(token_list)
             if isinstance(converted, str):
                 return [converted]
-            return [str(token) for token in converted]
+            if isinstance(converted, Sequence) and not isinstance(converted, bytes):
+                return [str(token) for token in converted]
         return [str(tokenizer.decode([token])) for token in token_list]
 
     def to_single_token(self, text: str) -> int:
@@ -3097,7 +3135,7 @@ class HuggingFaceModelWrapper(ModelWrapper):
             token_id = self.to_single_token(single_token)
         else:
             item = getattr(single_token, "item", None)
-            token_id = int(item()) if callable(item) else int(single_token)
+            token_id = int(cast(Any, item() if callable(item) else single_token))
         positions = [index for index, value in enumerate(token_values) if int(value) == token_id]
         if not positions:
             raise ValueError("The token does not occur in the prompt.")
@@ -3119,8 +3157,8 @@ class HuggingFaceModelWrapper(ModelWrapper):
             item = getattr(tokens, "item", None)
             if callable(numel) and callable(item):
                 try:
-                    if int(numel()) == 1:
-                        tokens = int(item())
+                    if int(cast(Any, numel())) == 1:
+                        tokens = int(cast(Any, item()))
                 except Exception:
                     pass
         try:
@@ -3367,7 +3405,7 @@ class HuggingFaceModelWrapper(ModelWrapper):
             )
         hook_context = ComponentHookContext(component_ref)
         if spec.mode == "forward_input":
-            hook = _make_component_input_backward_registration_hook(
+            input_hook = _make_component_input_backward_registration_hook(
                 hook_fn,
                 component_ref,
                 adapter.name,
@@ -3376,10 +3414,10 @@ class HuggingFaceModelWrapper(ModelWrapper):
                 hook_context,
             )
             return _BackwardHookRegistrationHandle(
-                _register_module_forward_pre_hook(module, hook, prepend=prepend),
+                _register_module_forward_pre_hook(module, input_hook, prepend=prepend),
                 (hook_context,),
             )
-        hook = _make_component_output_backward_registration_hook(
+        output_hook = _make_component_output_backward_registration_hook(
             hook_fn,
             component_ref,
             adapter.name,
@@ -3388,7 +3426,7 @@ class HuggingFaceModelWrapper(ModelWrapper):
             hook_context,
         )
         return _BackwardHookRegistrationHandle(
-            _register_module_forward_hook(module, hook, prepend=prepend),
+            _register_module_forward_hook(module, output_hook, prepend=prepend),
             (hook_context,),
         )
 
@@ -3673,13 +3711,16 @@ class HuggingFaceModelWrapper(ModelWrapper):
         if normalized_layers is not None:
             selected = normalized_layers
         elif names_filter is not None:
-            selected = _filter_hook_names(
-                _candidate_hook_names(model, adapter, for_cache=True),
-                names_filter,
-                adapter=adapter,
+            selected = cast(
+                list[LayerRef],
+                _filter_hook_names(
+                    _candidate_hook_names(model, adapter, for_cache=True),
+                    names_filter,
+                    adapter=adapter,
+                ),
             )
         elif cache_all:
-            selected = _default_cache_hook_names(model, adapter)
+            selected = cast(list[LayerRef], _default_cache_hook_names(model, adapter))
         else:
             selected = []
         return selected
@@ -3984,11 +4025,11 @@ class TransformerLensCompatibleModelWrapper(HuggingFaceModelWrapper):
                 )
             return self._with_attention_flags(prepared)
         if kind == "decoder":
-            prepared = self._prepare_decoder_text_inputs(batch)
-            if prepared is None:
-                prepared = super()._prepare_model_inputs(batch)
-            prepared.update(model_kwargs)
-            return self._with_attention_flags(prepared)
+            decoder_prepared = self._prepare_decoder_text_inputs(batch)
+            if decoder_prepared is None:
+                decoder_prepared = super()._prepare_model_inputs(batch)
+            decoder_prepared.update(model_kwargs)
+            return self._with_attention_flags(decoder_prepared)
         if kind != "audio_encoder":
             prepared = super()._prepare_model_inputs(batch)
             prepared.update(model_kwargs)
@@ -4079,7 +4120,7 @@ class Qwen3DenseModelWrapper(HuggingFaceModelWrapper):
 
     def add_hook(
         self,
-        layer: LayerRef,
+        layer: LayerRef | Callable[[str], bool],
         hook_fn: HookFn | None = None,
         *,
         hook: HookFn | None = None,
@@ -4826,7 +4867,8 @@ def _grad_context(*, enabled: bool = False) -> Any:
     try:
         import torch
 
-        return torch.enable_grad() if enabled else torch.no_grad()
+        context_factory = cast(Callable[[], Any], torch.enable_grad if enabled else torch.no_grad)
+        return context_factory()
     except ImportError:
         return nullcontext()
 
@@ -5059,7 +5101,7 @@ def _tokenizer_prepends_bos(tokenizer: Any) -> bool:
     encode = getattr(tokenizer, "encode", None)
     if callable(encode):
         try:
-            return len(encode("")) > 0
+            return len(cast(Sequence[Any], encode(""))) > 0
         except Exception:
             pass
     try:
@@ -5157,7 +5199,7 @@ def _parameter_numel(parameter: Any) -> int:
     numel = getattr(parameter, "numel", None)
     if callable(numel):
         try:
-            return int(numel())
+            return int(cast(Any, numel()))
         except Exception:
             pass
     shape = getattr(parameter, "shape", None)
@@ -5360,6 +5402,8 @@ def _generation_attention_mask_from_tokens(
 
 def _accepted_generate_kwargs(model: Any) -> set[str] | None:
     generate = getattr(model, "generate", None)
+    if not callable(generate):
+        return None
     try:
         parameters = signature(generate).parameters.values()
     except (TypeError, ValueError):
@@ -5386,12 +5430,7 @@ def _normalize_generated_model_output(generated_output: Any, sequences: Any) -> 
 
         return GenerateDecoderOnlyOutput(sequences=sequences)
     except Exception:
-        try:
-            from transformers.utils import ModelOutput
-
-            return ModelOutput(sequences=sequences)
-        except Exception:
-            return {"sequences": sequences}
+        return {"sequences": sequences}
 
 
 def _tokens_to_input_embeddings(model: Any, tokens: Any) -> Any:
@@ -5522,10 +5561,10 @@ def _past_kv_cache_length(cache: Any) -> int:
     get_seq_length = getattr(cache, "get_seq_length", None)
     if callable(get_seq_length):
         try:
-            return int(get_seq_length())
+            return int(cast(Any, get_seq_length()))
         except TypeError:
             try:
-                return int(get_seq_length(0))
+                return int(cast(Any, get_seq_length(0)))
             except Exception:
                 pass
         except Exception:
@@ -5544,7 +5583,7 @@ def _past_kv_cache_length(cache: Any) -> int:
         sequence_length = getattr(entry, "sequence_length", None)
         if attr_name == "keys" and callable(sequence_length):
             try:
-                return int(sequence_length())
+                return int(cast(Any, sequence_length()))
             except Exception:
                 pass
         if attr_name == "keys" and sequence_length is not None and not callable(sequence_length):
@@ -5637,10 +5676,10 @@ def _past_kv_cache_to_transformers_cache(cache: Any) -> tuple[Any | None, Callab
     if not entries:
         model_cache = DynamicCache()
 
-        def sync_back() -> None:
+        def sync_empty_cache_back() -> None:
             _sync_past_kv_cache_from_transformers_cache(cache, model_cache, ())
 
-        return model_cache, sync_back
+        return model_cache, sync_empty_cache_back
     metadata: list[tuple[Any, Any | None, bool]] = []
     model_cache = DynamicCache()
     for entry in entries:
@@ -5654,10 +5693,10 @@ def _past_kv_cache_to_transformers_cache(cache: Any) -> tuple[Any | None, Callab
             model_cache.update(keys, values, layer_index)
         metadata.append((entry, entry_index, needs_transpose))
 
-    def sync_back() -> None:
+    def sync_populated_cache_back() -> None:
         _sync_past_kv_cache_from_transformers_cache(cache, model_cache, metadata)
 
-    return model_cache, sync_back
+    return model_cache, sync_populated_cache_back
 
 
 def _entry_cache_index(cache: Any, entry: Any) -> Any:
@@ -5686,7 +5725,7 @@ def _sync_past_kv_cache_from_transformers_cache(
     model_layers = list(getattr(model_cache, "layers", []))
     if not model_layers:
         return
-    if hasattr(original_cache, "entries") and isinstance(original_cache.entries, Mapping):
+    if hasattr(original_cache, "entries") and isinstance(original_cache.entries, MutableMapping):
         for layer_index, layer_cache in enumerate(model_layers):
             entry = original_cache.entries.get(layer_index)
             if entry is None:
@@ -5787,10 +5826,10 @@ def _extend_attention_mask_for_past_cache(attention_mask: Any, past_kv_cache: An
         pass
     if _is_sequence(attention_mask):
         if attention_mask and _is_sequence(attention_mask[0]):
-            prefix = [[1] * past_length for _ in attention_mask]
+            prefix_rows = [[1] * past_length for _ in attention_mask]
             return [
                 prefix_row + list(row)
-                for prefix_row, row in zip(prefix, attention_mask, strict=True)
+                for prefix_row, row in zip(prefix_rows, attention_mask, strict=True)
             ]
         return [1] * past_length + list(attention_mask)
     return attention_mask
@@ -5917,7 +5956,7 @@ def _call_decoder_block(
         "output_attentions": output_attentions,
         "use_cache": past_key_values is not None or past_kv_cache_entry is not None,
     }
-    attempts = (
+    attempts: tuple[dict[str, Any], ...] = (
         {key: value for key, value in common_kwargs.items() if value is not None},
         {
             key: value
@@ -6196,7 +6235,7 @@ def _prepend_bos_token(
     if _is_sequence(tokens):
         if tokens and _is_sequence(tokens[0]):
             if padding_side == "left" and pad_token_id is not None:
-                rows = []
+                python_rows: list[list[Any]] = []
                 for row in tokens:
                     insert_at = next(
                         (
@@ -6206,8 +6245,8 @@ def _prepend_bos_token(
                         ),
                         len(row),
                     )
-                    rows.append([*row[:insert_at], bos_token_id, *row[insert_at:]])
-                return rows
+                    python_rows.append([*row[:insert_at], bos_token_id, *row[insert_at:]])
+                return python_rows
             return [[bos_token_id, *row] for row in tokens]
         return [bos_token_id, *tokens]
     return tokens
@@ -6308,7 +6347,7 @@ def _attention_mask_from_tokens(
 
 
 def _tokenize_text_batch(tokenizer: Any, text: Any) -> Any:
-    kwargs = {"return_tensors": "pt"}
+    kwargs: dict[str, Any] = {"return_tensors": "pt"}
     if not isinstance(text, str):
         kwargs["padding"] = True
     try:
@@ -6352,7 +6391,10 @@ def _ensure_token_batch_dim(tokens: Any) -> Any:
         rank = len(tuple(int(dim) for dim in shape))
         if rank == 0:
             unsqueeze = getattr(tokens, "unsqueeze", None)
-            return unsqueeze(0).unsqueeze(0) if callable(unsqueeze) else [[tokens]]
+            if callable(unsqueeze):
+                expanded = cast(Any, unsqueeze(0))
+                return expanded.unsqueeze(0)
+            return [[tokens]]
         if rank == 1:
             unsqueeze = getattr(tokens, "unsqueeze", None)
             return unsqueeze(0) if callable(unsqueeze) else [tokens]
@@ -7024,7 +7066,11 @@ def _candidate_hook_names(model: Any, adapter: Any, *, for_cache: bool | None = 
             names.append(f"layer_{layer}.{component}")
     named_modules = getattr(model, "named_modules", None)
     if callable(named_modules):
-        names.extend(name for name, _module in named_modules())
+        try:
+            module_items = cast(Iterable[tuple[Any, Any]], named_modules())
+            names.extend(str(name) for name, _module in module_items)
+        except TypeError:
+            pass
     return list(dict.fromkeys(names))
 
 
@@ -7048,7 +7094,9 @@ def _adapter_transformer_lens_component_name(adapter: Any, component: str, layer
     if callable(parse_component_ref):
         component_ref = parse_component_ref(f"layer_{layer}.{component}")
         if component_ref is not None:
-            return component_ref.transformer_lens_name
+            transformer_lens_name = getattr(component_ref, "transformer_lens_name", None)
+            if transformer_lens_name is not None:
+                return str(transformer_lens_name)
     return transformer_lens_component_name(component, layer)
 
 
@@ -7236,7 +7284,7 @@ def _normalize_cache_layers_arg(
     if isinstance(layers, str | int):
         return [layers]
     if _is_tuple_component_ref(layers):
-        return [layers]
+        return [cast(LayerRef, layers)]
     return list(layers)
 
 
@@ -7440,14 +7488,15 @@ def _extract_output_field(output: Any, field: str) -> Any:
     if value is not None:
         return value
     if isinstance(output, tuple | list):
-        if not output:
+        sequence_output = cast(Sequence[Any], output)
+        if not sequence_output:
             return None
         if field == "loss":
-            return output[0]
+            return sequence_output[0]
         if field == "logits":
-            if len(output) > 1 and _looks_like_scalar_loss(output[0]):
-                return output[1]
-            return output[0]
+            if len(sequence_output) > 1 and _looks_like_scalar_loss(sequence_output[0]):
+                return sequence_output[1]
+            return sequence_output[0]
     return None
 
 
@@ -7463,7 +7512,7 @@ def _looks_like_scalar_loss(value: Any) -> bool:
     dim = getattr(value, "dim", None)
     if callable(dim):
         try:
-            return int(dim()) == 0
+            return int(cast(Any, dim())) == 0
         except (TypeError, ValueError):
             pass
     shape = getattr(value, "shape", None)
@@ -7752,7 +7801,7 @@ def _vocab_size_from_tokenizer(tokenizer: Any | None) -> int | None:
     length = getattr(tokenizer, "__len__", None)
     if callable(length):
         try:
-            return int(length())
+            return int(cast(Any, length()))
         except (TypeError, ValueError):
             return None
     return None
@@ -9141,7 +9190,7 @@ def _joint_qkv_module_weight_to_tl(
     component: str,
     q_heads: int,
     kv_heads: int,
-    qkv_layout: str,
+    qkv_layout: Literal["split", "interleaved"],
     packed_axis: int | None,
 ) -> Any:
     weight = getattr(module, "weight", None)
@@ -9164,7 +9213,7 @@ def _joint_qkv_module_bias_to_tl(
     component: str,
     q_heads: int,
     kv_heads: int,
-    qkv_layout: str,
+    qkv_layout: Literal["split", "interleaved"],
 ) -> Any:
     bias = getattr(module, "bias", None)
     if bias is None:
@@ -9559,13 +9608,18 @@ def _append_attention_bias_as_input(weight: Any, bias: Any | None) -> Any:
         try:
             import numpy as np
 
-            return np.concatenate([weight, np.expand_dims(bias, axis=-2)], axis=-2)
+            return np.concatenate([weight, np.expand_dims(cast(Any, bias), axis=-2)], axis=-2)
         except Exception:
             pass
     if _is_sequence(weight):
+        if not _is_sequence(bias):
+            raise TypeError(
+                "Cannot append attention bias for sequence weights without sequence bias."
+            )
+        bias_sequence = cast(Sequence[Any], bias)
         return [
             _append_attention_bias_as_input(weight_item, bias_item)
-            for weight_item, bias_item in zip(weight, bias, strict=True)
+            for weight_item, bias_item in zip(weight, bias_sequence, strict=True)
         ]
     raise TypeError(f"Cannot append attention bias for weight type {type(weight).__name__}.")
 
@@ -9905,7 +9959,7 @@ def _value_bias_output_contribution(b_v: Any, w_o: Any) -> Any:
     return _value_bias_output_contribution_nested(b_v, w_o)
 
 
-def _value_bias_output_contribution_nested(b_v: Any, w_o: Any) -> list[float]:
+def _value_bias_output_contribution_nested(b_v: Any, w_o: Any) -> Any:
     b_v_values = _to_python_sequence_container(b_v)
     w_o_values = _to_python_sequence_container(w_o)
     shape_b = shape_of(b_v_values)
@@ -10211,10 +10265,10 @@ def _mask_composition_scores_to_future_layers(scores: Any) -> Any:
         try:
             import numpy as np
 
-            left_layer = np.arange(left_layers)
-            right_layer = np.arange(right_layers)
-            mask = left_layer[:, None, None, None] < right_layer[None, None, :, None]
-            return np.where(mask, scores, np.zeros_like(scores))
+            np_left_layer = np.arange(left_layers)
+            np_right_layer = np.arange(right_layers)
+            np_mask = np_left_layer[:, None, None, None] < np_right_layer[None, None, :, None]
+            return np.where(np_mask, scores, np.zeros_like(scores))
         except Exception:
             pass
     if _is_sequence(scores):
@@ -10282,8 +10336,8 @@ def _gather_sequence_residual_directions(weight: Sequence[Any], tokens: Any) -> 
         return [_gather_sequence_residual_directions(weight, token) for token in tokens]
     item = getattr(tokens, "item", None)
     if callable(item):
-        return _to_python_sequence_container(weight[int(item())])
-    return _to_python_sequence_container(weight[int(tokens)])
+            return _to_python_sequence_container(weight[int(cast(Any, item()))])
+    return _to_python_sequence_container(weight[int(cast(Any, tokens))])
 
 
 def _to_python_sequence_container(value: Any) -> Any:
@@ -10302,7 +10356,7 @@ def _coerce_tokens_for_weight_index(weight: Any, tokens: Any) -> Any:
     item = getattr(tokens, "item", None)
     shape = getattr(tokens, "shape", None)
     if callable(item) and shape is not None and len(tuple(int(dim) for dim in shape)) == 0:
-        return int(item())
+        return int(cast(Any, item()))
     if not isinstance(tokens, Sequence) or isinstance(tokens, str | bytes):
         return tokens
     try:

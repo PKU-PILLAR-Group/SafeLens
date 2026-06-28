@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import json
 import math
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from SafeLens.core.base import BaseProbe, Batch, LayerRef, ModelWrapper, ProbeResult
 from SafeLens.core.registry import register_probe
@@ -56,7 +56,7 @@ class LinearProbe(BaseProbe):
             return list(dataset)
         return [row for row in dataset if row.get(self.split_key) == self.eval_split]
 
-    def attach(self, model: ModelWrapper, layers: Sequence[int]) -> None:
+    def attach(self, model: ModelWrapper, layers: Sequence[LayerRef]) -> None:
         self._model = model
         if self._device is None:
             self._device = getattr(model, "device", None)
@@ -278,8 +278,11 @@ class LinearProbe(BaseProbe):
         return self._activation_to_feature_value(activation)
 
     def _activation_from_model(self, row: Mapping[str, Any]) -> Any | None:
+        model = self._model
+        if model is None:
+            return None
         self._last_activations.clear()
-        _output, cache = self._model.run_with_cache(row, layers=self.layers)
+        _output, cache = model.run_with_cache(row, layers=self.layers)
         activation = self._activation_from_cache(cache)
         if activation is not None:
             return activation
@@ -308,12 +311,21 @@ class LinearProbe(BaseProbe):
     def _cache_to_dict(cache: Any) -> dict[Any, Any]:
         to_dict = getattr(cache, "to_dict", None)
         if callable(to_dict):
-            return dict(to_dict())
+            result = to_dict()
+            if isinstance(result, Mapping):
+                return dict(result)
+            try:
+                return dict(cast(Iterable[tuple[Any, Any]], result))
+            except TypeError:
+                return {}
         if isinstance(cache, Mapping):
             return dict(cache)
         items = getattr(cache, "items", None)
         if callable(items):
-            return dict(items())
+            try:
+                return dict(cast(Iterable[tuple[Any, Any]], items()))
+            except TypeError:
+                return {}
         return {}
 
     def _activation_to_feature_value(self, activation: Any) -> Any | None:
@@ -403,7 +415,7 @@ class LinearProbe(BaseProbe):
         shape = getattr(self.weights, "shape", None)
         if shape is not None:
             return int(shape[-1])
-        return len(self.weights)
+        return len(cast(Sequence[Any], self.weights))
 
     @staticmethod
     def _optional_vector(value: Any) -> list[float] | None:
@@ -415,9 +427,21 @@ class LinearProbe(BaseProbe):
     def _load_jsonl(path: Path) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
         with path.open("r", encoding="utf-8") as handle:
-            for line in handle:
-                if line.strip():
-                    rows.append(json.loads(line))
+            for line_number, line in enumerate(handle, start=1):
+                if not line.strip():
+                    continue
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    raise ValueError(
+                        f"Invalid train_jsonl {path} line {line_number}: {exc.msg}"
+                    ) from exc
+                if not isinstance(row, dict):
+                    raise ValueError(
+                        f"Invalid train_jsonl {path} line {line_number}: "
+                        "each row must be a JSON object."
+                    )
+                rows.append(row)
         return rows
 
     @staticmethod
@@ -436,30 +460,41 @@ class LinearProbe(BaseProbe):
         return sum(a * b for a, b in zip(left, right, strict=True))
 
     def _predict_logit(self, features: Sequence[float]) -> float:
+        weights = self.weights
+        if weights is None:
+            raise RuntimeError("linear_probe must be trained before prediction")
         torch = self._torch
-        if torch is not None and self._is_torch_tensor(self.weights):
+        if torch is not None and self._is_torch_tensor(weights):
             feature_tensor = self._as_torch_vector(features, torch)
-            logit = feature_tensor.matmul(self.weights) + self.bias
-            return float(logit.detach().cpu().item())
-        return self._dot(self.weights, features) + self.bias
+            logit = feature_tensor.matmul(weights) + self.bias
+            return float(cast(Any, logit.detach().cpu().item()))
+        return self._dot(cast(Sequence[float], weights), features) + float(cast(Any, self.bias))
 
     def _move_weights_to_device(self) -> None:
         torch = self._torch_module()
-        if torch is None or self.weights is None:
+        weights = self.weights
+        if torch is None or weights is None:
             return
         try:
-            if not self._is_torch_tensor(self.weights):
-                self.weights = torch.tensor(self.weights, dtype=torch.float32, device=self._device)
+            if not self._is_torch_tensor(weights):
+                moved_weights = torch.tensor(weights, dtype=torch.float32, device=self._device)
             else:
-                self.weights = self.weights.to(self._device)
-            if not self._is_torch_tensor(self.bias):
+                to_device = getattr(weights, "to", None)
+                if not callable(to_device):
+                    return
+                moved_weights = to_device(self._device)
+            self.weights = moved_weights
+            bias = self.bias
+            if not self._is_torch_tensor(bias):
                 self.bias = torch.tensor(
-                    float(self.bias),
-                    dtype=self.weights.dtype,
+                    float(cast(Any, bias)),
+                    dtype=cast(Any, moved_weights).dtype,
                     device=self._device,
                 )
             else:
-                self.bias = self.bias.to(self._device)
+                bias_to_device = getattr(bias, "to", None)
+                if callable(bias_to_device):
+                    self.bias = bias_to_device(self._device)
         except Exception:
             return
 
@@ -480,12 +515,15 @@ class LinearProbe(BaseProbe):
     def _training_loss_for(self, examples: Sequence[tuple[list[float], float]]) -> float:
         if self.weights is None or self._is_torch_tensor(self.weights):
             return 0.0
+        weights = cast(Sequence[float], self.weights)
         loss = 0.0
         for features, label in examples:
-            prediction = self._sigmoid(self._dot(self.weights, features) + self.bias)
+            prediction = self._sigmoid(
+                self._dot(weights, features) + float(cast(Any, self.bias))
+            )
             loss += self._binary_cross_entropy(prediction, label)
         loss /= float(len(examples))
-        loss += 0.5 * self.l2 * sum(weight * weight for weight in self.weights)
+        loss += 0.5 * self.l2 * sum(weight * weight for weight in weights)
         return loss
 
     def _torch_module(self) -> Any | None:

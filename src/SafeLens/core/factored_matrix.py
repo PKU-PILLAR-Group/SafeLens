@@ -6,7 +6,7 @@ import math
 import warnings
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 FULL_SLICE = slice(None)
 _BACKEND_MATMUL_NOT_AVAILABLE = object()
@@ -759,10 +759,10 @@ def _make_even_factors(u: Any, s: Any, v: Any) -> tuple[Any, Any]:
             left_items.append(left_item)
             right_items.append(right_item)
         return left_items, right_items
-    sqrt_s = [math.sqrt(float(value)) for value in s]
-    left = [[float(value) * sqrt_s[col] for col, value in enumerate(row)] for row in u]
+    sqrt_s_values = [math.sqrt(float(value)) for value in s]
+    left = [[float(value) * sqrt_s_values[col] for col, value in enumerate(row)] for row in u]
     right = [
-        [sqrt_s[row_index] * float(value) for value in row]
+        [sqrt_s_values[row_index] * float(value) for value in row]
         for row_index, row in enumerate(transpose(v))
     ]
     return left, right
@@ -1250,7 +1250,7 @@ def _is_scalar_like(value: Any) -> bool:
     numel = getattr(value, "numel", None)
     if callable(numel):
         try:
-            return int(numel()) == 1
+            return int(cast(Any, numel())) == 1
         except Exception:
             return False
     return False

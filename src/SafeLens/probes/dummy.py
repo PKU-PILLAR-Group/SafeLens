@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any
 
-from SafeLens.core.base import BaseProbe, Batch, ModelWrapper, ProbeResult
+from SafeLens.core.base import BaseProbe, Batch, LayerRef, ModelWrapper, ProbeResult
 from SafeLens.core.registry import register_probe
 
 
@@ -15,11 +15,11 @@ class DummyProbe(BaseProbe):
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         self.config = config or {}
-        self.layers: list[int] = []
+        self.layers: list[LayerRef] = []
         self._handles: list[Any] = []
         self._intervention_applied = False
 
-    def attach(self, model: ModelWrapper, layers: Sequence[int]) -> None:
+    def attach(self, model: ModelWrapper, layers: Sequence[LayerRef]) -> None:
         self.layers = list(layers or self.config.get("layers", []))
         for layer in self.layers:
             self._handles.append(model.add_hook(layer, self._capture_activation))

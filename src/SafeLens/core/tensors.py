@@ -478,7 +478,10 @@ def _transpose_nested(value: Any, rank: int) -> Any:
 def _to_nested_list(value: Any) -> list[Any]:
     tolist = getattr(value, "tolist", None)
     if callable(tolist):
-        return tolist()
+        listed = tolist()
+        if isinstance(listed, Sequence) and not isinstance(listed, str | bytes):
+            return list(listed)
+        return [listed]
     if isinstance(value, Sequence) and not isinstance(value, str | bytes):
         return [deepcopy(item) for item in value]
     return [value]

@@ -337,7 +337,7 @@ class ArchitectureAdapter:
                 prepend=prepend,
             )
         if _is_attention_result_component(spec.component) and not for_cache:
-            hook = _make_attention_result_output_hook(
+            attention_result_hook = _make_attention_result_output_hook(
                 hook_fn,
                 component_ref,
                 self.name,
@@ -345,14 +345,16 @@ class ArchitectureAdapter:
                 model,
             )
             return _ComponentHookHandle(
-                _register_module_forward_hook(module, hook, prepend=prepend),
-                _hook_contexts_for(hook),
+                _register_module_forward_hook(module, attention_result_hook, prepend=prepend),
+                _hook_contexts_for(attention_result_hook),
             )
         if spec.value == "norm_scale" or spec.component.endswith("_normalized"):
-            hook = _make_component_output_hook(hook_fn, component_ref, self.name, spec, model)
+            norm_output_hook = _make_component_output_hook(
+                hook_fn, component_ref, self.name, spec, model
+            )
             return _ComponentHookHandle(
-                _register_module_forward_hook(module, hook, prepend=prepend),
-                _hook_contexts_for(hook),
+                _register_module_forward_hook(module, norm_output_hook, prepend=prepend),
+                _hook_contexts_for(norm_output_hook),
             )
         t5_input_handle = _try_register_t5_attention_input_patch(
             model,
@@ -366,15 +368,19 @@ class ArchitectureAdapter:
         if t5_input_handle is not None:
             return t5_input_handle
         if spec.mode == "forward_input":
-            hook = _make_component_input_hook(hook_fn, component_ref, self.name, spec, model)
-            return _ComponentHookHandle(
-                _register_module_forward_pre_hook(module, hook, prepend=prepend),
-                _hook_contexts_for(hook),
+            component_input_hook = _make_component_input_hook(
+                hook_fn, component_ref, self.name, spec, model
             )
-        hook = _make_component_output_hook(hook_fn, component_ref, self.name, spec, model)
+            return _ComponentHookHandle(
+                _register_module_forward_pre_hook(module, component_input_hook, prepend=prepend),
+                _hook_contexts_for(component_input_hook),
+            )
+        component_output_hook = _make_component_output_hook(
+            hook_fn, component_ref, self.name, spec, model
+        )
         return _ComponentHookHandle(
-            _register_module_forward_hook(module, hook, prepend=prepend),
-            _hook_contexts_for(hook),
+            _register_module_forward_hook(module, component_output_hook, prepend=prepend),
+            _hook_contexts_for(component_output_hook),
         )
 
     def requires_output_attentions(self, layer: LayerRef) -> bool:
@@ -1424,7 +1430,7 @@ def first_attention_head(value: Any) -> Any:
         import numpy as np
 
         if hasattr(value, "shape"):
-            return np.asarray(value).take(indices=0, axis=-2)
+            return np.asarray(value).take(0, axis=-2)
     except Exception:
         pass
     shape = getattr(value, "shape", None)
@@ -1611,12 +1617,12 @@ def apply_norm_affine(module: Any, normalized: Any, reference_output: Any | None
         import numpy as np
 
         if hasattr(normalized, "shape"):
-            output = np.asarray(normalized)
+            numpy_output = np.asarray(normalized)
             if weight is not None:
-                output = output * np.asarray(weight)
+                numpy_output = numpy_output * np.asarray(weight)
             if bias is not None:
-                output = output + np.asarray(bias)
-            return output
+                numpy_output = numpy_output + np.asarray(bias)
+            return numpy_output
     except Exception:
         pass
     output = normalized

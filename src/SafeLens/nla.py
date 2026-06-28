@@ -10,10 +10,10 @@ from __future__ import annotations
 
 import math
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import yaml
 
@@ -270,12 +270,14 @@ def build_nla_prompt_input_ids(
             tokenize=True,
             add_generation_prompt=True,
         )
-        if hasattr(ids, "input_ids"):
-            ids = ids.input_ids
+        input_ids_attr = getattr(ids, "input_ids", None)
+        if input_ids_attr is not None:
+            ids = input_ids_attr
         elif isinstance(ids, Mapping):
             ids = ids.get("input_ids", ids)
-        if hasattr(ids, "detach") and callable(ids.detach):
-            ids = ids.detach().cpu().tolist()
+        detach = getattr(ids, "detach", None)
+        if callable(detach):
+            ids = cast(Any, detach()).cpu().tolist()
         if isinstance(ids, Sequence) and not isinstance(ids, str | bytes):
             if ids and isinstance(ids[0], Sequence) and not isinstance(ids[0], int):
                 if len(ids) != 1:
@@ -288,9 +290,11 @@ def build_nla_prompt_input_ids(
             f"tokenizer.apply_chat_template returned unsupported type {type(ids).__name__}."
         )
     encoded = tokenizer(content, add_special_tokens=True)
-    input_ids = encoded["input_ids"] if isinstance(encoded, Mapping) else encoded.input_ids
-    if hasattr(input_ids, "detach") and callable(input_ids.detach):
-        input_ids = input_ids.detach().cpu().tolist()
+    input_ids_attr = getattr(encoded, "input_ids", None)
+    input_ids = encoded["input_ids"] if isinstance(encoded, Mapping) else input_ids_attr
+    detach = getattr(input_ids, "detach", None)
+    if callable(detach):
+        input_ids = cast(Any, detach()).cpu().tolist()
     if isinstance(input_ids, Sequence) and not isinstance(input_ids, str | bytes):
         if input_ids and isinstance(input_ids[0], Sequence) and not isinstance(input_ids[0], int):
             if len(input_ids) != 1:
@@ -689,25 +693,28 @@ class NLAClient:
         """Load an official NLA profile pair from HuggingFace."""
 
         resolved = get_nla_profile(profile) if isinstance(profile, str) else profile
-        shared_kwargs = {
-            "cache_dir": cache_dir,
-            "local_files_only": local_files_only,
-            "token": token,
-            "revision": revision,
-            "device": device,
-            "dtype": dtype,
-            "trust_remote_code": trust_remote_code,
-        }
         verbalizer = NLAActivationVerbalizer.from_pretrained(
             resolved.av_repo,
-            **shared_kwargs,
+            cache_dir=cache_dir,
+            local_files_only=local_files_only,
+            token=token,
+            revision=revision,
+            device=device,
+            dtype=dtype,
+            trust_remote_code=trust_remote_code,
             **dict(actor_kwargs or {}),
         )
         reconstructor = None
         if load_reconstructor and resolved.ar_repo is not None:
             reconstructor = NLAActivationReconstructor.from_pretrained(
                 resolved.ar_repo,
-                **shared_kwargs,
+                cache_dir=cache_dir,
+                local_files_only=local_files_only,
+                token=token,
+                revision=revision,
+                device=device,
+                dtype=dtype,
+                trust_remote_code=trust_remote_code,
                 **dict(reconstructor_kwargs or {}),
             )
         return cls(verbalizer, reconstructor, profile=resolved)
@@ -870,8 +877,9 @@ def _optional_int(value: Any) -> int | None:
 
 
 def _as_token_rows(input_ids: Any) -> list[list[int]]:
-    if hasattr(input_ids, "detach") and callable(input_ids.detach):
-        input_ids = input_ids.detach().cpu().tolist()
+    detach = getattr(input_ids, "detach", None)
+    if callable(detach):
+        input_ids = cast(Any, detach()).cpu().tolist()
     if not isinstance(input_ids, Sequence) or isinstance(input_ids, str | bytes):
         raise TypeError("input_ids must be a token id sequence.")
     if input_ids and isinstance(input_ids[0], Sequence) and not isinstance(input_ids[0], int):
@@ -962,8 +970,9 @@ def _module_device(module: Any) -> Any:
     parameters = getattr(module, "parameters", None)
     if callable(parameters):
         try:
-            return next(parameters()).device
-        except StopIteration:
+            parameter_iter = iter(cast(Iterable[Any], parameters()))
+            return next(parameter_iter).device
+        except (StopIteration, TypeError):
             pass
     weight = getattr(module, "weight", None)
     if weight is not None and hasattr(weight, "device"):
@@ -978,8 +987,8 @@ def _align_module_to_reference(module: Any, reference: Any) -> None:
         module.to(_module_device(reference))
         return
     try:
-        parameter = next(parameters())
-    except StopIteration:
+        parameter = next(iter(cast(Iterable[Any], parameters())))
+    except (StopIteration, TypeError):
         module.to(_module_device(reference))
         return
     module.to(device=parameter.device, dtype=parameter.dtype)

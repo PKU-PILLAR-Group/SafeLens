@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -15,6 +16,86 @@ def test_cli_models_list_supported_json(capsys: pytest.CaptureFixture[str]) -> N
 
     assert "qwen3_dense" in adapter_names
     assert "huggingface" in adapter_names
+
+
+def test_cli_run_uses_jsonl_override_and_writes_report(
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    report_path = tmp_path / "report.json"
+    config_path = tmp_path / "config.yaml"
+    input_path = tmp_path / "input.jsonl"
+    config_path.write_text(
+        f"""
+model:
+  source: dummy
+  name: dummy
+pipeline:
+  risk_threshold: 0.5
+  probes:
+    - name: dummy_probe
+      config:
+        layers: [0]
+        risk_terms: ["jailbreak"]
+  monitors:
+    - name: dummy_monitor
+      config:
+        threshold: 0.5
+  attributors:
+    - name: dummy_attributor
+      config:
+        risk_terms: ["jailbreak"]
+dataset:
+  - id: ignored
+    text: "This dataset row should be overridden."
+output:
+  report_path: "{report_path}"
+""",
+        encoding="utf-8",
+    )
+    input_path.write_text(
+        "\n".join(
+            [
+                json.dumps({"id": "safe-jsonl", "text": "hello"}),
+                json.dumps({"id": "unsafe-jsonl", "text": "jailbreak attack"}),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    main(["run", "--config", str(config_path), "--input-jsonl", str(input_path)])
+
+    stdout_summary = json.loads(capsys.readouterr().out)
+    written = json.loads(report_path.read_text(encoding="utf-8"))
+    assert stdout_summary == written["summary"]
+    assert written["summary"] == {
+        "samples_scanned": 2,
+        "flagged_count": 1,
+        "max_risk_score": 0.55,
+    }
+    assert [report["sample_id"] for report in written["reports"]] == [
+        "safe-jsonl",
+        "unsafe-jsonl",
+    ]
+
+
+def test_cli_run_rejects_non_object_jsonl(
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    input_path = tmp_path / "input.jsonl"
+    config_path.write_text("model:\n  source: dummy\n  name: dummy\n", encoding="utf-8")
+    input_path.write_text("[1, 2, 3]\n", encoding="utf-8")
+
+    with pytest.raises(SystemExit) as exc_info:
+        main(["run", "--config", str(config_path), "--input-jsonl", str(input_path)])
+
+    captured = capsys.readouterr()
+    assert exc_info.value.code == 1
+    assert "line 1" in captured.err
+    assert "each row must be a JSON object" in captured.err
 
 
 def test_cli_inspect_model_infers_qwen3_adapter(capsys: pytest.CaptureFixture[str]) -> None:

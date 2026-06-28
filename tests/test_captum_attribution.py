@@ -1,13 +1,19 @@
 from __future__ import annotations
 
-from typing import Any
+from collections.abc import Sequence
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
 import SafeLens.attribution.captum as captum_module
 from SafeLens.attribution import CaptumInputAttributor, attribute_response_token_input
+from SafeLens.core.base import Batch, HookFn, LayerRef, ModelWrapper
 
 torch = pytest.importorskip("torch")
+if TYPE_CHECKING:
+    from torch import nn as torch_nn
+else:
+    torch_nn = pytest.importorskip("torch.nn")
 
 
 class _FakeLayerIntegratedGradients:
@@ -30,11 +36,11 @@ class _FakeTokenizer:
     all_special_ids = [0, 99]
 
 
-class _TinyCausalModel(torch.nn.Module):
+class _TinyCausalModel(torch_nn.Module):
     def __init__(self) -> None:
         super().__init__()
-        self.embed = torch.nn.Embedding(128, 2)
-        self.proj = torch.nn.Linear(2, 128, bias=False)
+        self.embed = torch_nn.Embedding(128, 2)
+        self.proj = torch_nn.Linear(2, 128, bias=False)
 
     def get_input_embeddings(self) -> Any:
         return self.embed
@@ -44,13 +50,39 @@ class _TinyCausalModel(torch.nn.Module):
         return {"logits": self.proj(hidden)}
 
 
-class _FakeWrapper:
+class _FakeWrapper(ModelWrapper):
     device = None
 
     def __init__(self) -> None:
         self.model = _TinyCausalModel()
         self.tokenizer = _FakeTokenizer()
         self.generate_calls: list[dict[str, Any]] = []
+
+    def load_model(self) -> Any:
+        return self.model
+
+    def add_hook(
+        self,
+        layer: LayerRef,
+        hook_fn: HookFn | None = None,
+        *,
+        hook: HookFn | None = None,
+        dir: str = "fwd",
+        is_permanent: bool = False,
+        level: int | None = None,
+        prepend: bool = False,
+    ) -> Any:
+        _ = layer, hook_fn, hook, dir, is_permanent, level, prepend
+        raise NotImplementedError
+
+    def run_with_cache(
+        self,
+        batch: Batch,
+        layers: Sequence[LayerRef] | None = None,
+        **kwargs: Any,
+    ) -> tuple[Any, Any]:
+        _ = batch, layers, kwargs
+        raise NotImplementedError
 
     def to_tokens(
         self,
@@ -89,6 +121,9 @@ class _FakeWrapper:
         suffix = torch.tensor([[7, 8]], dtype=torch.long)
         return torch.cat([prompt_tokens, suffix], dim=1)
 
+    def remove_hooks(self) -> None:
+        return None
+
 
 @pytest.fixture()
 def fake_captum(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -99,7 +134,8 @@ def fake_captum(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
-def test_attribute_response_token_input_uses_exact_response_token_ids(fake_captum: None) -> None:
+@pytest.mark.usefixtures("fake_captum")
+def test_attribute_response_token_input_uses_exact_response_token_ids() -> None:
     wrapper = _FakeWrapper()
 
     result = attribute_response_token_input(
@@ -128,7 +164,8 @@ def test_attribute_response_token_input_uses_exact_response_token_ids(fake_captu
     ]
 
 
-def test_attribute_response_token_input_tokenizes_external_response_text(fake_captum: None) -> None:
+@pytest.mark.usefixtures("fake_captum")
+def test_attribute_response_token_input_tokenizes_external_response_text() -> None:
     wrapper = _FakeWrapper()
     result = attribute_response_token_input(
         wrapper,
@@ -143,7 +180,8 @@ def test_attribute_response_token_input_tokenizes_external_response_text(fake_ca
     assert [token.metadata["token_id"] for token in result.tokens] == [1, 2]
 
 
-def test_attribute_response_token_input_can_generate_response_tokens(fake_captum: None) -> None:
+@pytest.mark.usefixtures("fake_captum")
+def test_attribute_response_token_input_can_generate_response_tokens() -> None:
     wrapper = _FakeWrapper()
 
     result = attribute_response_token_input(
@@ -162,7 +200,8 @@ def test_attribute_response_token_input_can_generate_response_tokens(fake_captum
     assert [token.metadata["token_id"] for token in result.tokens] == [1, 2, 7]
 
 
-def test_attribute_response_token_input_validates_target_index(fake_captum: None) -> None:
+@pytest.mark.usefixtures("fake_captum")
+def test_attribute_response_token_input_validates_target_index() -> None:
     with pytest.raises(ValueError, match="outside the available response tokens"):
         attribute_response_token_input(
             _FakeWrapper(),
@@ -172,7 +211,8 @@ def test_attribute_response_token_input_validates_target_index(fake_captum: None
         )
 
 
-def test_captum_attributor_attribute_input_reads_batch_contract(fake_captum: None) -> None:
+@pytest.mark.usefixtures("fake_captum")
+def test_captum_attributor_attribute_input_reads_batch_contract() -> None:
     attributor = CaptumInputAttributor({"target_response_index": 0, "include_special_tokens": True})
     attributor.attach(_FakeWrapper())
 

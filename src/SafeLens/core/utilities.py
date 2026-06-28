@@ -14,8 +14,9 @@ import shutil
 import stat
 import time
 import warnings
+from collections.abc import Iterable
 from copy import deepcopy
-from typing import Any, TypeAlias
+from typing import Any, TypeAlias, cast
 
 NonlinearityType: TypeAlias = str
 USE_DEFAULT_VALUE = None
@@ -60,7 +61,7 @@ class LocallyOverridenDefaults:
         self.model = model
         self.overrides = overrides
         tokenizer = getattr(model, "tokenizer", None)
-        self.values_with_defaults = {
+        self.values_with_defaults: dict[str, dict[str, Any]] = {
             "prepend_bos": {
                 "default_location": "model.cfg.default_prepend_bos",
                 "valid_values": [USE_DEFAULT_VALUE, True, False],
@@ -301,11 +302,11 @@ def enable_hf_retry() -> None:
             continue
         underlying = original.__func__ if hasattr(original, "__func__") else original
 
-        def _wrapped(klass: Any, *args: Any, _orig: Any = underlying, **kwargs: Any) -> Any:
+        def _wrapped(klass: Any, /, *args: Any, _orig: Any = underlying, **kwargs: Any) -> Any:
             return call_hf_with_retry(_orig, klass, *args, **kwargs)
 
         setattr(_wrapped, _TL_RETRY_WRAPPED_ATTR, True)
-        cls.from_pretrained = classmethod(_wrapped)
+        cls.from_pretrained = classmethod(_wrapped)  # type: ignore[assignment]
 
 
 def get_hf_token() -> str | None:
@@ -678,8 +679,8 @@ def get_best_available_cuda_device(max_devices: int | None = None) -> Any:
     """Return the CUDA device with the most currently available memory."""
 
     torch = _require_torch()
-    max_devices = torch.cuda.device_count() if max_devices is None else max_devices
-    devices = determine_available_memory_for_available_devices(max_devices)
+    device_count = torch.cuda.device_count() if max_devices is None else max_devices
+    devices = determine_available_memory_for_available_devices(int(device_count))
     if not devices:
         raise OSError(
             "TransformerLens has been configured to use CUDA, but no available devices are present"
@@ -734,7 +735,7 @@ def resolve_device_map(
         raise ValueError(
             f"n_devices={n_devices} but only {torch.cuda.device_count()} CUDA devices present."
         )
-    resolved_max_memory = (
+    resolved_max_memory: dict[str | int, str] = (
         dict(max_memory) if max_memory else {index: "auto" for index in range(n_devices)}
     )
     return "balanced", resolved_max_memory
@@ -754,10 +755,14 @@ def find_embedding_device(hf_model: Any) -> Any | None:
         except (AttributeError, NotImplementedError):
             embed_module = None
         if embed_module is not None:
+            parameters = getattr(embed_module, "parameters", None)
+            if not callable(parameters):
+                return None
             try:
-                param = next(embed_module.parameters())
+                param_iter = iter(cast(Iterable[Any], parameters()))
+                param = next(param_iter)
                 return param.device
-            except StopIteration:
+            except (StopIteration, TypeError):
                 pass
     first_device = next(iter(hf_device_map.values()))
     if isinstance(first_device, int):

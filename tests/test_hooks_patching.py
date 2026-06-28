@@ -75,8 +75,22 @@ class ToyWrapper(ModelWrapper):
         self.loaded = True
         return self
 
-    def add_hook(self, layer: LayerRef, hook_fn: HookFn) -> _Handle:
-        item = (layer, hook_fn)
+    def add_hook(
+        self,
+        layer: LayerRef,
+        hook_fn: HookFn | None = None,
+        *,
+        hook: HookFn | None = None,
+        dir: str = "fwd",
+        is_permanent: bool = False,
+        level: int | None = None,
+        prepend: bool = False,
+    ) -> _Handle:
+        _ = dir, is_permanent, level, prepend
+        resolved_hook = hook_fn or hook
+        if resolved_hook is None:
+            raise TypeError("add_hook requires hook_fn or hook")
+        item = (layer, resolved_hook)
         self.hooks.append(item)
         return _Handle(lambda: self.hooks.remove(item))
 
@@ -84,8 +98,9 @@ class ToyWrapper(ModelWrapper):
         self,
         batch: Batch,
         layers: Sequence[LayerRef] | None = None,
+        **kwargs: Any,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
-        _ = layers
+        _ = layers, kwargs
         activation = list(cast(list[int], batch.get("activation", self.activation)))
         for _layer, hook_fn in list(self.hooks):
             patched = hook_fn(None, None, activation)
@@ -102,15 +117,32 @@ class ToyWrapper(ModelWrapper):
 
 
 class ComponentWrapper(ModelWrapper):
+    cfg: Any
+
     def __init__(self, activation: Any) -> None:
         self.activation = activation
         self.hooks: list[tuple[LayerRef, HookFn]] = []
+        self.n_layers: int | None = None
 
     def load_model(self) -> ComponentWrapper:
         return self
 
-    def add_hook(self, layer: LayerRef, hook_fn: HookFn) -> _Handle:
-        item = (layer, hook_fn)
+    def add_hook(
+        self,
+        layer: LayerRef,
+        hook_fn: HookFn | None = None,
+        *,
+        hook: HookFn | None = None,
+        dir: str = "fwd",
+        is_permanent: bool = False,
+        level: int | None = None,
+        prepend: bool = False,
+    ) -> _Handle:
+        _ = dir, is_permanent, level, prepend
+        resolved_hook = hook_fn or hook
+        if resolved_hook is None:
+            raise TypeError("add_hook requires hook_fn or hook")
+        item = (layer, resolved_hook)
         self.hooks.append(item)
         return _Handle(lambda: self.hooks.remove(item))
 
@@ -118,8 +150,9 @@ class ComponentWrapper(ModelWrapper):
         self,
         batch: Batch,
         layers: Sequence[LayerRef] | None = None,
+        **kwargs: Any,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
-        _ = layers
+        _ = layers, kwargs
         activation = deepcopy(batch.get("activation", self.activation))
         cache: dict[str, Any] = {}
         for layer, hook_fn in list(self.hooks):
@@ -146,8 +179,9 @@ class ComponentMapWrapper(ComponentWrapper):
         self,
         batch: Batch,
         layers: Sequence[LayerRef] | None = None,
+        **kwargs: Any,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
-        _ = layers
+        _ = layers, kwargs
         cache: dict[str, Any] = {}
         activation = None
         for layer, hook_fn in list(self.hooks):
@@ -167,8 +201,22 @@ class TokenPatchWrapper(ModelWrapper):
     def load_model(self) -> TokenPatchWrapper:
         return self
 
-    def add_hook(self, layer: LayerRef, hook_fn: HookFn) -> _Handle:
-        item = (layer, hook_fn)
+    def add_hook(
+        self,
+        layer: LayerRef,
+        hook_fn: HookFn | None = None,
+        *,
+        hook: HookFn | None = None,
+        dir: str = "fwd",
+        is_permanent: bool = False,
+        level: int | None = None,
+        prepend: bool = False,
+    ) -> _Handle:
+        _ = dir, is_permanent, level, prepend
+        resolved_hook = hook_fn or hook
+        if resolved_hook is None:
+            raise TypeError("add_hook requires hook_fn or hook")
+        item = (layer, resolved_hook)
         self.hooks.append(item)
         return _Handle(lambda: self.hooks.remove(item))
 
@@ -176,8 +224,9 @@ class TokenPatchWrapper(ModelWrapper):
         self,
         batch: Batch,
         layers: Sequence[LayerRef] | None = None,
+        **kwargs: Any,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
-        _ = layers
+        _ = layers, kwargs
         return {"activation": list(batch["activation"])}, {}
 
     def run_with_hooks(
@@ -215,8 +264,8 @@ class NeuronResultModel:
 
 class TransformerLensBlockWeightModel:
     def __init__(self, *, W_O: Any | None = None, W_out: Any | None = None) -> None:
-        attn = type("AttentionWeights", (), {})()
-        mlp = type("MlpWeights", (), {})()
+        attn: Any = type("AttentionWeights", (), {})()
+        mlp: Any = type("MlpWeights", (), {})()
         if W_O is not None:
             attn.W_O = W_O
         if W_out is not None:
