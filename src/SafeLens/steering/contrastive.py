@@ -334,10 +334,7 @@ def _add_vector_to_position_range(
         for index in range(start, min(end, len(output))):
             output[index] = _add_vector_to_all_final_vectors(output[index], vector, scale)
         return output
-    return [
-        _add_vector_to_position_range(item, vector, scale, start, end)
-        for item in output
-    ]
+    return [_add_vector_to_position_range(item, vector, scale, start, end) for item in output]
 
 
 def _add_vector_to_all_final_vectors(value: Any, vector: Sequence[float], scale: float) -> Any:

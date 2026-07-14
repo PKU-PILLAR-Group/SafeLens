@@ -98,9 +98,7 @@ def _as_activation_cache(cache: dict[str, Any] | ActivationCache) -> ActivationC
     return ActivationCache(cache)
 
 
-@pytest.mark.parametrize(
-    ("family", "model_id"), _CAUSAL_MODEL_CASES + _ENCODER_MODEL_CASES
-)
+@pytest.mark.parametrize(("family", "model_id"), _CAUSAL_MODEL_CASES + _ENCODER_MODEL_CASES)
 def test_transformer_lens_real_model_caches_common_components(
     family: str,
     model_id: str,
@@ -179,9 +177,7 @@ def test_transformer_lens_real_causal_models_generate(
         wrapper.remove_hooks()
 
 
-@pytest.mark.parametrize(
-    ("family", "model_id"), _CAUSAL_MODEL_CASES + _ENCODER_MODEL_CASES
-)
+@pytest.mark.parametrize(("family", "model_id"), _CAUSAL_MODEL_CASES + _ENCODER_MODEL_CASES)
 def test_transformer_lens_real_model_runs_core_patches(
     family: str,
     model_id: str,

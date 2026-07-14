@@ -509,9 +509,7 @@ class ActivationCache(MutableMapping[Any, Any]):
                     if n_layers > 0:
                         layer = n_layers - 1
                 layer_type = (
-                    str(tuple_key[2])
-                    if len(tuple_key) >= 3 and tuple_key[2] is not None
-                    else None
+                    str(tuple_key[2]) if len(tuple_key) >= 3 and tuple_key[2] is not None else None
                 )
                 if layer_type is not None:
                     layer_type = _LAYER_TYPE_ALIASES.get(layer_type, layer_type)

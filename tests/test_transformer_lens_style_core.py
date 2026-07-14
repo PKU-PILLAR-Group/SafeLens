@@ -352,6 +352,7 @@ def test_hooked_root_check_and_add_hook_accepts_official_hookpoint_signature() -
         lambda activation, _hook: activation,
         dir="fwd",
     )
+
     def add_second(activation: Any, _hook: Any) -> Any:
         seen.append("second")
         return activation + [2]
@@ -371,6 +372,7 @@ def test_hooked_root_hooks_context_accepts_prepend() -> None:
     root = HookedRoot()
     resid = root.add_hook_point("blocks.0.hook_resid_pre")
     seen: list[str] = []
+
     def add_base(activation: Any, _hook: Any) -> Any:
         seen.append("base")
         return activation + ["base"]

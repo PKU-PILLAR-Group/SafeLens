@@ -1435,8 +1435,7 @@ def _model_to_str_tokens(model: Any, text: Any, *, prepend_bos: bool | None) -> 
     if _is_sequence(text) and not isinstance(text, str | bytes):
         first_row = _row(tokens, 0)
         return [
-            str(_decode_single_token_if_possible(model, int(token_id)))
-            for token_id in first_row
+            str(_decode_single_token_if_possible(model, int(token_id))) for token_id in first_row
         ]
     row = _row(tokens, 0) if _rank(tokens) >= 2 else tokens
     return [str(_decode_single_token_if_possible(model, int(token_id))) for token_id in row]
@@ -1740,9 +1739,7 @@ def _sample_logits_torch(
         logits_for_sampling = logits_for_sampling.masked_fill(indices_to_remove, -float("inf"))
 
     categorical = cast(Any, torch.distributions.categorical.Categorical)
-    sample = categorical(
-        logits=logits_for_sampling.to(torch.float32)
-    ).sample()
+    sample = categorical(logits=logits_for_sampling.to(torch.float32)).sample()
     return sample.squeeze(0) if single_row else sample
 
 

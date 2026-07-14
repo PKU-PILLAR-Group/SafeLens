@@ -2116,21 +2116,17 @@ def test_t5_architecture_adapter_supports_decoder_and_cross_attention_paths() ->
         "mlp_in",
     } <= supported
     assert (
-        _require_component_ref(adapter, "encoder.0.hook_q_input").safelens_name
-        == "layer_0.q_input"
+        _require_component_ref(adapter, "encoder.0.hook_q_input").safelens_name == "layer_0.q_input"
     )
     assert (
-        _require_component_ref(adapter, "encoder.0.hook_attn_in").safelens_name
-        == "layer_0.attn_in"
+        _require_component_ref(adapter, "encoder.0.hook_attn_in").safelens_name == "layer_0.attn_in"
     )
     assert _require_component_ref(adapter, "encoder.0.attn.hook_q").safelens_name == "layer_0.q"
     assert (
-        _require_component_ref(adapter, "encoder.0.hook_mlp_in").safelens_name
-        == "layer_0.mlp_in"
+        _require_component_ref(adapter, "encoder.0.hook_mlp_in").safelens_name == "layer_0.mlp_in"
     )
     assert (
-        _require_component_ref(adapter, "encoder.0.mlp.hook_post").safelens_name
-        == "layer_0.post"
+        _require_component_ref(adapter, "encoder.0.mlp.hook_post").safelens_name == "layer_0.post"
     )
     assert (
         _require_component_ref(adapter, "decoder.0.hook_q_input").safelens_name

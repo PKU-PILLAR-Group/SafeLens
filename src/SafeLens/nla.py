@@ -298,9 +298,7 @@ def build_nla_prompt_input_ids(
     if isinstance(input_ids, Sequence) and not isinstance(input_ids, str | bytes):
         if input_ids and isinstance(input_ids[0], Sequence) and not isinstance(input_ids[0], int):
             if len(input_ids) != 1:
-                raise ValueError(
-                    "tokenizer returned a batched input_ids sequence; expected 1 row."
-                )
+                raise ValueError("tokenizer returned a batched input_ids sequence; expected 1 row.")
             input_ids = input_ids[0]
         return [int(token_id) for token_id in input_ids]
     raise TypeError(f"tokenizer returned unsupported input_ids type {type(input_ids).__name__}.")

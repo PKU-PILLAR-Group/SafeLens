@@ -518,9 +518,7 @@ class LinearProbe(BaseProbe):
         weights = cast(Sequence[float], self.weights)
         loss = 0.0
         for features, label in examples:
-            prediction = self._sigmoid(
-                self._dot(weights, features) + float(cast(Any, self.bias))
-            )
+            prediction = self._sigmoid(self._dot(weights, features) + float(cast(Any, self.bias)))
             loss += self._binary_cross_entropy(prediction, label)
         loss /= float(len(examples))
         loss += 0.5 * self.l2 * sum(weight * weight for weight in weights)

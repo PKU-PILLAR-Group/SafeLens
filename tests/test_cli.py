@@ -219,16 +219,23 @@ def test_cli_explorer_delegates_single_server_options(
     artifact_root = tmp_path / "artifacts"
     web_root = tmp_path / "web"
 
-    main([
-        "explorer",
-        "--artifact-root", str(artifact_root),
-        "--web-root", str(web_root),
-        "--host", "0.0.0.0",
-        "--port", "8080",
-        "--allow-remote",
-        "--no-browser",
-        "--log-level", "warning",
-    ])
+    main(
+        [
+            "explorer",
+            "--artifact-root",
+            str(artifact_root),
+            "--web-root",
+            str(web_root),
+            "--host",
+            "0.0.0.0",
+            "--port",
+            "8080",
+            "--allow-remote",
+            "--no-browser",
+            "--log-level",
+            "warning",
+        ]
+    )
 
     assert received == {
         "artifact_root": artifact_root,

@@ -234,8 +234,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         except ImportError as exc:
             parser.exit(
                 1,
-                "Explorer dependencies are missing. Install `safelens[explorer]`.\n"
-                f"{exc}\n",
+                "Explorer dependencies are missing. Install `safelens[explorer]`.\n" f"{exc}\n",
             )
         try:
             serve_explorer(

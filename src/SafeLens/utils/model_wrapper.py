@@ -10336,7 +10336,7 @@ def _gather_sequence_residual_directions(weight: Sequence[Any], tokens: Any) -> 
         return [_gather_sequence_residual_directions(weight, token) for token in tokens]
     item = getattr(tokens, "item", None)
     if callable(item):
-            return _to_python_sequence_container(weight[int(cast(Any, item()))])
+        return _to_python_sequence_container(weight[int(cast(Any, item()))])
     return _to_python_sequence_container(weight[int(cast(Any, tokens))])
 
 
