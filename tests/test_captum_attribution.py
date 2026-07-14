@@ -22,11 +22,14 @@ class _FakeLayerIntegratedGradients:
         self.layer = layer
 
     def attribute(self, inputs: Any, **kwargs: Any) -> Any:
-        _ = kwargs
+        assert kwargs["return_convergence_delta"] is True
+        assert kwargs["baselines"].shape == inputs.shape
+        assert kwargs["baselines"].eq(0).all()
         output = self.forward_func(inputs)
         assert output.shape == (1,)
         pos = int(inputs.shape[1])
-        return torch.arange(pos * 2, dtype=torch.float32, device=inputs.device).reshape(1, pos, 2)
+        values = torch.arange(pos * 2, dtype=torch.float32, device=inputs.device).reshape(1, pos, 2)
+        return values, torch.tensor([0.0125], device=inputs.device)
 
 
 class _FakeTokenizer:

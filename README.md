@@ -27,6 +27,7 @@
 <p>
   <a href="https://pku-pillar-group.github.io/SafeLens/">Documentation</a> ·
   <a href="#quick-start">Quick Start</a> ·
+  <a href="#local-explorer">Explorer</a> ·
   <a href="#architecture">Architecture</a> ·
   <a href="#model-sources">Model Sources</a> ·
   <a href="#hook-and-patching-runtime">Hooks</a> ·
@@ -216,6 +217,41 @@ report = PipelineRunner.from_yaml("examples/config.yaml").run()
 print(report.summary)
 ```
 
+## Local Explorer
+
+The interactive visualization workspace ships inside the Python package. From a
+source checkout, install the lightweight server extra and start one process:
+
+```bash
+python -m pip install -e ".[explorer]"
+safelens explorer --artifact-root outputs/local-explorer
+```
+
+SafeLens opens `http://127.0.0.1:7860`. The React application, artifact API,
+deep links, and job API all use that one port; Node.js is not required at
+runtime. The bundled example is immediately available, and compact
+`*.explorer.json` files placed under the artifact root appear in the Run
+Library.
+
+Real-model Prompt, Attribution, NLA, Patching, and Intervention jobs also need
+their model dependencies:
+
+```bash
+python -m pip install -e ".[explorer,models,attribution,nla]"
+```
+
+For an isolated container instead:
+
+```bash
+docker build -t safelens-explorer .
+docker volume create safelens-data
+docker run --rm -p 127.0.0.1:7860:7860 \
+  -v safelens-data:/data safelens-explorer
+```
+
+See [apps/local_explorer/README.md](apps/local_explorer/README.md) for frontend
+development, remote deployment, persistence, and health-check details.
+
 ## Installation
 
 SafeLens is currently installed from source.
@@ -226,6 +262,8 @@ SafeLens is currently installed from source.
 | Development and docs | `python -m pip install -r requirements-dev.txt` |
 | HuggingFace, local, Qwen3 Dense, TransformerLens-compatible wrappers | `python -m pip install -e ".[models]" --no-build-isolation` |
 | ModelScope wrapper | `python -m pip install -e ".[modelscope]" --no-build-isolation` |
+| Local Explorer | `python -m pip install -e ".[explorer]"` |
+| Explorer with real-model jobs | `python -m pip install -e ".[explorer,models,attribution,nla]"` |
 
 Recommended isolated setup:
 
@@ -248,6 +286,7 @@ conda create -p ./.conda python=3.10 -y
 | `safelens models list-transformerlens` | List vendored TransformerLens-compatible model names. |
 | `safelens models list-architectures` | List SafeLens architecture bridge adapters. |
 | `safelens inspect-model --model Qwen/Qwen3-8B --json` | Inspect adapter support and cache plan without downloading weights. |
+| `safelens explorer --artifact-root outputs/local-explorer` | Launch the packaged visualization workspace and API on one local port. |
 
 ## Pipeline Configuration
 

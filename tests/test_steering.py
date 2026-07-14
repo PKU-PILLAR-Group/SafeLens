@@ -5,6 +5,8 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from SafeLens.core.base import Batch, HookFn, LayerRef, ModelWrapper
 from SafeLens.steering import ContrastiveSteeringVector, add_steering_vector
 
@@ -61,6 +63,28 @@ def test_add_steering_vector_can_patch_last_token_only() -> None:
     )
 
     assert patched == [[[1.0, 1.0], [3.0, 5.0]]]
+
+
+def test_add_steering_vector_can_patch_a_half_open_position_range() -> None:
+    activation = [[[1.0, 1.0], [2.0, 2.0], [3.0, 3.0]]]
+
+    patched = add_steering_vector(
+        activation,
+        [1.0, 3.0],
+        scale=2.0,
+        position=(1, 3),
+    )
+
+    assert patched == [[[1.0, 1.0], [4.0, 8.0], [5.0, 9.0]]]
+
+
+def test_add_steering_vector_range_is_noop_for_short_incremental_sequence() -> None:
+    torch = pytest.importorskip("torch")
+    activation = torch.tensor([[[1.0, 2.0]]])
+
+    patched = add_steering_vector(activation, [3.0, 4.0], position=(2, 4))
+
+    assert torch.equal(patched, activation)
 
 
 class _Handle:

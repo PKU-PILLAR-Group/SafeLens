@@ -1,0 +1,30 @@
+{
+  "name": "@safelens/local-explorer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1 --port 7860",
+    "build:real-run": "python ../../scripts/build_local_explorer_real_run.py",
+    "build": "tsc -b && vite build",
+    "test:e2e": "playwright test",
+    "test:performance": "playwright test --config=playwright.performance.config.ts",
+    "preview": "vite preview --host 127.0.0.1 --port 7860"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "lucide-react": "^0.468.0",
+    "ml-hclust": "^4.0.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "vite": "^6.0.7",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "^4.12.1",
+    "@playwright/test": "^1.55.0",
+    "@types/react": "^18.3.18",
+    "@types/react-dom": "^18.3.5",
+    "typescript": "^5.7.2"
+  }
+}

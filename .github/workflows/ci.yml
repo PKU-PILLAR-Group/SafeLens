@@ -46,14 +46,42 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: apps/local_explorer/package-lock.json
       - uses: actions/setup-python@v6
         with:
           python-version: "3.10"
           cache: pip
       - run: python -m pip install --upgrade pip
       - run: python -m pip install -e ".[dev]"
+      - run: npm ci --prefix apps/local_explorer
+      - run: python scripts/prepare_explorer_distribution.py
       - run: python -m build
+      - run: python scripts/verify_explorer_wheel.py
       - run: python -m twine check --strict dist/*
+      - name: Build Explorer container
+        run: docker build -t safelens-explorer:ci .
+      - name: Smoke-test Explorer container
+        run: |
+          docker run --detach --name safelens-explorer-ci \
+            --publish 127.0.0.1:7860:7860 safelens-explorer:ci
+          trap 'docker rm --force safelens-explorer-ci' EXIT
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:7860/api/health > /tmp/health.json; then
+              break
+            fi
+            if [ "$attempt" -eq 30 ]; then
+              docker logs safelens-explorer-ci
+              exit 1
+            fi
+            sleep 1
+          done
+          curl --fail --silent http://127.0.0.1:7860/ | grep 'SafeLens Local Explorer'
+          grep '"status":"ok"' /tmp/health.json
+          test "$(docker inspect --format '{{.Config.User}}' safelens-explorer-ci)" = safelens
       - uses: actions/upload-artifact@v7
         with:
           name: python-package-dist

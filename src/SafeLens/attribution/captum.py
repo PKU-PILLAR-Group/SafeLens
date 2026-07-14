@@ -21,6 +21,8 @@ def attribute_response_token_input(
     n_steps: int = 32,
     internal_batch_size: int | None = None,
     include_special_tokens: bool = False,
+    baseline: str = "pad_token",
+    prepend_bos: bool | None = None,
 ) -> AttributionResult:
     """Attribute a response target token logit to all earlier input tokens.
 
@@ -33,6 +35,8 @@ def attribute_response_token_input(
             "n_steps": n_steps,
             "internal_batch_size": internal_batch_size,
             "include_special_tokens": include_special_tokens,
+            "baseline": baseline,
+            "prepend_bos": prepend_bos,
         }
     )
     attributor.attach(model)
@@ -114,8 +118,13 @@ class CaptumInputAttributor(BaseAttributor):
         if target_response_index < 0:
             raise ValueError("target_response_index must be non-negative.")
 
+        prepend_bos = self.config.get("prepend_bos")
         prompt_tokens = _ensure_single_token_tensor(
-            _model_to_tokens(model, prompt),
+            _model_to_tokens(
+                model,
+                prompt,
+                prepend_bos=None if prepend_bos is None else bool(prepend_bos),
+            ),
             torch=torch,
             device=_model_device(model),
         )
@@ -163,13 +172,18 @@ class CaptumInputAttributor(BaseAttributor):
             return logits[:, target_logit_position, target_token_id]
 
         lig = layer_integrated_gradients(forward_func, embedding_layer)
+        baseline_token_id = _baseline_token_id(model, str(self.config.get("baseline", "pad_token")))
+        baseline_tokens = torch.full_like(input_tokens, baseline_token_id)
         lig_kwargs = {
             "n_steps": int(self.config.get("n_steps", 32)),
             "internal_batch_size": self.config.get("internal_batch_size"),
+            "baselines": baseline_tokens,
+            "return_convergence_delta": True,
         }
         if lig_kwargs["internal_batch_size"] is None:
             lig_kwargs.pop("internal_batch_size")
-        attributions = lig.attribute(input_tokens, **lig_kwargs)
+        attribution_output = lig.attribute(input_tokens, **lig_kwargs)
+        attributions, convergence_delta = _split_attribution_output(attribution_output)
         raw_scores, scores = _token_scores_from_attributions(
             attributions,
             torch=torch,
@@ -196,6 +210,13 @@ class CaptumInputAttributor(BaseAttributor):
                 "target_position": target_position,
                 "input_token_count": int(input_tokens.shape[1]),
                 "response_source": _response_source(response, response_token_ids),
+                "objective": "response_token_logit",
+                "baseline": str(self.config.get("baseline", "pad_token")),
+                "baseline_token_id": baseline_token_id,
+                "baseline_token_text": _decode_one_token(model, baseline_token_id),
+                "n_steps": int(self.config.get("n_steps", 32)),
+                "convergence_delta": convergence_delta,
+                "prepend_bos": prepend_bos,
             },
         )
 
@@ -358,6 +379,30 @@ def _token_scores_from_attributions(
     if max_abs == 0.0:
         return raw_scores, [0.0 for _ in raw_scores]
     return raw_scores, [score / max_abs for score in raw_scores]
+
+
+def _split_attribution_output(output: Any) -> tuple[Any, float | None]:
+    if not isinstance(output, tuple) or len(output) != 2:
+        return output, None
+    attributions, delta = output
+    try:
+        values = delta.detach().float().cpu().reshape(-1).tolist()
+        return attributions, float(sum(values) / max(1, len(values)))
+    except (AttributeError, TypeError, ValueError):
+        return output, None
+
+
+def _baseline_token_id(model: ModelWrapper, baseline: str) -> int:
+    tokenizer = getattr(model, "tokenizer", None)
+    if baseline == "zero_token_id":
+        return 0
+    if baseline != "pad_token":
+        raise ValueError("baseline must be 'pad_token' or 'zero_token_id'.")
+    for name in ("pad_token_id", "eos_token_id", "bos_token_id"):
+        value = getattr(tokenizer, name, None)
+        if value is not None:
+            return int(value)
+    return 0
 
 
 def _build_token_attributions(

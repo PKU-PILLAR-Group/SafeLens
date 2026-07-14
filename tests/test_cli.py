@@ -202,3 +202,40 @@ def test_cli_lists_architecture_bridge_adapters(capsys: pytest.CaptureFixture[st
 
     assert "llama_like_decoder" in adapter_names
     assert "gpt2_decoder" in adapter_names
+
+
+def test_cli_explorer_delegates_single_server_options(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from SafeLens import explorer_api
+
+    received: dict[str, object] = {}
+
+    def fake_serve_explorer(**kwargs: object) -> None:
+        received.update(kwargs)
+
+    monkeypatch.setattr(explorer_api, "serve_explorer", fake_serve_explorer)
+    artifact_root = tmp_path / "artifacts"
+    web_root = tmp_path / "web"
+
+    main([
+        "explorer",
+        "--artifact-root", str(artifact_root),
+        "--web-root", str(web_root),
+        "--host", "0.0.0.0",
+        "--port", "8080",
+        "--allow-remote",
+        "--no-browser",
+        "--log-level", "warning",
+    ])
+
+    assert received == {
+        "artifact_root": artifact_root,
+        "host": "0.0.0.0",
+        "port": 8080,
+        "web_root": web_root,
+        "open_browser": False,
+        "allow_remote": True,
+        "log_level": "warning",
+    }

@@ -44,3 +44,5 @@ runs/
 .env
 .env.*
 test_reports/
+test-results/
+playwright-report/

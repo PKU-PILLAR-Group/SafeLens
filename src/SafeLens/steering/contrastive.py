@@ -6,9 +6,11 @@ import json
 import math
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, TypeAlias, cast
 
 from SafeLens.core.base import LayerRef, ModelWrapper
+
+SteeringPosition: TypeAlias = str | tuple[int, int]
 
 
 class ContrastiveSteeringVector:
@@ -109,7 +111,7 @@ class ContrastiveSteeringVector:
         model: ModelWrapper,
         *,
         scale: float = 1.0,
-        position: str = "all",
+        position: SteeringPosition = "all",
         layer: LayerRef | None = None,
         prepend: bool = False,
     ) -> Any:
@@ -128,7 +130,7 @@ class ContrastiveSteeringVector:
         prompt: Any,
         *,
         scale: float = 1.0,
-        position: str = "all",
+        position: SteeringPosition = "all",
         remove_after: bool = True,
         **generation_kwargs: Any,
     ) -> Any:
@@ -146,7 +148,7 @@ def add_steering_vector(
     vector: Any,
     *,
     scale: float = 1.0,
-    position: str = "all",
+    position: SteeringPosition = "all",
 ) -> Any:
     """Return activation plus a steering vector, preserving common tensor backends."""
     if activation is None:
@@ -252,7 +254,13 @@ def _normalize_value(value: Any) -> Any:
     return [float(item) / norm for item in value]
 
 
-def _add_torch_vector(activation: Any, vector: Any, *, scale: float, position: str) -> Any:
+def _add_torch_vector(
+    activation: Any,
+    vector: Any,
+    *,
+    scale: float,
+    position: SteeringPosition,
+) -> Any:
     vector_tensor = _as_torch_value(vector, activation).to(
         device=activation.device,
         dtype=activation.dtype,
@@ -268,16 +276,68 @@ def _add_torch_vector(activation: Any, vector: Any, *, scale: float, position: s
         else:
             patched = patched + scale * vector_tensor
         return patched
-    raise ValueError("position must be 'all' or 'last_token'")
+    if isinstance(position, tuple):
+        start, end = _validate_position_range(position)
+        patched = activation.clone()
+        sequence_axis = -2 if patched.ndim >= 2 else None
+        if sequence_axis is None or start >= patched.shape[sequence_axis]:
+            return patched
+        bounded_end = min(end, int(patched.shape[sequence_axis]))
+        if patched.ndim >= 3:
+            patched[:, start:bounded_end, :] += scale * vector_tensor
+        elif patched.ndim == 2:
+            patched[start:bounded_end, :] += scale * vector_tensor
+        else:
+            patched += scale * vector_tensor
+        return patched
+    raise ValueError("position must be 'all', 'last_token', or a (start, end) range")
 
 
-def _add_python_vector(activation: Any, vector: Any, *, scale: float, position: str) -> Any:
+def _add_python_vector(
+    activation: Any,
+    vector: Any,
+    *,
+    scale: float,
+    position: SteeringPosition,
+) -> Any:
     vector_values = _as_python_vector(vector)
     if position == "all":
         return _add_vector_to_all_final_vectors(activation, vector_values, scale)
     if position == "last_token":
         return _add_vector_to_last_final_vector(activation, vector_values, scale)
-    raise ValueError("position must be 'all' or 'last_token'")
+    if isinstance(position, tuple):
+        start, end = _validate_position_range(position)
+        return _add_vector_to_position_range(activation, vector_values, scale, start, end)
+    raise ValueError("position must be 'all', 'last_token', or a (start, end) range")
+
+
+def _validate_position_range(position: tuple[int, int]) -> tuple[int, int]:
+    start, end = position
+    if start < 0 or end <= start:
+        raise ValueError("position range must satisfy 0 <= start < end")
+    return start, end
+
+
+def _add_vector_to_position_range(
+    value: Any,
+    vector: Sequence[float],
+    scale: float,
+    start: int,
+    end: int,
+) -> Any:
+    if _is_final_vector(value):
+        return value
+    if not isinstance(value, Sequence) or isinstance(value, str | bytes):
+        return value
+    output = list(value)
+    if output and _is_final_vector(output[0]):
+        for index in range(start, min(end, len(output))):
+            output[index] = _add_vector_to_all_final_vectors(output[index], vector, scale)
+        return output
+    return [
+        _add_vector_to_position_range(item, vector, scale, start, end)
+        for item in output
+    ]
 
 
 def _add_vector_to_all_final_vectors(value: Any, vector: Sequence[float], scale: float) -> Any:

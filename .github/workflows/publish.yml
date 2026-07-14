@@ -28,13 +28,21 @@ jobs:
       name: ${{ inputs.target }}
     steps:
       - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: apps/local_explorer/package-lock.json
       - uses: actions/setup-python@v6
         with:
           python-version: "3.10"
           cache: pip
       - run: python -m pip install --upgrade pip
       - run: python -m pip install -e ".[dev]"
+      - run: npm ci --prefix apps/local_explorer
+      - run: python scripts/prepare_explorer_distribution.py
       - run: python -m build
+      - run: python scripts/verify_explorer_wheel.py
       - run: python -m twine check --strict dist/*
       - name: Publish to TestPyPI
         if: inputs.target == 'testpypi'

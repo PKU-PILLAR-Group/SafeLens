@@ -70,6 +70,10 @@ viz = [
   "numpy>=1.23",
   "torch>=2"
 ]
+explorer = [
+  "fastapi>=0.115,<1",
+  "uvicorn>=0.34,<1"
+]
 dev = [
   "build>=1.2",
   "matplotlib>=3.7",
@@ -95,12 +99,19 @@ Changelog = "https://github.com/PKU-PILLAR-Group/SafeLens/blob/main/CHANGELOG.md
 
 [project.scripts]
 safelens = "SafeLens.cli:main"
+safelens-explorer-chunks = "SafeLens.explorer_chunks:main"
+safelens-explorer = "SafeLens.explorer_api:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
-SafeLens = ["py.typed"]
+SafeLens = [
+  "py.typed",
+  "explorer_web/*",
+  "explorer_web/assets/*",
+  "explorer_workers/*.py",
+]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

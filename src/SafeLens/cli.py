@@ -120,6 +120,31 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional local directory used by local or ModelScope adapters",
     )
     inspect_parser.add_argument("--json", action="store_true", help="Print JSON output")
+
+    explorer_parser = subparsers.add_parser(
+        "explorer",
+        help="launch the packaged SafeLens Explorer web workspace",
+    )
+    explorer_parser.add_argument(
+        "--artifact-root",
+        type=Path,
+        default=Path("outputs/local-explorer"),
+        help="Directory containing *.explorer.json artifacts",
+    )
+    explorer_parser.add_argument("--host", default="127.0.0.1")
+    explorer_parser.add_argument("--port", type=int, default=7860)
+    explorer_parser.add_argument("--web-root", type=Path, help="Override built frontend path")
+    explorer_parser.add_argument("--no-browser", action="store_true")
+    explorer_parser.add_argument(
+        "--allow-remote",
+        action="store_true",
+        help="Allow a non-local bind without built-in authentication or TLS",
+    )
+    explorer_parser.add_argument(
+        "--log-level",
+        choices=["critical", "error", "warning", "info", "debug", "trace"],
+        default="info",
+    )
     return parser
 
 
@@ -203,6 +228,27 @@ def main(argv: Sequence[str] | None = None) -> None:
             print(json.dumps(result, indent=2))
         else:
             _print_model_inspection(result)
+    elif args.command == "explorer":
+        try:
+            from SafeLens.explorer_api import serve_explorer
+        except ImportError as exc:
+            parser.exit(
+                1,
+                "Explorer dependencies are missing. Install `safelens[explorer]`.\n"
+                f"{exc}\n",
+            )
+        try:
+            serve_explorer(
+                artifact_root=args.artifact_root,
+                host=args.host,
+                port=args.port,
+                web_root=args.web_root,
+                open_browser=not args.no_browser,
+                allow_remote=args.allow_remote,
+                log_level=args.log_level,
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            parser.exit(2, f"{exc}\n")
 
 
 def _print_model_adapter_list(adapters: list[dict[str, Any]]) -> None:
