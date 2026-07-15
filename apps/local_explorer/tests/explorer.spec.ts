@@ -10,6 +10,12 @@ import {
 } from "../src/metricFormatting";
 import type { ExplorerRun } from "../src/types";
 
+test.beforeEach(async ({ page }) => {
+  await page.addInitScript(() => {
+    window.sessionStorage.setItem("safelens-workspace-layout", "dense");
+  });
+});
+
 function remoteIndex(run: typeof realRun, sourceName = "remote-validation.explorer.json") {
   return {
     schemaVersion: "1.0",
@@ -487,7 +493,7 @@ test("loads a requested workspace run without overwriting its URL while discover
     await route.fulfill({ json: remoteRun });
   });
 
-  await page.goto("/?run=remote-validation-run&sample=remote-sample&view=overview");
+  await page.goto("/explorer?run=remote-validation-run&sample=remote-sample&view=overview");
   await expect(page).toHaveURL(/run=remote-validation-run/);
   await expect(page).toHaveURL(/sample=remote-sample/);
   await expect(page.getByLabel("Workspace API status")).toContainText("Connecting to workspace");
@@ -521,7 +527,7 @@ test("keeps bundled data usable and retries workspace discovery after an API err
     await route.fulfill({ json: remoteRun });
   });
 
-  await page.goto("/");
+  await page.goto("/explorer");
   await expect(page.getByLabel("Workspace API status")).toContainText("Workspace API error");
   await expect(page.getByRole("heading", { name: "Token Timeline" })).toBeVisible();
   await expect(page.getByLabel("Run and sample selector").locator("option")).toHaveCount(1);
@@ -565,7 +571,7 @@ test("distinguishes offline transport from schema errors while preserving local 
     await route.fulfill({ json: remoteIndex(remoteRun, "recovered.explorer.json") });
   });
 
-  await page.goto("/");
+  await page.goto("/explorer");
   let status = page.getByLabel("Workspace API status");
   await expect(status).toContainText("Workspace offline");
   await expect(status).toContainText("Bundled and imported runs remain available");
@@ -648,7 +654,7 @@ test("indexes workspace runs without downloading samples until selection", async
     await route.fulfill({ json: remoteRun });
   });
 
-  await page.goto("/");
+  await page.goto("/explorer");
   await expect(page.getByLabel("Workspace API status")).toContainText("test-artifacts · 1 ready");
   await expect(page.getByLabel("Run and sample selector").locator("option")).toHaveCount(2);
   expect(sampleRequests).toBe(0);
@@ -679,7 +685,7 @@ test("explains bundled-over-workspace source conflicts without mixing artifacts"
     }
   );
 
-  await page.goto("/");
+  await page.goto("/explorer");
   await expect(page.getByLabel("Workspace API status")).toContainText("test-artifacts · 1 ready");
   await expect(page.getByLabel("Run and sample selector").locator("option")).toHaveCount(1);
   const active = page.locator(".active-run-card");
@@ -759,7 +765,7 @@ test("shows browser-over-workspace source resolution in the mobile run library",
     }
   );
 
-  await page.goto("/");
+  await page.goto("/explorer");
   await expect(page.getByLabel("Quick run selector").locator("option")).toHaveCount(2);
   await page.getByLabel("Open run library").click();
   let drawer = page.getByRole("dialog", { name: "Runs and samples" });
@@ -839,7 +845,7 @@ test("orders the run browser by persisted last-used time with complete metadata"
     await route.fulfill({ json: remoteRuns[0] });
   });
 
-  await page.goto("/");
+  await page.goto("/explorer");
   await expect(page.getByLabel("Workspace API status")).toContainText("recency-workspace · 3 ready");
   let recent = page.getByLabel("Available workspace and imported runs");
   await expect(recent.locator(":scope > div").nth(0)).toContainText("recency-run-1");
@@ -910,7 +916,7 @@ test("searches, filters, and windows a large workspace run library", async ({ pa
     });
   });
 
-  await page.goto("/");
+  await page.goto("/explorer");
   await expect(page.getByLabel("Workspace API status")).toContainText("large-workspace · 37 ready");
   const list = page.getByLabel("Available workspace and imported runs");
   await expect(list.locator(":scope > div")).toHaveCount(8);
@@ -975,7 +981,7 @@ test("virtualizes searchable selectors for a thousand-run workspace", async ({ p
     }
   );
 
-  await page.goto("/");
+  await page.goto("/explorer");
   await expect(page.getByLabel("Workspace API status")).toContainText(
     "thousand-run-workspace · 1200 ready"
   );
@@ -1084,7 +1090,7 @@ test("imports, replays, and exports a cross-run analysis session", async ({ page
     filters: { evidence: "all" }
   };
 
-  await page.goto("/");
+  await page.goto("/explorer");
   await expect(page.getByLabel("Workspace API status")).toContainText("test-artifacts · 1 ready");
   const importInput = page.getByLabel("Import Explorer artifact JSON");
   await importInput.setInputFiles({
@@ -1440,7 +1446,7 @@ test("cancels workspace discovery without disabling local analysis", async ({ pa
     await route.fulfill({ json: remoteIndex(realRun) }).catch(() => undefined);
   });
 
-  await page.goto("/");
+  await page.goto("/explorer");
   await expect(page.getByLabel("Workspace API status")).toHaveAttribute("aria-busy", "true");
   await expect(page.getByLabel("Workspace API status")).toContainText("Connecting to workspace");
   await page.getByLabel("Cancel workspace discovery").click();
@@ -1464,7 +1470,7 @@ test("reports an empty workspace as an actionable empty state", async ({ page })
     });
   });
 
-  await page.goto("/");
+  await page.goto("/explorer");
   const status = page.getByLabel("Workspace API status");
   await expect(status).toContainText("empty-artifacts · no runs found");
   await expect(status).toHaveAttribute("aria-busy", "false");
@@ -1503,7 +1509,7 @@ test("keeps the newest workspace response when refresh requests overlap", async 
     await route.fulfill({ json: freshRun });
   });
 
-  await page.goto("/");
+  await page.goto("/explorer");
   await expect(page.getByLabel("Workspace API status")).toContainText("race-test · no runs found");
   phase = "stale";
   await page.getByLabel("Retry workspace discovery").click();
@@ -1558,7 +1564,7 @@ test("runs a prompt job over SSE and adds validated output to the Run Library", 
     });
   });
 
-  await page.goto("/");
+  await page.goto("/explorer");
   await page.getByLabel("Prompt runner text").fill("Analyze a generated safety response.");
   await page.getByLabel("Prompt template").selectOption("chat");
   await page.getByLabel("Generation seed").fill("23");
@@ -1620,9 +1626,9 @@ test("cancels a prompt job without adding a generated run", async ({ page }) => 
     });
   });
 
-  await page.goto("/");
+  await page.goto("/explorer");
   await expect(page.getByLabel("Workspace API status")).toContainText(
-    /ready|no runs found|Workspace data error/
+    /ready|no runs found|Workspace data error|Workspace API error/
   );
   const originalOptions = await page.getByLabel("Quick run selector").locator("option").count();
   await page.getByRole("button", { name: "Run analysis" }).click();
@@ -1681,7 +1687,7 @@ test("classifies submission failures, copies safe diagnostics, and retries witho
   });
 
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.goto("/");
+  await page.goto("/explorer");
   await page.getByLabel("Open run library").click();
   const drawer = page.locator(".mobile-library-drawer");
   const runner = drawer.locator(".prompt-runner-panel");
@@ -1754,7 +1760,7 @@ test("reports invalid progress streams as protocol failures without duplicating 
     await route.fulfill({ json: promptJob("cancelled") });
   });
 
-  await page.goto("/");
+  await page.goto("/explorer");
   const sourceRun = await page.getByLabel("Quick run selector").inputValue();
   await page.getByRole("button", { name: "Run analysis" }).click();
   await expect(page.getByLabel("Prompt job status")).toContainText("Job response is invalid");
@@ -1804,7 +1810,7 @@ test("classifies worker failures as computation errors and retries a new generat
     await route.fulfill({ json: promptJob("cancelled") });
   });
 
-  await page.goto("/");
+  await page.goto("/explorer");
   const sourceRun = await page.getByLabel("Quick run selector").inputValue();
   await page.getByRole("button", { name: "Run analysis" }).click();
   await expect(page.getByLabel("Prompt job status")).toContainText("Job computation failed");
@@ -1884,7 +1890,7 @@ test("runs Captum attribution and opens the causal method in a derived run", asy
     });
   });
 
-  await page.goto("/?view=attribution&track=integrated_gradients");
+  await page.goto("/explorer?view=attribution&track=integrated_gradients");
   await page.getByLabel("Attribution response text").fill(" stairs stairs");
   await page.getByLabel("Target response token index").fill("1");
   await page.getByLabel("Attribution baseline").selectOption("pad_token");
@@ -1932,7 +1938,7 @@ test("cancels Captum attribution without replacing the source run", async ({ pag
     await route.fulfill({ json: attributionJob("cancelled", realRun) });
   });
 
-  await page.goto("/?view=attribution&track=integrated_gradients");
+  await page.goto("/explorer?view=attribution&track=integrated_gradients");
   const sourceRun = await page.getByLabel("Quick run selector").inputValue();
   await page.getByRole("button", { name: "Run Integrated Gradients" }).click();
   await expect(page.getByLabel("Attribution job status")).toContainText("Attribution running");
@@ -1958,7 +1964,7 @@ test("blocks NLA submission when the selected profile is structurally incompatib
     await route.abort();
   });
 
-  await page.goto("/?view=nla&token=10");
+  await page.goto("/explorer?view=nla&token=10");
   const preflight = page.getByLabel("NLA job preflight");
   await expect(preflight).toContainText("incompatible");
   await expect(preflight.locator(".failed")).toHaveCount(3);
@@ -1983,7 +1989,7 @@ test("blocks activation patching until the corrupted prompt is positionally alig
     await route.abort();
   });
 
-  await page.goto("/?view=patching&token=10&layer=1");
+  await page.goto("/explorer?view=patching&token=10&layer=1");
   await expect(page.getByLabel("Patching preflight")).toContainText("blocked");
   await expect(page.getByLabel("Patching preflight")).toContainText("prompts are identical");
   const corruptedPrompt = page.getByLabel("Corrupted patching prompt");
@@ -2063,7 +2069,7 @@ test("runs activation patching and opens exact causal evidence in a derived run"
     });
   });
 
-  await page.goto("/?view=patching&token=10&layer=1");
+  await page.goto("/explorer?view=patching&token=10&layer=1");
   await page.getByLabel("Corrupted patching prompt").fill("Corrupted aligned prompt");
   await expect(page.getByLabel("Patching preflight")).toContainText("ready");
   await page.getByRole("button", { name: /Run 1 patches/ }).click();
@@ -2218,7 +2224,7 @@ test("cancels activation patching while preserving its last progress", async ({ 
     await route.fulfill({ json: patchingJob("cancelled", realRun) });
   });
 
-  await page.goto("/?view=patching&token=10&layer=1");
+  await page.goto("/explorer?view=patching&token=10&layer=1");
   const sourceRun = await page.getByLabel("Quick run selector").inputValue();
   await page.getByLabel("Corrupted patching prompt").fill("Corrupted aligned prompt");
   await expect(page.getByLabel("Patching preflight")).toContainText("ready");
@@ -2259,7 +2265,7 @@ test("blocks intervention when contrastive references are identical", async ({ p
     await route.abort();
   });
 
-  await page.goto("/?view=intervention&token=10&layer=1");
+  await page.goto("/explorer?view=intervention&token=10&layer=1");
   const desired = page.getByRole("textbox", { name: "Desired intervention reference", exact: true });
   await page.getByRole("textbox", { name: "Undesired intervention reference", exact: true }).fill(await desired.inputValue());
   await expect(page.getByLabel("Intervention preflight")).toContainText("blocked");
@@ -2358,7 +2364,7 @@ test("runs intervention and opens original-versus-steered causal evidence", asyn
     });
   });
 
-  await page.goto("/?view=intervention&token=10&layer=1");
+  await page.goto("/explorer?view=intervention&token=10&layer=1");
   await expect(page.getByLabel("Intervention preflight")).toContainText("ready");
   await page.getByRole("button", { name: "Run intervention comparison" }).click();
 
@@ -2577,7 +2583,7 @@ test("cancels intervention without replacing the source run", async ({ page }) =
     await route.fulfill({ json: interventionJob("cancelled", realRun) });
   });
 
-  await page.goto("/?view=intervention&token=10&layer=1");
+  await page.goto("/explorer?view=intervention&token=10&layer=1");
   const sourceRun = await page.getByLabel("Quick run selector").inputValue();
   await page.getByRole("button", { name: "Run intervention comparison" }).click();
   await expect(page.getByLabel("Intervention job status")).toContainText("Intervention running");
@@ -2674,7 +2680,7 @@ test("runs exact NLA and opens fidelity evidence in a derived run", async ({ pag
   await page.route(/\/api\/runs\/real-hf-tiny-gpt2-local-explorer\/samples\/real-forward-cache-001$/, async (route) => {
     await route.fulfill({ json: compatibleRun });
   });
-  await page.goto("/?run=real-hf-tiny-gpt2-local-explorer&sample=real-forward-cache-001&view=nla&token=10&layer=20");
+  await page.goto("/explorer?run=real-hf-tiny-gpt2-local-explorer&sample=real-forward-cache-001&view=nla&token=10&layer=20");
   await expect(page.getByLabel("NLA job preflight")).toContainText("compatible");
   await page.getByLabel("NLA checkpoint revision").fill("commit-abc123");
   await page.getByLabel("NLA maximum new tokens").fill("64");
@@ -2707,7 +2713,7 @@ test("cancels a compatible NLA job without changing unavailable source evidence"
     await route.fulfill({ json: nlaJob("cancelled", realRun) });
   });
 
-  await page.goto("/?view=nla&token=10");
+  await page.goto("/explorer?view=nla&token=10");
   const sourceRun = await page.getByLabel("Quick run selector").inputValue();
   await page.getByRole("button", { name: "Run exact NLA" }).click();
   await expect(page.getByLabel("NLA job status")).toContainText("NLA job running");
@@ -2752,7 +2758,7 @@ test("restores the complete matrix selection from the URL", async ({ page }) => 
 });
 
 test("imports, persists, switches, and removes a validated Explorer artifact", async ({ page }) => {
-  await page.goto("/");
+  await page.goto("/explorer");
   await page.evaluate(() => window.localStorage.clear());
   let releaseIndex!: () => void;
   const indexGate = new Promise<void>((resolve) => { releaseIndex = resolve; });
@@ -2880,7 +2886,7 @@ test("imports, persists, switches, and removes a validated Explorer artifact", a
 
 test("reports JSON and artifact schema errors without changing the active run", async ({ page }) => {
   await page.addInitScript(() => window.localStorage.clear());
-  await page.goto("/");
+  await page.goto("/explorer");
   const selector = page.getByLabel("Run and sample selector");
   const initialValue = await selector.inputValue();
 
@@ -2970,7 +2976,7 @@ test("reports JSON and artifact schema errors without changing the active run", 
 });
 
 test("exports a schema-valid Explorer artifact", async ({ page }) => {
-  await page.goto("/");
+  await page.goto("/explorer");
   const downloadPromise = page.waitForEvent("download");
   await page.getByLabel("Export current Explorer artifact").click();
   const download = await downloadPromise;
@@ -2988,7 +2994,7 @@ test("exports a schema-valid Explorer artifact", async ({ page }) => {
 });
 
 test("keeps view, token, and normalization synchronized to the URL", async ({ page }) => {
-  await page.goto("/");
+  await page.goto("/explorer");
 
   await page.getByRole("tab", { name: "Attention", exact: true }).click();
   await expect(page).toHaveURL(/view=attention/);
@@ -3005,7 +3011,7 @@ test("keeps view, token, and normalization synchronized to the URL", async ({ pa
 
 test("confirms analysis context changes without interrupting selection", async ({ page }) => {
   await page.addInitScript(() => window.localStorage.clear());
-  await page.goto("/?view=overview&token=10&layer=1");
+  await page.goto("/explorer?view=overview&token=10&layer=1");
   const visualNotice = page.locator(".context-change-notice");
   const liveNotice = page.getByRole("log", { name: "Analysis context changes" });
 
@@ -3035,7 +3041,7 @@ test("confirms analysis context changes without interrupting selection", async (
 test("confirms run changes and keeps the notice inside a mobile viewport", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.addInitScript(() => window.localStorage.clear());
-  await page.goto("/");
+  await page.goto("/explorer");
   const importedRun = {
     ...realRun,
     runId: "context-notice-run",
@@ -3063,9 +3069,9 @@ test("confirms run changes and keeps the notice inside a mobile viewport", async
   expect(box!.y).toBeGreaterThanOrEqual(0);
   expect(box!.y + box!.height).toBeLessThanOrEqual(844);
   expect(box!.height).toBeGreaterThanOrEqual(44);
-  const workspaceBox = await page.locator(".workspace").boundingBox();
-  expect(workspaceBox).not.toBeNull();
-  expect(box!.y + box!.height).toBeLessThanOrEqual(workspaceBox!.y + 1);
+  await expect(visualNotice).toHaveCSS("position", "fixed");
+  expect(844 - (box!.y + box!.height)).toBeGreaterThanOrEqual(0);
+  expect(844 - (box!.y + box!.height)).toBeLessThanOrEqual(24);
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
   const accessibility = await new AxeBuilder({ page })
     .include(".context-change-notice")
@@ -3077,7 +3083,7 @@ test("confirms run changes and keeps the notice inside a mobile viewport", async
 
 test("starts incompatible Runs with a clean active context while retaining comparison snapshots", async ({ page }) => {
   await page.addInitScript(() => window.localStorage.clear());
-  await page.goto("/?view=residual&token=10&layer=1&range=8-999");
+  await page.goto("/explorer?view=residual&token=10&layer=1&range=8-999");
   await expect.poll(() => new URL(page.url()).searchParams.get("range")).toBeNull();
 
   await page.goto(
@@ -3185,7 +3191,7 @@ test("starts incompatible Runs with a clean active context while retaining compa
 
 test("restores view, token, and layer through browser history", async ({ page }) => {
   await page.addInitScript(() => window.localStorage.clear());
-  await page.goto("/?view=overview&token=10&layer=1");
+  await page.goto("/explorer?view=overview&token=10&layer=1");
 
   await page.getByRole("tab", { name: "Attention", exact: true }).click();
   await page.locator(".token-pill").filter({ hasText: "jail" }).click();
@@ -3230,7 +3236,7 @@ test("restores view, token, and layer through browser history", async ({ page })
 
 test("restores run and selection context through browser history", async ({ page }) => {
   await page.addInitScript(() => window.localStorage.clear());
-  await page.goto("/?view=residual&token=9&layer=0&metric=residual_norm&normalization=raw");
+  await page.goto("/explorer?view=residual&token=9&layer=0&metric=residual_norm&normalization=raw");
   const importedRun = {
     ...realRun,
     runId: "history-imported-run",
@@ -3288,7 +3294,7 @@ test("restores a loaded workspace run from history without refetching it", async
     }
   );
 
-  await page.goto("/?view=residual&token=9&layer=0");
+  await page.goto("/explorer?view=residual&token=9&layer=0");
   await expect(page.getByLabel("Run and sample selector").locator("option")).toHaveCount(2);
   await page.getByLabel("Run and sample selector")
     .selectOption("history-workspace-run::history-workspace-sample");
@@ -3316,7 +3322,7 @@ test("restores a loaded workspace run from history without refetching it", async
 test("restores mobile analysis context through browser history", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.addInitScript(() => window.localStorage.clear());
-  await page.goto("/?view=overview&token=10&layer=1");
+  await page.goto("/explorer?view=overview&token=10&layer=1");
 
   await page.getByRole("tab", { name: "Residual", exact: true }).click();
   await page.locator(".token-pill").filter({ hasText: "jail" }).click();
@@ -3338,7 +3344,7 @@ test("restores mobile analysis context through browser history", async ({ page }
 
 test("navigates analysis views and layers as roving keyboard controls", async ({ page }) => {
   await page.addInitScript(() => window.localStorage.clear());
-  await page.goto("/?view=overview&token=10&layer=1");
+  await page.goto("/explorer?view=overview&token=10&layer=1");
 
   const tabs = page.getByRole("tablist", { name: "Analysis view" });
   await expect(tabs.getByRole("tab")).toHaveCount(8);
@@ -3374,7 +3380,7 @@ test("navigates analysis views and layers as roving keyboard controls", async ({
 
 test("completes analysis, pin, and compare using only the keyboard", async ({ page }) => {
   await page.addInitScript(() => window.localStorage.clear());
-  await page.goto("/?view=overview&token=10&layer=1");
+  await page.goto("/explorer?view=overview&token=10&layer=1");
 
   await page.keyboard.press("Tab");
   const skipLink = page.getByRole("link", { name: "Skip to analysis workspace" });
@@ -3440,7 +3446,7 @@ test("completes analysis, pin, and compare using only the keyboard", async ({ pa
 
 test("executes contextual quick actions with complete modal and mobile focus flows", async ({ page }, testInfo) => {
   await page.addInitScript(() => window.localStorage.clear());
-  await page.goto("/?view=residual&token=10&layer=1");
+  await page.goto("/explorer?view=residual&token=10&layer=1");
 
   const trigger = page.getByLabel("Open quick actions");
   await trigger.click();
@@ -3550,7 +3556,7 @@ test("executes contextual quick actions with complete modal and mobile focus flo
 test("reveals overflowed analysis views with mobile tab scroll controls", async ({ page }, testInfo) => {
   await page.addInitScript(() => window.localStorage.clear());
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.goto("/?view=overview&token=10&layer=1");
+  await page.goto("/explorer?view=overview&token=10&layer=1");
 
   const tabs = page.getByRole("tablist", { name: "Analysis view" });
   const next = page.getByLabel("Show more analysis views");
@@ -3639,7 +3645,7 @@ test("reveals overflowed analysis views with mobile tab scroll controls", async 
   expect(axeResults.violations).toEqual([]);
 
   await page.setViewportSize({ width: 768, height: 844 });
-  await page.goto("/?view=overview&token=10&layer=1");
+  await page.goto("/explorer?view=overview&token=10&layer=1");
   await expect(next).toBeVisible();
   await expect.poll(visibleTabGeometry).toMatchObject({ whole: true });
   expect((await visibleTabGeometry()).visible).toHaveLength(6);
@@ -3675,7 +3681,7 @@ test("keeps mobile deep links at the page context while profile rails reveal sel
   ] as const;
 
   for (const [view, label] of views) {
-    await page.goto(`/?view=${view}&token=10&layer=1`);
+    await page.goto(`/explorer?view=${view}&token=10&layer=1`);
     await expect(page.getByRole("tab", { name: label })).toHaveAttribute("aria-selected", "true");
     await expect(page.getByRole("region", { name: "Token timeline" })).toBeVisible();
     await page.waitForTimeout(500);
@@ -3683,7 +3689,7 @@ test("keeps mobile deep links at the page context while profile rails reveal sel
     await expect(page.locator(".topbar")).toBeVisible();
   }
 
-  await page.goto("/?view=attention&token=10&source=1&target=10&layer=1&head=L1H0");
+  await page.goto("/explorer?view=attention&token=10&source=1&target=10&layer=1&head=L1H0");
   const rail = page.getByRole("radiogroup", { name: "Incoming source token profile" });
   await rail.scrollIntoViewIfNeeded();
   const pageScrollBeforeNavigation = await page.evaluate(() => window.scrollY);
@@ -3696,7 +3702,7 @@ test("keeps mobile deep links at the page context while profile rails reveal sel
 });
 
 test("skips directly to analysis and scopes global token navigation", async ({ page }) => {
-  await page.goto("/?view=overview&token=10&layer=1");
+  await page.goto("/explorer?view=overview&token=10&layer=1");
   await page.keyboard.press("Tab");
   const skipLink = page.getByRole("link", { name: "Skip to analysis workspace" });
   await expect(skipLink).toBeFocused();
@@ -3722,7 +3728,7 @@ test("skips directly to analysis and scopes global token navigation", async ({ p
 test("keeps mobile selection, pin, compare, and inspector actions sticky", async ({ page }) => {
   await page.addInitScript(() => window.localStorage.clear());
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.goto("/?view=overview&token=10&layer=1");
+  await page.goto("/explorer?view=overview&token=10&layer=1");
 
   const summary = page.getByRole("region", { name: "Current evidence actions" });
   await expect(summary).toBeVisible();
@@ -3750,7 +3756,7 @@ test("keeps mobile selection, pin, compare, and inspector actions sticky", async
 test("keeps evidence actions within reach at compact desktop widths", async ({ page }, testInfo) => {
   await page.addInitScript(() => window.localStorage.clear());
   await page.setViewportSize({ width: 1024, height: 768 });
-  await page.goto("/?view=attention&token=10&source=1&target=10&layer=1&head=L1H0");
+  await page.goto("/explorer?view=attention&token=10&source=1&target=10&layer=1&head=L1H0");
 
   const workspace = page.getByRole("region", { name: "Analysis workspace" });
   const actions = page.getByRole("region", { name: "Current evidence actions" });
@@ -3813,7 +3819,7 @@ test("meets automated WCAG A and AA checks in the primary analysis workspace", a
   test.setTimeout(60_000);
   await page.addInitScript(() => window.localStorage.clear());
   await page.emulateMedia({ reducedMotion: "reduce" });
-  await page.goto("/?view=overview&token=10&layer=1");
+  await page.goto("/explorer?view=overview&token=10&layer=1");
   async function expectNoViolations() {
     const results = await new AxeBuilder({ page })
       .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"])
@@ -3850,7 +3856,7 @@ test("honors reduced motion across loading, selection, notices, drawers, and tab
     await route.fulfill({ json: remoteIndex(realRun) });
   });
   await page.emulateMedia({ reducedMotion: "reduce" });
-  await page.goto("/?view=overview&token=10&layer=1");
+  await page.goto("/explorer?view=overview&token=10&layer=1");
 
   const workspaceStatus = page.getByLabel("Workspace API status");
   await expect(workspaceStatus).toHaveAttribute("aria-busy", "true");
@@ -3911,7 +3917,7 @@ test("honors reduced motion across loading, selection, notices, drawers, and tab
 
 test("presents an actionable overview evidence map without overstating missing evidence", async ({ page }, testInfo) => {
   await page.addInitScript(() => window.localStorage.clear());
-  await page.goto("/?view=overview&token=10&layer=1");
+  await page.goto("/explorer?view=overview&token=10&layer=1");
 
   const map = page.getByRole("region", { name: "Evidence map" });
   await expect(map.getByRole("heading", { name: "Evidence map" })).toBeVisible();
@@ -4008,7 +4014,7 @@ test("routes contradictory proxies and exact causal evidence from the overview m
       sourceKey: `activation_patching.resid_post[target=${target.targetTokenId}]`
     }
   };
-  await page.goto("/");
+  await page.goto("/explorer");
   await page.getByLabel("Import Explorer artifact JSON").setInputFiles({
     name: "overview-contradictory.json",
     mimeType: "application/json",
@@ -4033,7 +4039,7 @@ test("routes contradictory proxies and exact causal evidence from the overview m
 
 test("keeps visualization and selection states visible in forced colors", async ({ page }, testInfo) => {
   await page.emulateMedia({ forcedColors: "active", reducedMotion: "reduce" });
-  await page.goto("/?view=attention&token=10&layer=1");
+  await page.goto("/explorer?view=attention&token=10&layer=1");
 
   const selectedTab = page.getByRole("tab", { name: "Attention" });
   await expect(selectedTab).toHaveAttribute("aria-selected", "true");
@@ -4068,7 +4074,7 @@ test("keeps visualization and selection states visible in forced colors", async 
 });
 
 test("associates required long-form errors with their fields", async ({ page }) => {
-  await page.goto("/?view=overview&token=10&layer=1");
+  await page.goto("/explorer?view=overview&token=10&layer=1");
   const prompt = page.getByLabel("Prompt runner text");
   await prompt.fill("   ");
   await expect(prompt).toHaveAttribute("aria-invalid", "true");
@@ -4101,7 +4107,7 @@ test("isolates and retries a failed lazy view module without reloading the works
     await route.continue();
   });
 
-  await page.goto("/?view=overview&token=10&layer=1");
+  await page.goto("/explorer?view=overview&token=10&layer=1");
   const originalDocument = await page.evaluate(() => performance.timeOrigin);
   await page.getByRole("tab", { name: "Attention", exact: true }).click();
 
@@ -4166,7 +4172,7 @@ test("isolates and retries a failed lazy view module without reloading the works
 
 test("searches, groups, ranges, and pins from the token timeline", async ({ page }) => {
   await page.addInitScript(() => window.localStorage.clear());
-  await page.goto("/");
+  await page.goto("/explorer");
   const timeline = page.getByLabel("Token timeline");
   await expect(timeline.getByText("User prompt")).toBeVisible();
   await expect(timeline.locator(".source-prompt > header")).toContainText("20 tokens");
@@ -4198,7 +4204,7 @@ test("searches, groups, ranges, and pins from the token timeline", async ({ page
 
 test("shows reply, special, generation, probe, and monitor metadata when present", async ({ page }) => {
   await page.addInitScript(() => window.localStorage.clear());
-  await page.goto("/");
+  await page.goto("/explorer");
   const metadataRun = {
     ...realRun,
     runId: "timeline-metadata-validation",
@@ -4343,7 +4349,7 @@ test("shows reply, special, generation, probe, and monitor metadata when present
 test("windows long token timelines and jumps to offscreen search results", async ({ page }) => {
   await page.addInitScript(() => window.localStorage.clear());
   const longRun = expandedTimelineRun(260);
-  await page.goto("/");
+  await page.goto("/explorer");
   await page.getByLabel("Import Explorer artifact JSON").setInputFiles({
     name: "long-timeline.json",
     mimeType: "application/json",
@@ -4432,7 +4438,7 @@ test("keeps every attention display mode legible across responsive workspaces", 
 
   for (const width of [390, 1024, 1280, 1440]) {
     await page.setViewportSize({ width, height: 1000 });
-    await page.goto("/?view=attention&token=10&source=1&target=10&layer=1&head=L1H0");
+    await page.goto("/explorer?view=attention&token=10&source=1&target=10&layer=1&head=L1H0");
     const controls = page.getByLabel("Attention matrix controls", { exact: true });
     const display = controls.getByRole("radiogroup", { name: "Attention head display" });
     await expect(display).toBeVisible();
@@ -4585,7 +4591,7 @@ test("aggregates retained attention heads with reproducible derived provenance",
       };
     })
   };
-  await page.goto("/?view=attention&token=10&source=1&target=10&layer=1&head=L1H0");
+  await page.goto("/explorer?view=attention&token=10&source=1&target=10&layer=1&head=L1H0");
   await page.getByLabel("Import Explorer artifact JSON").setInputFiles({
     name: "attention-aggregate.json",
     mimeType: "application/json",
@@ -4725,7 +4731,7 @@ test("computes retained attention rollout through preceding layers with explicit
     }))
   };
 
-  await page.goto("/?view=attention&token=10&source=0&target=10&layer=1&head=L1H0");
+  await page.goto("/explorer?view=attention&token=10&source=0&target=10&layer=1&head=L1H0");
   await page.getByLabel("Import Explorer artifact JSON").setInputFiles({
     name: "attention-rollout.json",
     mimeType: "application/json",
@@ -4836,7 +4842,7 @@ test("renders and compares signed retained-head difference matrices", async ({ p
       };
     })
   };
-  await page.goto("/?view=attention&token=10&source=1&target=10&layer=1&head=L1H0");
+  await page.goto("/explorer?view=attention&token=10&source=1&target=10&layer=1&head=L1H0");
   await page.getByLabel("Import Explorer artifact JSON").setInputFiles({
     name: "attention-difference.json",
     mimeType: "application/json",
@@ -4993,7 +4999,7 @@ test("marks run-relative risk positions and explicit monitor hits on attention a
       token.index === 18 ? { ...token, monitorHit: true } : token
     )
   };
-  await page.goto("/?view=attention&token=10&source=1&target=10&layer=1&head=L1H0");
+  await page.goto("/explorer?view=attention&token=10&source=1&target=10&layer=1&head=L1H0");
   await page.getByLabel("Import Explorer artifact JSON").setInputFiles({
     name: "attention-markers.json",
     mimeType: "application/json",
@@ -5241,7 +5247,7 @@ test("keeps DOM matrix row and column headings visible while scrolling", async (
 });
 
 test("brushes a token range directly on the matrix", async ({ page }) => {
-  await page.goto("/?view=residual&token=10&layer=1");
+  await page.goto("/explorer?view=residual&token=10&layer=1");
 
   const cells = page.locator(".matrix-cell");
   await cells.nth(8).scrollIntoViewIfNeeded();
@@ -5269,7 +5275,7 @@ test("uses registered compact and exact precision across evidence surfaces", asy
   expect(metricDisplayLabel("patching_effect")).toBe("causal effect");
 
   await page.addInitScript(() => window.localStorage.clear());
-  await page.goto("/?view=residual&token=10&layer=1&metric=residual_direction&normalization=raw");
+  await page.goto("/explorer?view=residual&token=10&layer=1&metric=residual_direction&normalization=raw");
   const residual = realRun.residualCells.find((cell) => cell.layer === 1 && cell.tokenIndex === 10)!;
   const compact = formatMetricNumber(residual.rawDirection, "residual_direction", "compact");
   const exact = formatMetricNumber(residual.rawDirection, "residual_direction", "exact");
@@ -5291,7 +5297,7 @@ test("uses registered compact and exact precision across evidence surfaces", asy
 });
 
 test("brushes and synchronizes token ranges across specialized matrices", async ({ page }) => {
-  await page.goto("/?view=attention&token=10&source=8&layer=1");
+  await page.goto("/explorer?view=attention&token=10&source=8&layer=1");
 
   async function dragBetween(startSelector: string, endSelector: string) {
     const startLocator = page.locator(startSelector);
@@ -5392,7 +5398,7 @@ test("brushes and synchronizes token ranges across specialized matrices", async 
 
 test("navigates, anchors, and pins exact matrix cells with keyboard modifiers", async ({ page }) => {
   await page.addInitScript(() => window.localStorage.clear());
-  await page.goto("/?view=residual&token=10&layer=1&metric=residual_direction");
+  await page.goto("/explorer?view=residual&token=10&layer=1&metric=residual_direction");
 
   const selected = page.locator('.matrix-cell[data-row="1"][data-column="10"]');
   await selected.focus();
@@ -5421,7 +5427,7 @@ test("navigates, anchors, and pins exact matrix cells with keyboard modifiers", 
 });
 
 test("pans an enlarged matrix and fits it back to the viewport", async ({ page }) => {
-  await page.goto("/?view=residual&token=10&layer=1");
+  await page.goto("/explorer?view=residual&token=10&layer=1");
   const controls = page.getByLabel("Matrix controls");
   for (let index = 0; index < 9; index += 1) {
     await controls.getByLabel("Zoom in").click();
@@ -5449,7 +5455,7 @@ test("pans an enlarged matrix and fits it back to the viewport", async ({ page }
 });
 
 test("keeps viewport controls consistent across specialized matrices", async ({ page }) => {
-  await page.goto("/?view=attention&token=10&source=9&layer=1");
+  await page.goto("/explorer?view=attention&token=10&source=9&layer=1");
   const matrices = [
     {
       view: "Attention",
@@ -5632,7 +5638,7 @@ test("shows complete token metadata from specialized matrix headers and keyboard
 });
 
 test("uses one keyboard entry point in every specialized matrix", async ({ page }) => {
-  await page.goto("/?view=attention&token=10&source=9&target=10&layer=1&head=L1H0");
+  await page.goto("/explorer?view=attention&token=10&source=9&target=10&layer=1&head=L1H0");
   let cells = page.locator('.attention-pattern-cell[tabindex="0"]');
   await expect(cells).toHaveCount(1);
   await cells.focus();
@@ -5679,7 +5685,7 @@ test("uses one keyboard entry point in every specialized matrix", async ({ page 
 });
 
 test("shows real residual logit-lens predictions and trajectories by layer", async ({ page }, testInfo) => {
-  await page.goto("/?view=residual&token=10&layer=1&metric=residual_direction");
+  await page.goto("/explorer?view=residual&token=10&layer=1&metric=residual_direction");
 
   const lens = page.getByLabel("Residual logit lens");
   await expect(lens).toBeVisible();
@@ -5740,7 +5746,7 @@ test("shows real residual logit-lens predictions and trajectories by layer", asy
 
 test("filters, selects, and pins a signed MLP neuron activation", async ({ page }, testInfo) => {
   await page.addInitScript(() => window.localStorage.clear());
-  await page.goto("/?view=mlp&token=10&layer=1&metric=mlp_signed_activation");
+  await page.goto("/explorer?view=mlp&token=10&layer=1&metric=mlp_signed_activation");
 
   const controls = page.getByLabel("MLP matrix controls", { exact: true });
   await expect(controls).toBeVisible();
@@ -5841,7 +5847,7 @@ test("navigates and compares retained MLP neuron activation profiles", async ({ 
     window.localStorage.clear();
     window.sessionStorage.setItem("mlp-profile-test-started", "true");
   });
-  await page.goto("/?view=mlp&token=10&layer=1&neuron=L1N0004&metric=mlp_signed_activation");
+  await page.goto("/explorer?view=mlp&token=10&layer=1&neuron=L1N0004&metric=mlp_signed_activation");
 
   await page.getByLabel(/^Compare pinned evidence/).click();
   const initialDrawer = page.getByRole("dialog", { name: "Compare pinned evidence" });
@@ -6011,7 +6017,7 @@ test("clusters retained MLP activation profiles with signed Pearson orientation"
     ]
   };
 
-  await page.goto("/?view=mlp&token=10&layer=1&neuron=L1N0100");
+  await page.goto("/explorer?view=mlp&token=10&layer=1&neuron=L1N0100");
   await page.getByLabel("Import Explorer artifact JSON").setInputFiles({
     name: "mlp-clusters.json",
     mimeType: "application/json",
@@ -6076,7 +6082,7 @@ test("clusters retained MLP activation profiles with signed Pearson orientation"
 
 test("pins and restores a complete evidence context", async ({ page }) => {
   await page.addInitScript(() => window.localStorage.clear());
-  await page.goto("/");
+  await page.goto("/explorer");
   await page.getByRole("tab", { name: "Residual", exact: true }).click();
   await page.getByRole("button", { name: "Pin current evidence" }).click();
 
@@ -6092,7 +6098,7 @@ test("pins and restores a complete evidence context", async ({ page }) => {
 
 test("restores the pinned attribution track", async ({ page }) => {
   await page.addInitScript(() => window.localStorage.clear());
-  await page.goto("/");
+  await page.goto("/explorer");
   await page.getByRole("tab", { name: "Attribution", exact: true }).click();
   const methods = page.getByLabel("Attribution methods");
   await methods.getByRole("button").filter({ hasText: "Token safety proxy" }).click();
@@ -6199,7 +6205,7 @@ test("audits attribution balance and compares method snapshots without cross-sca
 });
 
 test("diagnoses exact NLA coverage without substituting nearby rows", async ({ page }) => {
-  await page.goto("/?view=nla&token=10&layer=1&metric=nla_cosine");
+  await page.goto("/explorer?view=nla&token=10&layer=1&metric=nla_cosine");
 
   const controls = page.getByLabel("NLA fidelity controls");
   await expect(controls).toBeVisible();
@@ -6264,7 +6270,7 @@ test("triages low-fidelity NLA rows and robust activation norm outliers", async 
     }
   };
 
-  await page.goto("/?view=nla&token=10&layer=1&metric=nla_cosine");
+  await page.goto("/explorer?view=nla&token=10&layer=1&metric=nla_cosine");
   await page.getByLabel("Import Explorer artifact JSON").setInputFiles({
     name: "nla-review.json",
     mimeType: "application/json",
@@ -6411,7 +6417,7 @@ test("keeps exact NLA components through deep links, pins, sessions, and context
     }
   };
 
-  await page.goto("/?view=nla&token=10&layer=1&metric=nla_cosine");
+  await page.goto("/explorer?view=nla&token=10&layer=1&metric=nla_cosine");
   await page.getByLabel("Import Explorer artifact JSON").setInputFiles({
     name: "nla-components.json",
     mimeType: "application/json",
@@ -6492,7 +6498,7 @@ test("keeps exact NLA components through deep links, pins, sessions, and context
 
 test("shows unified inspector values, provenance, statuses, and copy actions", async ({ page, context }) => {
   await context.grantPermissions(["clipboard-read", "clipboard-write"]);
-  await page.goto("/?view=overview&token=10&layer=1");
+  await page.goto("/explorer?view=overview&token=10&layer=1");
   const inspector = page.getByLabel("Evidence inspector");
   await expect(inspector.getByRole("heading", { name: "Summary" })).toBeVisible();
   await expect(inspector.getByRole("heading", { name: "Evidence" })).toBeVisible();
@@ -6528,7 +6534,7 @@ test("shows unified inspector values, provenance, statuses, and copy actions", a
 
 test("keeps Inspector trust assessments identical across evidence, session, pin, and comparison exports", async ({ page }) => {
   await page.addInitScript(() => window.localStorage.clear());
-  await page.goto("/?view=attention&token=10&source=9&target=10&layer=1&head=L1H0&normalization=raw");
+  await page.goto("/explorer?view=attention&token=10&source=9&target=10&layer=1&head=L1H0&normalization=raw");
 
   const inspector = page.getByLabel("Evidence inspector", { exact: true });
   const status = await inspector.locator(".evidence-status").textContent();
@@ -6672,7 +6678,7 @@ test("keeps Inspector trust assessments identical across evidence, session, pin,
 
 test("routes Inspector evidence gaps to focused next-analysis workflows", async ({ page }) => {
   await page.addInitScript(() => window.localStorage.clear());
-  await page.goto("/?view=attention&token=10&source=10&target=10&layer=1&head=L1H0");
+  await page.goto("/explorer?view=attention&token=10&source=10&target=10&layer=1&head=L1H0");
 
   let inspector = page.getByLabel("Evidence inspector", { exact: true });
   let recommendations = inspector.getByLabel("Recommended next analysis");
@@ -6736,7 +6742,7 @@ test("routes Inspector evidence gaps to focused next-analysis workflows", async 
 test("progressively discloses mobile Inspector provenance with buttons and vertical swipes", async ({ page, context }, testInfo) => {
   await page.addInitScript(() => window.localStorage.clear());
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.goto("/?view=attention&token=10&source=9&target=10&layer=1&head=L1H0");
+  await page.goto("/explorer?view=attention&token=10&source=9&target=10&layer=1&head=L1H0");
 
   const trigger = page.getByLabel("Open evidence inspector");
   await trigger.click();
@@ -6828,7 +6834,7 @@ async function touchSwipe(
 
 test("turns advanced-view result gaps into focused executable empty states", async ({ page }, testInfo) => {
   await page.addInitScript(() => window.localStorage.clear());
-  await page.goto("/?view=patching&token=10&layer=1");
+  await page.goto("/explorer?view=patching&token=10&layer=1");
 
   let emptyState = page.getByRole("region", { name: "No causal patch grid in this run" });
   await expect(emptyState).toContainText("L1 / token 10");
@@ -6841,7 +6847,7 @@ test("turns advanced-view result gaps into focused executable empty states", asy
   await emptyState.getByRole("button", { name: "Configure intervention" }).click();
   await expect(page.locator("#intervention-job")).toBeFocused();
 
-  await page.goto("/?view=nla&token=9&layer=1&nlaComponent=resid_post");
+  await page.goto("/explorer?view=nla&token=9&layer=1&nlaComponent=resid_post");
   emptyState = page.getByRole("region", {
     name: "Activation is cached; NLA decoding is unavailable"
   });
@@ -6849,7 +6855,7 @@ test("turns advanced-view result gaps into focused executable empty states", asy
   await emptyState.getByRole("button", { name: "Configure exact NLA" }).click();
   await expect(page.locator("#nla-job")).toBeFocused();
 
-  await page.goto("/?view=attribution&token=10&layer=1&track=integrated_gradients");
+  await page.goto("/explorer?view=attribution&token=10&layer=1&track=integrated_gradients");
   const attributionStates = page.getByRole("region", {
     name: "Integrated Gradients is not available for this run"
   });
@@ -6886,7 +6892,7 @@ test("turns advanced-view result gaps into focused executable empty states", asy
 test("classifies failed evidence and exposes the mobile inspector drawer", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.addInitScript(() => window.localStorage.clear());
-  await page.goto("/");
+  await page.goto("/explorer");
   const failedRun = {
     ...realRun,
     runId: "failed-inspector-run",
@@ -6926,7 +6932,7 @@ test("classifies failed evidence and exposes the mobile inspector drawer", async
 
 test("classifies an exact missing component as unavailable", async ({ page }) => {
   await page.addInitScript(() => window.localStorage.clear());
-  await page.goto("/");
+  await page.goto("/explorer");
   const missingLayerRun = {
     ...realRun,
     runId: "unavailable-inspector-run",
@@ -6955,7 +6961,7 @@ test("preloads the comparison visualization and exposes a stable loading dialog"
     await route.continue();
   });
 
-  await page.goto("/");
+  await page.goto("/explorer");
   expect(compareRequests).toBe(0);
   const trigger = page.getByLabel(/^Compare pinned evidence/);
   await trigger.focus();
@@ -6982,7 +6988,7 @@ test("recovers a stalled comparison module inside the modal flow", async ({ page
     await route.continue();
   });
 
-  await page.goto("/");
+  await page.goto("/explorer");
   const trigger = page.getByLabel(/^Compare pinned evidence/);
   await trigger.focus();
   await trigger.click();
@@ -7026,7 +7032,7 @@ test("recovers a stalled comparison module inside the modal flow", async ({ page
 
 test("compares pinned evidence and restores a card context", async ({ page }) => {
   await page.addInitScript(() => window.localStorage.clear());
-  await page.goto("/");
+  await page.goto("/explorer");
 
   await page.getByRole("tab", { name: "Residual", exact: true }).click();
   await page.getByRole("button", { name: "Pin current evidence" }).click();
@@ -7077,7 +7083,7 @@ test("compares versioned attention profiles and restores them from an analysis s
     })
   };
 
-  await page.goto("/");
+  await page.goto("/explorer");
   const importInput = page.getByLabel("Import Explorer artifact JSON");
   await importInput.setInputFiles({
     name: "attention-profile-run.json",
@@ -7254,7 +7260,7 @@ test("compares versioned attention profiles and restores them from an analysis s
 
 test("rejects cross-run profile deltas when the full token axis is not exact", async ({ page }) => {
   await page.addInitScript(() => window.localStorage.clear());
-  await page.goto("/?view=attention&token=10&source=9&layer=1");
+  await page.goto("/explorer?view=attention&token=10&source=9&layer=1");
   await page.getByLabel("Pin inspector evidence").click();
 
   const mismatchedAxisRun = {
@@ -7298,7 +7304,7 @@ test("rejects cross-run profile deltas when the full token axis is not exact", a
 
 test("compares signed attribution token profiles across layers", async ({ page }) => {
   await page.addInitScript(() => window.localStorage.clear());
-  await page.goto("/?view=attribution&token=10&layer=0&track=residual_direction");
+  await page.goto("/explorer?view=attribution&token=10&layer=0&track=residual_direction");
   await page.getByLabel("Pin inspector evidence").click();
   await page.getByLabel("Layer selector").getByRole("radio", { name: "L1" }).click();
   await page.getByLabel("Pin inspector evidence").click();
@@ -7356,7 +7362,7 @@ test("bounds long pinned profiles and matrices while retaining full-axis provena
       }
     ]
   };
-  await page.goto("/");
+  await page.goto("/explorer");
   await page.getByLabel("Import Explorer artifact JSON").setInputFiles({
     name: "long-profile-run.json",
     mimeType: "application/json",
@@ -7439,7 +7445,7 @@ test("bounds long pinned profiles and matrices while retaining full-axis provena
 
 test("aligns cross-run tokens, switches baseline, exports, and restores source context", async ({ page }) => {
   await page.addInitScript(() => window.localStorage.clear());
-  await page.goto("/");
+  await page.goto("/explorer");
 
   await page.getByLabel(/^Compare pinned evidence/).click();
   let drawer = page.getByRole("dialog", { name: "Compare pinned evidence" });
@@ -7556,7 +7562,7 @@ test("aligns cross-run tokens, switches baseline, exports, and restores source c
 
 test("removes comparison items and closes the drawer with Escape", async ({ page }) => {
   await page.addInitScript(() => window.localStorage.clear());
-  await page.goto("/");
+  await page.goto("/explorer");
   await page.getByLabel(/^Compare pinned evidence/).click();
 
   const drawer = page.getByRole("dialog", { name: "Compare pinned evidence" });
@@ -7568,7 +7574,7 @@ test("removes comparison items and closes the drawer with Escape", async ({ page
 
 test("traps modal focus and returns it to each drawer trigger", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.goto("/?view=overview&token=10&layer=1");
+  await page.goto("/explorer?view=overview&token=10&layer=1");
 
   const libraryTrigger = page.getByLabel("Open run library");
   await libraryTrigger.click();
@@ -7610,7 +7616,7 @@ test("traps modal focus and returns it to each drawer trigger", async ({ page })
 test("keeps visualization controls usable at 320 and 360 pixels", async ({ page }) => {
   for (const width of [320, 360]) {
     await page.setViewportSize({ width, height: 800 });
-    await page.goto("/?view=attention&token=10&source=9&layer=1");
+    await page.goto("/explorer?view=attention&token=10&source=9&layer=1");
     await expect(page.getByRole("heading", { name: "Token Timeline" })).toBeVisible();
     await expect(page.locator(".mobile-current-run")).toBeVisible();
     await expect(page.locator(".mobile-current-run strong"))
@@ -7697,7 +7703,7 @@ test("keeps visualization controls usable at 320 and 360 pixels", async ({ page 
 
 test("keeps primary visualization controls at mobile touch size", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.goto("/?view=attention&token=10&source=9&layer=1");
+  await page.goto("/explorer?view=attention&token=10&source=9&layer=1");
 
   for (const locator of [
     page.locator(".metric strong").first(),
@@ -7750,7 +7756,7 @@ test("keeps primary visualization controls at mobile touch size", async ({ page 
   expect(firstTokenBox).not.toBeNull();
   expect(firstTokenBox!.y).toBeLessThan(844);
 
-  await page.goto("/?view=attribution&token=10&layer=1");
+  await page.goto("/explorer?view=attribution&token=10&layer=1");
   const attributionTab = page.getByRole("tab", { name: "Attribution", exact: true });
   await expect(attributionTab).toHaveAttribute("aria-selected", "true");
   await expect.poll(() => tabList.evaluate((element) => {
@@ -7792,7 +7798,7 @@ test("keeps primary visualization controls at mobile touch size", async ({ page 
 
 test("keeps the unified controls usable on a narrow viewport", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.goto("/?view=mlp&token=10&layer=1");
+  await page.goto("/explorer?view=mlp&token=10&layer=1");
 
   for (const label of ["Overview", "Residual", "Attention", "MLP", "NLA", "Patching", "Intervention", "Attribution"]) {
     await expect(page.getByRole("tab", { name: label, exact: true })).toBeVisible();
@@ -7833,7 +7839,7 @@ test("keeps the unified controls usable on a narrow viewport", async ({ page }) 
 test("keeps run selection and metrics aligned at intermediate widths", async ({ page }) => {
   for (const width of [1024, 768, 700]) {
     await page.setViewportSize({ width, height: 900 });
-    await page.goto("/?view=attention&token=10&source=9&layer=1");
+    await page.goto("/explorer?view=attention&token=10&source=9&layer=1");
     const topbar = await page.locator(".topbar").boundingBox();
     const runStatus = await page.locator(".run-status").boundingBox();
     const metrics = await page.locator(".run-meta").boundingBox();
@@ -7856,7 +7862,7 @@ test("keeps run selection and metrics aligned at intermediate widths", async ({ 
 
 test("keeps the inspector visible beside the workspace at a common desktop width", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 1000 });
-  await page.goto("/?view=residual&token=10&layer=1");
+  await page.goto("/explorer?view=residual&token=10&layer=1");
   const mainBox = await page.locator(".main-panel").boundingBox();
   const inspectorBox = await page.locator(".right-panel").boundingBox();
   expect(mainBox).not.toBeNull();
@@ -7865,4 +7871,91 @@ test("keeps the inspector visible beside the workspace at a common desktop width
   expect(inspectorBox!.y).toBeLessThan(160);
   await expect(page.getByRole("region", { name: "Evidence inspector" })).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)).toBe(false);
+});
+
+test("keeps the focus layout centered and reveals supporting tools on demand", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.goto("/explorer?layout=focus&view=overview&token=10&layer=1");
+
+  await expect(page.locator(".app-shell")).toHaveClass(/layout-focus/);
+  await expect(page.locator(".left-panel")).toBeHidden();
+  await expect(page.locator(".right-panel")).toBeHidden();
+  await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
+  await expect(page.getByRole("tab", { name: "Attribution", exact: true })).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(1440);
+
+  await page.getByLabel("Open run library").click();
+  const dataDrawer = page.getByRole("dialog", { name: "Runs and samples" });
+  await expect(dataDrawer).toBeVisible();
+  await expect(dataDrawer.getByText("Prompt runner", { exact: true })).toBeVisible();
+  await page.keyboard.press("Escape");
+
+  await page.getByLabel("Inspect selected evidence").click();
+  const evidenceDrawer = page.getByRole("dialog", { name: "Evidence details" });
+  await expect(evidenceDrawer).toBeVisible();
+  await expect(evidenceDrawer).toContainText("break");
+  await page.keyboard.press("Escape");
+
+  await page.getByLabel("Open quick actions").click();
+  const quickActions = page.getByRole("dialog", { name: "Quick actions" });
+  await expect(quickActions).toBeVisible();
+  await expect(quickActions.getByRole("button", { name: /Export Explorer artifact/ })).toBeVisible();
+  await page.keyboard.press("Escape");
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.reload();
+  await expect(page.locator(".run-meta")).toBeHidden();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
+});
+
+test("turns a token selection into an interactive analysis workflow in focus mode", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.goto("/explorer?layout=focus&view=overview&token=10&layer=1");
+
+  const workbench = page.getByRole("region", { name: "Selected token actions" });
+  await expect(workbench).toBeHidden();
+  await expect(page.locator(".trace-panel")).toHaveCount(0);
+  await expect(page.locator(".digest-panel")).toHaveCount(0);
+  await expect(page.locator(".pinned-strip")).toHaveCount(0);
+  await expect(page.locator(".overview-evidence-map")).toHaveCount(0);
+
+  await page.locator(".token-pill").filter({ hasText: "jail" }).click();
+  await expect(workbench).toBeVisible();
+  await expect(workbench).toContainText("jail");
+  await expect(workbench.getByText("T9", { exact: true })).toBeVisible();
+
+  const analyze = workbench.getByRole("button", { name: "Analyze" });
+  await analyze.click();
+  await expect(analyze).toHaveAttribute("aria-expanded", "true");
+  const methodMenu = page.getByRole("menu", { name: "Analyze selected token" });
+  await expect(methodMenu).toBeVisible();
+  await methodMenu.getByRole("menuitemradio", { name: "Attention" }).click();
+  await expect(page.getByRole("heading", { name: "Attention" })).toBeVisible();
+  await expect(page.getByRole("tab", { name: "Attention", exact: true })).toHaveAttribute("aria-selected", "true");
+  await expect(methodMenu).toBeHidden();
+
+  const context = workbench.getByRole("button", { name: "Context" });
+  await context.click();
+  await expect(context).toHaveAttribute("aria-expanded", "true");
+  await expect(page.locator(".trace-panel")).toBeVisible();
+  await expect(page.locator(".digest-panel")).toBeVisible();
+  await expect(page.locator(".pinned-strip")).toBeVisible();
+  await expect(page.locator(".attention-distribution")).toBeVisible();
+
+  await analyze.click();
+  await methodMenu.getByRole("menuitemradio", { name: "Attribution" }).click();
+  await expect(page.locator(".attribution-job-panel")).toHaveCount(0);
+  await page.locator(".attribution-matrix-toolbar select").selectOption("integrated_gradients");
+  await page.getByRole("button", { name: "Configure Integrated Gradients" }).first().click();
+  await expect(page.locator(".attribution-job-panel")).toBeVisible();
+  await page.getByRole("button", { name: "Close experiment setup" }).click();
+  await expect(page.locator(".attribution-job-panel")).toHaveCount(0);
+
+  await workbench.getByRole("button", { name: "Inspect" }).click();
+  await expect(page.getByRole("dialog", { name: "Evidence details" })).toBeVisible();
+  await page.keyboard.press("Escape");
+
+  await page.setViewportSize({ width: 320, height: 800 });
+  await expect(workbench).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(320);
 });

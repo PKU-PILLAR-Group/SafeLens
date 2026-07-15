@@ -34,7 +34,7 @@ test("keeps a 200k-cell matrix viewport-rendered and interactive", async ({ page
   });
 
   const started = Date.now();
-  await page.goto("/?run=perf-200k&sample=canvas-200k&view=residual&token=10&layer=999");
+  await page.goto("/explorer?run=perf-200k&sample=canvas-200k&view=residual&token=10&layer=999");
   const canvas = page.locator(".matrix-canvas");
   await expect(canvas).toBeVisible({ timeout: 30_000 });
   await expect.poll(async () => page.evaluate(
@@ -231,7 +231,7 @@ test("viewport-renders every large specialized matrix without losing selection s
     await route.fulfill({ json: run });
   });
 
-  await page.goto("/?run=perf-specialized&sample=canvas-specialized&view=attention&layer=0&token=0&source=0&target=0");
+  await page.goto("/explorer?run=perf-specialized&sample=canvas-specialized&view=attention&layer=0&token=0&source=0&target=0");
   const attention = page.getByRole("grid", { name: /Attention pattern Canvas matrix/ });
   await assertViewportCanvas(attention, page, ".attention-pattern-cell");
   await expect(page.getByRole("button", { name: /Navigate Attention pattern Canvas matrix/ })).toBeVisible();
@@ -315,7 +315,7 @@ test("viewport-renders every large specialized matrix without losing selection s
     .toHaveAttribute("aria-pressed", "true");
   expect(page.url()).toBe(attentionSelectionUrl);
 
-  await page.goto("/?run=perf-specialized&sample=canvas-specialized&view=mlp&layer=0&token=0&neuron=L0N0000&metric=mlp_signed_activation");
+  await page.goto("/explorer?run=perf-specialized&sample=canvas-specialized&view=mlp&layer=0&token=0&neuron=L0N0000&metric=mlp_signed_activation");
   const mlp = page.getByRole("grid", { name: /MLP activation Canvas matrix/ });
   await assertViewportCanvas(mlp, page, ".mlp-activation-cell");
   await expect(mlp).toHaveAttribute("aria-colcount", "2000");
@@ -400,7 +400,7 @@ test("viewport-renders every large specialized matrix without losing selection s
     contentType: "image/png"
   });
 
-  await page.goto("/?run=perf-specialized&sample=canvas-specialized&view=attribution&layer=0&token=0&track=residual_direction&metric=residual_direction&normalization=raw");
+  await page.goto("/explorer?run=perf-specialized&sample=canvas-specialized&view=attribution&layer=0&token=0&track=residual_direction&metric=residual_direction&normalization=raw");
   const attribution = page.getByRole("grid", { name: /Residual direction projection Canvas attribution matrix/ });
   await assertViewportCanvas(attribution, page, ".attribution-value-cell");
   const negativeAttributionPixel = await sampleCanvasPixel(attribution, 84, 36);
@@ -453,7 +453,7 @@ test("viewport-renders every large specialized matrix without losing selection s
   const unsignedAttributionPixel = await sampleCanvasPixel(unsignedAttribution, 489, 441);
   expect(unsignedAttributionPixel.red).toBeGreaterThan(unsignedAttributionPixel.blue);
 
-  await page.goto("/?run=perf-specialized&sample=canvas-specialized&view=nla&layer=0&token=0&metric=nla_cosine");
+  await page.goto("/explorer?run=perf-specialized&sample=canvas-specialized&view=nla&layer=0&token=0&metric=nla_cosine");
   const nla = page.getByRole("grid", { name: /NLA fidelity Canvas matrix/ });
   await assertViewportCanvas(nla, page, ".nla-fidelity-cell");
   await expect(page.getByRole("button", { name: /Navigate NLA fidelity Canvas matrix/ })).toBeVisible();
@@ -501,7 +501,7 @@ test("viewport-renders every large specialized matrix without losing selection s
   });
 
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.goto("/?run=perf-specialized&sample=canvas-specialized&view=attention&layer=0&token=1&source=1&target=1");
+  await page.goto("/explorer?run=perf-specialized&sample=canvas-specialized&view=attention&layer=0&token=1&source=1&target=1");
   const mobileAttention = page.getByRole("grid", { name: /Attention pattern Canvas matrix/ });
   await assertViewportCanvas(mobileAttention, page, ".attention-pattern-cell", 2_000);
   const mobileOverview = page.getByRole("button", { name: /Navigate Attention pattern Canvas matrix/ });
@@ -548,7 +548,7 @@ test("viewport-renders every large specialized matrix without losing selection s
     contentType: "image/png"
   });
 
-  await page.goto("/?run=perf-specialized&sample=canvas-specialized&view=mlp&layer=0&token=1&neuron=L0N1999&metric=mlp_signed_activation");
+  await page.goto("/explorer?run=perf-specialized&sample=canvas-specialized&view=mlp&layer=0&token=1&neuron=L0N1999&metric=mlp_signed_activation");
   const mobileMlp = page.getByRole("grid", { name: /MLP activation Canvas matrix/ });
   await assertViewportCanvas(mobileMlp, page, ".mlp-activation-cell", 2_000);
   await expect(mobileMlp).toHaveAttribute("aria-colcount", "2000");
@@ -560,7 +560,7 @@ test("viewport-renders every large specialized matrix without losing selection s
     contentType: "image/png"
   });
 
-  await page.goto("/?run=perf-specialized&sample=canvas-specialized&view=attention&layer=0&token=1&source=1&target=1");
+  await page.goto("/explorer?run=perf-specialized&sample=canvas-specialized&view=attention&layer=0&token=1&source=1&target=1");
   const forcedColorAttention = page.getByRole("grid", { name: /Attention pattern Canvas matrix/ });
   await expect(forcedColorAttention).toBeVisible();
 

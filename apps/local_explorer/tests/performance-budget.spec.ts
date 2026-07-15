@@ -41,7 +41,7 @@ test.beforeEach(async ({ page, context }) => {
 });
 
 test("keeps the regular production workspace usable within two seconds", async ({ page }, testInfo) => {
-  await page.goto("/?view=overview&token=10&layer=1");
+  await page.goto("/explorer?view=overview&token=10&layer=1");
   await expect(page.getByRole("heading", { name: "Token Timeline" })).toBeVisible();
   await expect.poll(() => firstUsable(page)).toBeLessThan(2_000);
 
@@ -113,7 +113,7 @@ test("keeps a 2400-token chunked timeline windowed and responsive", async ({ pag
     await route.abort();
   });
 
-  await page.goto("/?run=timeline-2400&sample=chunked-2400&view=overview&token=10&layer=0");
+  await page.goto("/explorer?run=timeline-2400&sample=chunked-2400&view=overview&token=10&layer=0");
   const timeline = page.getByLabel("Token timeline");
   await expect(timeline.getByLabel("Timeline render window")).toContainText("2400");
   await expect(timeline.locator(".token-pill")).toHaveCount(180);
@@ -175,7 +175,7 @@ test("does not retain heap, DOM, listeners, canvases, or marks across view cycle
   const client = await context.newCDPSession(page);
   await client.send("Performance.enable");
   await client.send("HeapProfiler.enable");
-  await page.goto("/?view=overview&token=10&layer=1");
+  await page.goto("/explorer?view=overview&token=10&layer=1");
   await expect.poll(() => firstUsable(page)).toBeLessThan(2_000);
 
   await cycleViews(page, 2);

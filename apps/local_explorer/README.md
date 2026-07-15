@@ -71,6 +71,21 @@ python -m SafeLens.explorer_api \
 Vite proxies `/api` to `http://127.0.0.1:7861`. Production mode does not use
 this proxy: FastAPI serves both the built frontend and `/api` on port 7860.
 
+## Interaction Model
+
+The standalone module opens in **Focus** mode. The token timeline and active
+analysis canvas stay visible, while supporting evidence is progressively
+disclosed:
+
+- Click a token or matrix cell to open its contextual action bar.
+- Use **Analyze** to switch the selected token across Overview, Residual,
+  Attention, MLP, NLA, Attribution, Patching, and Intervention.
+- Use **Inspect** for evidence values and provenance, **Context** for supporting
+  panels, and **Pin / Compare** for cross-selection analysis.
+- Experiment forms are mounted only after an explicit configure action.
+- Use the layout button in the top bar to switch to **Dense** mode when the
+  complete expert workspace should remain visible.
+
 Build the distributable resources after frontend changes:
 
 ```bash

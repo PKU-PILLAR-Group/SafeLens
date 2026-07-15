@@ -1,5 +1,7 @@
 import { defineConfig, devices } from "@playwright/test";
 
+const baseURL = process.env.PLAYWRIGHT_BASE_URL ?? "http://127.0.0.1:7860";
+
 export default defineConfig({
   testDir: "./tests",
   testIgnore: ["performance-budget.spec.ts", "matrix-performance.spec.ts"],
@@ -8,7 +10,7 @@ export default defineConfig({
   retries: 0,
   reporter: "line",
   use: {
-    baseURL: "http://127.0.0.1:7860",
+    baseURL,
     screenshot: "only-on-failure",
     trace: "retain-on-failure"
   },
@@ -20,7 +22,7 @@ export default defineConfig({
   ],
   webServer: {
     command: "npm run dev",
-    url: "http://127.0.0.1:7860",
+    url: baseURL,
     reuseExistingServer: true,
     timeout: 30_000
   }

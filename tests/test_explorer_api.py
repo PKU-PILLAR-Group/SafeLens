@@ -471,6 +471,19 @@ def test_prompt_job_rejects_unapproved_models(tmp_path: Path) -> None:
     assert response.json()["detail"]["code"] == "model_not_allowed"
 
 
+def test_prompt_options_include_registered_nla_base_models(tmp_path: Path) -> None:
+    client = TestClient(create_app(tmp_path, prompt_runner=lambda *_args: {}))
+
+    response = client.get("/api/prompt/options")
+
+    assert response.status_code == 200
+    assert response.json()["models"] == [
+        "sshleifer/tiny-gpt2",
+        "Qwen/Qwen2.5-7B-Instruct",
+        "google/gemma-3-12b-it",
+    ]
+
+
 def test_prompt_job_can_cancel_a_running_worker(tmp_path: Path) -> None:
     started = threading.Event()
 

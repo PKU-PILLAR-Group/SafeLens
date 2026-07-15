@@ -35,6 +35,14 @@ LOCAL_EXPLORER_HOSTS = {"127.0.0.1", "localhost", "::1"}
 TERMINAL_JOB_STATES = {"ready", "error", "cancelled"}
 
 
+def _default_allowed_models() -> tuple[str, ...]:
+    from SafeLens.nla import list_nla_profiles
+
+    models = [DEFAULT_PROMPT_MODEL]
+    models.extend(str(profile["base_model"]) for profile in list_nla_profiles())
+    return tuple(dict.fromkeys(models))
+
+
 class RemoteRunSummary(BaseModel):
     runId: str
     sampleId: str
@@ -482,9 +490,11 @@ def create_app(
     patching_tokenizer_loader: Callable[[str], Any] | None = None,
     intervention_runner: JobRunner | None = None,
     intervention_tokenizer_loader: Callable[[str], Any] | None = None,
-    allowed_models: tuple[str, ...] = (DEFAULT_PROMPT_MODEL,),
+    allowed_models: tuple[str, ...] | None = None,
 ) -> FastAPI:
     """Create a localhost-oriented API constrained to one artifact root."""
+    if allowed_models is None:
+        allowed_models = _default_allowed_models()
     configured_root = artifact_root or os.environ.get(
         "SAFELENS_EXPLORER_ARTIFACT_ROOT", DEFAULT_ARTIFACT_ROOT
     )

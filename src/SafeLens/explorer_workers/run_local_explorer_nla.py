@@ -43,6 +43,7 @@ def main() -> None:
         wrapper.remove_hooks()
         del wrapper
         gc.collect()
+        _empty_cuda_cache()
 
     token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
     client = NLAClient.from_profile(
@@ -52,7 +53,7 @@ def main() -> None:
         token=token,
         revision=request["revision"],
         device=os.environ.get("SAFELENS_EXPLORER_JOB_DEVICE", "cpu"),
-        dtype="auto",
+        dtype=os.environ.get("SAFELENS_EXPLORER_JOB_DTYPE", "auto"),
         trust_remote_code=False,
     )
     token_texts = [str(token_row["text"]) for token_row in run["tokens"]]
@@ -121,6 +122,15 @@ def _capture_vectors(
     if max(positions) >= activation.shape[0]:
         raise ValueError("Requested NLA position is outside the rerun token sequence.")
     return activation[positions].float().detach().cpu()
+
+
+def _empty_cuda_cache() -> None:
+    try:
+        import torch
+    except ImportError:
+        return
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
 
 def _merge_results(

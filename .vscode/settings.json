@@ -1,0 +1,10 @@
+{
+  "remote.autoForwardPorts": true,
+  "remote.restoreForwardedPorts": true,
+  "remote.portsAttributes": {
+    "7860": {
+      "label": "SafeLens Explorer",
+      "onAutoForward": "openBrowser"
+    }
+  }
+}

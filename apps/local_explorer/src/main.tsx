@@ -20,6 +20,7 @@ import {
   MessageSquareText,
   Network,
   PackageOpen,
+  PanelRightOpen,
   Pin,
   Info,
   Search,
@@ -46,6 +47,7 @@ import { AdaptiveRunSelector } from "./components/AdaptiveRunSelector";
 import { OverviewEvidenceGraph } from "./components/OverviewEvidenceGraph";
 import { QuickActionsDialog } from "./components/QuickActionsDialog";
 import { ActionableEmptyState } from "./components/ActionableEmptyState";
+import { ExplorerHome } from "./components/ExplorerHome";
 import { useExplorerSelection } from "./state/useExplorerSelection";
 import { useModalDialog } from "./state/useModalDialog";
 import { recordExplorerPerformance, useExplorerPerformance } from "./state/useExplorerPerformance";
@@ -143,6 +145,8 @@ function preloadCompareDrawer() {
 
 const ExplorerRunContext = createContext<ExplorerRun>(realRun);
 type EvidenceFilter = "top" | "neighborhood" | "all";
+type WorkspaceLayout = "focus" | "dense";
+type AppScreen = "home" | "explorer";
 type ContextNotice = {
   id: number;
   kind: "run" | "selection";
@@ -162,9 +166,27 @@ function useExplorerRun() {
   return useContext(ExplorerRunContext);
 }
 
+function initialWorkspaceLayout(): WorkspaceLayout {
+  const queryLayout = new URLSearchParams(window.location.search).get("layout");
+  if (queryLayout === "focus" || queryLayout === "dense") return queryLayout;
+  const stored = window.sessionStorage.getItem("safelens-workspace-layout") ??
+    window.localStorage.getItem("safelens-workspace-layout");
+  return stored === "dense" ? "dense" : "focus";
+}
+
+function screenFromLocation(): AppScreen {
+  if (window.location.pathname.replace(/\/+$/, "") === "/explorer") return "explorer";
+  const params = new URLSearchParams(window.location.search);
+  const explorerKeys = [
+    "view", "mode", "run", "sample", "token", "layer", "head", "neuron", "track", "metric"
+  ];
+  return explorerKeys.some((key) => params.has(key)) ? "explorer" : "home";
+}
+
 function App() {
   const library = useRunLibrary(realRun);
   const run = library.activeRecord.run;
+  const [screen, setScreen] = useState<AppScreen>(screenFromLocation);
   const [pendingSession, setPendingSession] = useState<ExplorerSession | null>(null);
   const [contextNotice, setContextNotice] = useState<ContextNotice | null>(null);
   const noticeSequenceRef = React.useRef(0);
@@ -216,18 +238,55 @@ function App() {
     }
   }, []);
 
+  useEffect(() => {
+    function restoreScreen() {
+      setScreen(screenFromLocation());
+    }
+    window.addEventListener("popstate", restoreScreen);
+    return () => window.removeEventListener("popstate", restoreScreen);
+  }, []);
+
+  function openExplorer(key: string, view: WorkspaceView = "overview", setup?: "prompt") {
+    const record = library.records.find((item) => item.key === key) ?? library.activeRecord;
+    const params = new URLSearchParams();
+    params.set("run", record.runId);
+    params.set("sample", record.sampleId);
+    params.set("layout", "focus");
+    params.set("view", view);
+    if (setup) params.set("setup", setup);
+    window.history.pushState(null, "", `/explorer?${params.toString()}`);
+    library.selectRun(record.key, undefined, "none");
+    setScreen("explorer");
+  }
+
+  function openHome() {
+    window.history.pushState(null, "", "/");
+    setScreen("home");
+  }
+
   return (
     <ExplorerRunContext.Provider value={run}>
-      <ExplorerWorkspace
-        key={library.activeRecord.key}
-        run={run}
-        library={library}
-        pendingSession={pendingSession}
-        onQueueSession={setPendingSession}
-        onSessionApplied={() => setPendingSession(null)}
-        onContextChange={announceContextChange}
-        contextNotice={contextNotice}
-      />
+      {screen === "home" ? (
+        <ExplorerHome
+          records={library.records}
+          activeRecord={library.activeRecord}
+          remoteState={library.remoteState}
+          onOpenRun={(key, view) => openExplorer(key, view)}
+          onNewAnalysis={() => openExplorer(library.activeRecord.key, "overview", "prompt")}
+        />
+      ) : (
+        <ExplorerWorkspace
+          key={library.activeRecord.key}
+          run={run}
+          library={library}
+          pendingSession={pendingSession}
+          onQueueSession={setPendingSession}
+          onSessionApplied={() => setPendingSession(null)}
+          onContextChange={announceContextChange}
+          contextNotice={contextNotice}
+          onOpenHome={openHome}
+        />
+      )}
     </ExplorerRunContext.Provider>
   );
 }
@@ -239,7 +298,8 @@ function ExplorerWorkspace({
   onQueueSession,
   onSessionApplied,
   onContextChange,
-  contextNotice
+  contextNotice,
+  onOpenHome
 }: {
   run: ExplorerRun;
   library: ReturnType<typeof useRunLibrary>;
@@ -248,16 +308,24 @@ function ExplorerWorkspace({
   onSessionApplied: () => void;
   onContextChange: (message: string, kind?: ContextNotice["kind"]) => void;
   contextNotice: ContextNotice | null;
+  onOpenHome: () => void;
 }) {
   const [compareOpen, setCompareOpen] = useState(false);
+  const [workspaceLayout, setWorkspaceLayout] = useState<WorkspaceLayout>(initialWorkspaceLayout);
   const [compareBaselineId, setCompareBaselineId] = useState<string | undefined>();
-  const [libraryOpen, setLibraryOpen] = useState(false);
+  const [libraryOpen, setLibraryOpen] = useState(
+    () => new URLSearchParams(window.location.search).get("setup") === "prompt"
+  );
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [inspectorExpanded, setInspectorExpanded] = useState(false);
   const [quickActionsOpen, setQuickActionsOpen] = useState(false);
+  const [selectionActivated, setSelectionActivated] = useState(false);
+  const [selectionMenuOpen, setSelectionMenuOpen] = useState(false);
+  const [focusSupplementOpen, setFocusSupplementOpen] = useState(false);
+  const [focusExperimentOpen, setFocusExperimentOpen] = useState(false);
   const libraryTriggerButton = React.useRef<HTMLButtonElement>(null);
   const libraryReturnTarget = React.useRef<HTMLElement | null>(null);
-  const inspectorTriggerButton = React.useRef<HTMLButtonElement>(null);
+  const inspectorReturnTarget = React.useRef<HTMLElement | null>(null);
   const inspectorRestoreFocus = React.useRef(true);
   const compareTriggerButton = React.useRef<HTMLButtonElement>(null);
   const quickActionsTriggerButton = React.useRef<HTMLButtonElement>(null);
@@ -469,6 +537,7 @@ function ExplorerWorkspace({
     (view !== "attribution" || selectedAttributionMethod.available) &&
     (view !== "nla" || nlaRow?.status === "available") &&
     (view !== "intervention" || Boolean(run.intervention));
+  const showSupplementalEvidence = workspaceLayout === "dense" || focusSupplementOpen;
   const contextSummary = selectionContextSummary({
     view,
     tokenText: selectedTokenInfo.text,
@@ -548,7 +617,7 @@ function ExplorerWorkspace({
     open: inspectorOpen,
     dialogRef: inspectorDialog,
     initialFocusRef: inspectorCloseButton,
-    returnFocusRef: inspectorTriggerButton,
+    returnFocusRef: inspectorReturnTarget,
     restoreFocusRef: inspectorRestoreFocus,
     onClose: () => setInspectorOpen(false)
   });
@@ -627,6 +696,10 @@ function ExplorerWorkspace({
 
   function focusToken(tokenIndex: number) {
     selection.selectToken(tokenIndex);
+    if (workspaceLayout === "focus") {
+      setSelectionActivated(true);
+      setSelectionMenuOpen(false);
+    }
     recordExplorerPerformance("selection-commit", { view, token: tokenIndex });
     pulseSelectionToken(tokenIndex, setPulseToken);
   }
@@ -648,6 +721,7 @@ function ExplorerWorkspace({
 
   async function openJobSetup(anchorId: string) {
     setInspectorOpen(false);
+    setFocusExperimentOpen(true);
     if (hydration.partial) {
       try {
         await library.loadFullActiveRun();
@@ -1247,10 +1321,10 @@ function ExplorerWorkspace({
         [key]: snapshot
       }))}
     >
-    <div className="app-shell">
+    <div className={`app-shell layout-${workspaceLayout}`}>
       <a className="skip-link" href="#analysis-workspace">Skip to analysis workspace</a>
       <header className="topbar">
-        <div className="brand-block">
+        <button className="brand-block" type="button" aria-label="Return to SafeLens home" onClick={onOpenHome}>
           <div className="brand-mark">
             <BrainCircuit size={22} />
           </div>
@@ -1258,7 +1332,7 @@ function ExplorerWorkspace({
             <h1>SafeLens Local Explorer</h1>
             <p>{run.runId}</p>
           </div>
-        </div>
+        </button>
         <div className="run-status" title="Select an available local run and sample">
           <Database size={15} />
           <div className="run-status-selection">
@@ -1298,6 +1372,31 @@ function ExplorerWorkspace({
         </div>
         <div className="topbar-actions">
           <button
+            className="icon-button desktop-inspector-trigger"
+            title="Inspect selected evidence"
+            aria-label="Inspect selected evidence"
+            onClick={(event) => {
+              inspectorReturnTarget.current = event.currentTarget;
+              setInspectorOpen(true);
+            }}
+          >
+            <Info size={18} />
+          </button>
+          <button
+            className="icon-button layout-toggle"
+            title={`Switch to ${workspaceLayout === "focus" ? "dense" : "focus"} layout`}
+            aria-label={`Switch to ${workspaceLayout === "focus" ? "dense" : "focus"} layout`}
+            aria-pressed={workspaceLayout === "dense"}
+            onClick={() => setWorkspaceLayout((current) => {
+              const next = current === "focus" ? "dense" : "focus";
+              window.localStorage.setItem("safelens-workspace-layout", next);
+              window.sessionStorage.setItem("safelens-workspace-layout", next);
+              return next;
+            })}
+          >
+            <Layers3 size={18} />
+          </button>
+          <button
             ref={compareTriggerButton}
             className="icon-button compare-trigger"
             title="Compare pinned evidence"
@@ -1314,7 +1413,7 @@ function ExplorerWorkspace({
             <span>{pinned.length}</span>
           </button>
           <button
-            className="icon-button"
+            className="icon-button session-export"
             title="Export analysis session"
             aria-label="Export analysis session"
             onClick={exportAnalysisSession}
@@ -1322,7 +1421,7 @@ function ExplorerWorkspace({
             <Save size={18} />
           </button>
           <button
-            className="icon-button"
+            className="icon-button artifact-export"
             title="Export current Explorer artifact"
             aria-label="Export current Explorer artifact"
             onClick={() => void exportRunArtifact()}
@@ -1349,6 +1448,26 @@ function ExplorerWorkspace({
         </div>
       </header>
       <ContextChangeNotice notice={contextNotice} />
+
+      <div className="workspace-context-bar">
+        <nav aria-label="Workspace breadcrumb">
+          <button type="button" onClick={onOpenHome}>Home</button>
+          <ChevronRight size={13} aria-hidden="true" />
+          <span>Interpretability Explorer</span>
+          <ChevronRight size={13} aria-hidden="true" />
+          <strong>{workspaceViewLabel(view)}</strong>
+        </nav>
+        <div className="workspace-context-meta">
+          <span className="context-run-pill">
+            <Database size={13} aria-hidden="true" />
+            <b>{run.modelName}</b>
+          </span>
+          <span className="context-state-pill">
+            <span aria-hidden="true" />
+            {library.activeRecord.sourceType === "bundled" ? "Bundled cache" : "Local workspace"}
+          </span>
+        </div>
+      </div>
 
       <main className="workspace">
         <aside className="left-panel">
@@ -1405,7 +1524,7 @@ function ExplorerWorkspace({
         >
           <div className="main-header">
             <div>
-              <h2>Token Timeline</h2>
+              <h2>{workspaceLayout === "dense" ? "Token Timeline" : workspaceViewLabel(view)}</h2>
               <p>
                 token {selectedTokenInfo.index} · id {selectedTokenInfo.tokenId} · safety proxy{" "}
                 {formatScore(selectedTokenInfo.risk)}
@@ -1461,6 +1580,43 @@ function ExplorerWorkspace({
             timeline={timeline}
             onTimelineChange={setTimeline}
           />
+          <SelectionWorkbench
+            visible={workspaceLayout === "focus" && selectionActivated}
+            tokenText={selectedTokenInfo.text}
+            tokenIndex={selectedToken}
+            layer={selectedLayer}
+            score={formatScore(selectedTokenInfo.risk)}
+            view={view}
+            menuOpen={selectionMenuOpen}
+            contextOpen={focusSupplementOpen}
+            pinned={isCurrentPinned}
+            canPin={canPinCurrent}
+            pinnedCount={pinned.length}
+            onToggleMenu={() => setSelectionMenuOpen((current) => !current)}
+            onSelectView={(nextView) => {
+              setSelectionMenuOpen(false);
+              setFocusExperimentOpen(false);
+              selection.selectView(nextView);
+              window.requestAnimationFrame(() => {
+                document.getElementById("analysis-panel")?.scrollIntoView({ block: "start", behavior: "smooth" });
+              });
+            }}
+            onInspect={(trigger) => {
+              inspectorReturnTarget.current = trigger;
+              setInspectorOpen(true);
+            }}
+            onToggleContext={() => setFocusSupplementOpen((current) => !current)}
+            onPin={() => void pinToken(selectedToken)}
+            onCompare={(trigger) => {
+              compareReturnTarget.current = trigger;
+              preloadCompareDrawer();
+              setCompareOpen(true);
+            }}
+            onDismiss={() => {
+              setSelectionActivated(false);
+              setSelectionMenuOpen(false);
+            }}
+          />
           <div
             className="mobile-selection-summary"
             role="region"
@@ -1493,10 +1649,12 @@ function ExplorerWorkspace({
               <GitCompareArrows size={17} />
             </button>
             <button
-              ref={inspectorTriggerButton}
               aria-label="Open evidence inspector"
               title="Open evidence inspector"
-              onClick={() => setInspectorOpen(true)}
+              onClick={(event) => {
+                inspectorReturnTarget.current = event.currentTarget;
+                setInspectorOpen(true);
+              }}
             >
               <Info size={17} />
             </button>
@@ -1536,12 +1694,21 @@ function ExplorerWorkspace({
             aria-labelledby={`analysis-tab-${view}`}
           >
             <div className="left-analysis-stack">
+              {workspaceLayout === "focus" && focusExperimentOpen &&
+                ["attribution", "nla", "patching", "intervention"].includes(view) && (
+                <div className="focus-experiment-toolbar" role="region" aria-label="Experiment setup controls">
+                  <span><FlaskConical size={15} /> Experiment setup</span>
+                  <button aria-label="Close experiment setup" onClick={() => setFocusExperimentOpen(false)}>
+                    <X size={15} />
+                  </button>
+                </div>
+              )}
               {hydration.partial && ["attribution", "nla", "patching", "intervention"].includes(view) && (
                 <FullHydrationGate
                   onLoad={() => void library.loadFullActiveRun().catch(() => undefined)}
                 />
               )}
-              {!hydration.partial && view === "attribution" && (
+              {!hydration.partial && (workspaceLayout === "dense" || focusExperimentOpen) && view === "attribution" && (
                 <AttributionJobPanel
                   run={run}
                   onRunReady={(derivedRun, job) => library.addGeneratedRun(
@@ -1556,7 +1723,7 @@ function ExplorerWorkspace({
                   )}
                 />
               )}
-              {!hydration.partial && view === "nla" && (
+              {!hydration.partial && (workspaceLayout === "dense" || focusExperimentOpen) && view === "nla" && (
                 <NLAJobPanel
                   run={run}
                   selectedToken={selectedToken}
@@ -1572,7 +1739,7 @@ function ExplorerWorkspace({
                   )}
                 />
               )}
-              {!hydration.partial && view === "patching" && (
+              {!hydration.partial && (workspaceLayout === "dense" || focusExperimentOpen) && view === "patching" && (
                 <PatchingJobPanel
                   run={run}
                   selectedToken={selectedToken}
@@ -1590,7 +1757,7 @@ function ExplorerWorkspace({
                   )}
                 />
               )}
-              {!hydration.partial && view === "intervention" && (
+              {!hydration.partial && (workspaceLayout === "dense" || focusExperimentOpen) && view === "intervention" && (
                 <InterventionJobPanel
                   run={run}
                   selectedLayer={selectedLayer}
@@ -1792,7 +1959,7 @@ function ExplorerWorkspace({
                   pinCell={(layer, tokenIndex) => pinToken(tokenIndex, layer)}
                 />
               )}
-              {hydration.ready && view !== "patching" && view !== "intervention" && <TraceEvidence
+              {showSupplementalEvidence && hydration.ready && view !== "patching" && view !== "intervention" && <TraceEvidence
                 selectedToken={selectedToken}
                 selectedLayer={selectedLayer}
                 component={component}
@@ -1800,15 +1967,15 @@ function ExplorerWorkspace({
                 neuron={topNeuron}
                 residualCell={residualCell}
               />}
-              <ModelDigest metadata={run.metadata} />
-              <PinnedStrip
+              {showSupplementalEvidence && <ModelDigest metadata={run.metadata} />}
+              {showSupplementalEvidence && <PinnedStrip
                 pinned={pinned}
                 restorePin={restoreEvidence}
                 availableRunKeys={new Set(library.records.map((record) => record.key))}
                 openCompare={() => setCompareOpen(true)}
-              />
+              />}
             </div>
-            {hydration.ready && view !== "patching" && view !== "intervention" && <InteractionPanel
+            {showSupplementalEvidence && hydration.ready && view !== "patching" && view !== "intervention" && <InteractionPanel
               view={view}
               setSelectedView={selection.selectView}
               selectedLayer={selectedLayer}
@@ -1898,6 +2065,10 @@ function ExplorerWorkspace({
         onExportSession={() => {
           setQuickActionsOpen(false);
           exportAnalysisSession();
+        }}
+        onExportArtifact={() => {
+          setQuickActionsOpen(false);
+          void exportRunArtifact();
         }}
         onExportEvidence={() => {
           setQuickActionsOpen(false);
@@ -2047,7 +2218,7 @@ function ExplorerWorkspace({
               onNext={() => focusToken(run.tokens[selectedTokenPosition + 1].index)}
               onPin={() => pinToken(selectedToken)}
               onCompare={() => {
-                compareReturnTarget.current = inspectorTriggerButton.current;
+                compareReturnTarget.current = inspectorReturnTarget.current;
                 setInspectorOpen(false);
                 setCompareOpen(true);
               }}
@@ -2660,6 +2831,167 @@ function EvidenceSummary({
           <i>{item.value}</i>
         </span>
       ))}
+    </section>
+  );
+}
+
+function SelectionWorkbench({
+  visible,
+  tokenText,
+  tokenIndex,
+  layer,
+  score,
+  view,
+  menuOpen,
+  contextOpen,
+  pinned,
+  canPin,
+  pinnedCount,
+  onToggleMenu,
+  onSelectView,
+  onInspect,
+  onToggleContext,
+  onPin,
+  onCompare,
+  onDismiss
+}: {
+  visible: boolean;
+  tokenText: string;
+  tokenIndex: number;
+  layer: number;
+  score: string;
+  view: WorkspaceView;
+  menuOpen: boolean;
+  contextOpen: boolean;
+  pinned: boolean;
+  canPin: boolean;
+  pinnedCount: number;
+  onToggleMenu: () => void;
+  onSelectView: (view: WorkspaceView) => void;
+  onInspect: (trigger: HTMLButtonElement) => void;
+  onToggleContext: () => void;
+  onPin: () => void;
+  onCompare: (trigger: HTMLButtonElement) => void;
+  onDismiss: () => void;
+}) {
+  const workbenchRef = React.useRef<HTMLElement>(null);
+
+  useEffect(() => {
+    if (!menuOpen) return;
+    function closeOnEscape(event: KeyboardEvent) {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      onToggleMenu();
+    }
+    function closeOnOutsidePointer(event: PointerEvent) {
+      if (workbenchRef.current?.contains(event.target as Node)) return;
+      onToggleMenu();
+    }
+    window.addEventListener("keydown", closeOnEscape);
+    window.addEventListener("pointerdown", closeOnOutsidePointer);
+    return () => {
+      window.removeEventListener("keydown", closeOnEscape);
+      window.removeEventListener("pointerdown", closeOnOutsidePointer);
+    };
+  }, [menuOpen, onToggleMenu]);
+
+  if (!visible) return null;
+
+  const methods: Array<{
+    id: WorkspaceView;
+    label: string;
+    icon: React.ReactNode;
+  }> = [
+    { id: "overview", label: "Overview", icon: <Activity size={16} /> },
+    { id: "residual", label: "Residual", icon: <Waves size={16} /> },
+    { id: "attention", label: "Attention", icon: <Network size={16} /> },
+    { id: "mlp", label: "MLP", icon: <BrainCircuit size={16} /> },
+    { id: "nla", label: "NLA", icon: <Sparkles size={16} /> },
+    { id: "attribution", label: "Attribution", icon: <BarChart3 size={16} /> },
+    { id: "patching", label: "Patching", icon: <FlaskConical size={16} /> },
+    { id: "intervention", label: "Intervention", icon: <SlidersHorizontal size={16} /> }
+  ];
+  const visibleText = tokenText.trim() || "space";
+
+  return (
+    <section ref={workbenchRef} className="selection-workbench" aria-label="Selected token actions" aria-live="polite">
+      <div className="selection-workbench-main">
+        <div className="selection-workbench-identity">
+          <span aria-hidden="true" />
+          <div>
+            <small>Selected token</small>
+            <strong>{visibleText}</strong>
+          </div>
+          <dl>
+            <div><dt>Position</dt><dd>T{tokenIndex}</dd></div>
+            <div><dt>Layer</dt><dd>L{layer}</dd></div>
+            <div><dt>Safety proxy</dt><dd>{score}</dd></div>
+          </dl>
+        </div>
+        <div className="selection-workbench-actions">
+          <button
+            className={menuOpen ? "active" : ""}
+            aria-expanded={menuOpen}
+            aria-haspopup="menu"
+            aria-controls="selection-analysis-menu"
+            title="Choose an analysis for the selected token"
+            onClick={onToggleMenu}
+          >
+            <Sparkles size={16} /> Analyze
+          </button>
+          <button title="Inspect selected evidence" onClick={(event) => onInspect(event.currentTarget)}>
+            <Info size={16} /> Inspect
+          </button>
+          <button
+            className={contextOpen ? "active" : ""}
+            aria-expanded={contextOpen}
+            title="Toggle supporting context"
+            onClick={onToggleContext}
+          >
+            <PanelRightOpen size={16} /> Context
+          </button>
+          <button
+            className={pinned ? "active" : ""}
+            aria-pressed={pinned}
+            disabled={!canPin}
+            title={pinned ? "Unpin selected evidence" : "Pin selected evidence"}
+            onClick={onPin}
+          >
+            <Pin size={16} /> {pinned ? "Unpin" : "Pin"}
+          </button>
+          <button
+            disabled={!pinnedCount}
+            title="Compare pinned evidence"
+            onPointerEnter={preloadCompareDrawer}
+            onFocus={preloadCompareDrawer}
+            onClick={(event) => onCompare(event.currentTarget)}
+          >
+            <GitCompareArrows size={16} /> Compare
+            <b>{pinnedCount}</b>
+          </button>
+          <button className="selection-workbench-dismiss" aria-label="Dismiss selected token actions" onClick={onDismiss}>
+            <X size={16} />
+          </button>
+        </div>
+      </div>
+
+      {menuOpen && (
+        <div id="selection-analysis-menu" className="selection-analysis-menu" role="menu" aria-label="Analyze selected token">
+          {methods.map((method) => (
+            <button
+              key={method.id}
+              role="menuitemradio"
+              aria-checked={view === method.id}
+              className={view === method.id ? "active" : ""}
+              onClick={() => onSelectView(method.id)}
+            >
+              {method.icon}
+              <span>{method.label}</span>
+              {view === method.id && <CheckCircle2 size={14} />}
+            </button>
+          ))}
+        </div>
+      )}
     </section>
   );
 }

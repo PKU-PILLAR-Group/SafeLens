@@ -4,6 +4,7 @@ import {
   Download,
   GitCompareArrows,
   LayoutDashboard,
+  PackageOpen,
   Save,
   Search,
   X
@@ -29,6 +30,7 @@ interface QuickActionsDialogProps {
   onTokenSearch: () => void;
   onCompare: () => void;
   onExportSession: () => void;
+  onExportArtifact: () => void;
   onExportEvidence: () => void;
 }
 
@@ -43,6 +45,7 @@ export function QuickActionsDialog({
   onTokenSearch,
   onCompare,
   onExportSession,
+  onExportArtifact,
   onExportEvidence
 }: QuickActionsDialogProps) {
   const dialogRef = useRef<HTMLElement>(null);
@@ -105,6 +108,7 @@ export function QuickActionsDialog({
             onClick={execute(onCompare)}
           />
           <Action icon={<Save size={17} />} label="Export analysis session" detail="Session JSON" onClick={execute(onExportSession)} />
+          <Action icon={<PackageOpen size={17} />} label="Export Explorer artifact" detail="Run JSON" onClick={execute(onExportArtifact)} />
           <Action icon={<Download size={17} />} label="Export current evidence" detail="Evidence JSON" onClick={execute(onExportEvidence)} />
         </div>
       </aside>

@@ -683,7 +683,9 @@ function AttentionEdgeProfile({
     const nextMode: AttentionEdgeMode = position <= 0 ? "incoming" : "outgoing";
     onModeChange(nextMode);
     window.requestAnimationFrame(() => {
-      modeRef.current?.querySelector<HTMLButtonElement>(`[data-edge-mode="${nextMode}"]`)?.focus();
+      modeRef.current
+        ?.querySelector<HTMLButtonElement>(`[data-edge-mode="${nextMode}"]`)
+        ?.focus({ preventScroll: true });
     });
   }
 
@@ -693,7 +695,9 @@ function AttentionEdgeProfile({
     if (mode === "incoming") onSelectPair(point.token.index, selectedDestination);
     else onSelectPair(selectedSource, point.token.index);
     window.requestAnimationFrame(() => {
-      railRef.current?.querySelector<HTMLButtonElement>(`[data-edge-token="${point.token.index}"]`)?.focus();
+      railRef.current
+        ?.querySelector<HTMLButtonElement>(`[data-edge-token="${point.token.index}"]`)
+        ?.focus({ preventScroll: true });
     });
   }
 

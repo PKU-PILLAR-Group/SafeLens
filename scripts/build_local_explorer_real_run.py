@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import random
 import sys
 from pathlib import Path
@@ -113,15 +114,20 @@ def _display_path(path: Path) -> Path:
 
 
 def _load_wrapper(model_id: str, cache_dir: str) -> HuggingFaceModelWrapper:
+    device = os.environ.get("SAFELENS_EXPLORER_JOB_DEVICE", "cpu")
+    dtype = os.environ.get(
+        "SAFELENS_EXPLORER_JOB_DTYPE",
+        "float32" if device == "cpu" else "bfloat16",
+    )
     config = PipelineConfig.model_validate(
         {
             "model": {
                 "source": "huggingface",
                 "name": model_id,
-                "device": "cpu",
-                "dtype": "float32",
+                "device": device,
+                "dtype": dtype,
                 "cache_dir": cache_dir,
-                "load_kwargs": {"low_cpu_mem_usage": False},
+                "load_kwargs": {"low_cpu_mem_usage": device != "cpu"},
             }
         }
     )
@@ -622,15 +628,21 @@ def _attention_cells(cache: dict[str, Any], layers: list[int]) -> list[dict[str,
 
 
 def _mlp_neurons(cache: dict[str, Any], layers: list[int]) -> list[dict[str, Any]]:
-    candidates: list[dict[str, Any]] = []
+    selected: list[dict[str, Any]] = []
     for layer in layers:
         signed_post = cache[f"layer_{layer}.post"][0].float()
         post = signed_post.abs()
         if post.ndim != 2:
             continue
-        per_neuron = post.max(dim=0).values.detach().cpu().tolist()
-        scale = max(per_neuron) if per_neuron else 1.0
-        for neuron, value in enumerate(per_neuron):
+        per_neuron = post.max(dim=0).values
+        retained = min(16, int(per_neuron.numel()))
+        if retained == 0:
+            continue
+        top_values, top_indices = per_neuron.topk(retained)
+        scale = float(top_values[0].detach().cpu().item())
+        for value_tensor, neuron_tensor in zip(top_values, top_indices, strict=True):
+            neuron = int(neuron_tensor.detach().cpu().item())
+            value = float(value_tensor.detach().cpu().item())
             token_scores = post[:, neuron].detach().cpu().tolist()
             signed_token_scores = signed_post[:, neuron].detach().cpu().tolist()
             top_tokens = _top_indices(token_scores, 3)
@@ -643,7 +655,7 @@ def _mlp_neurons(cache: dict[str, Any], layers: list[int]) -> list[dict[str, Any
                 range(len(signed_token_scores)),
                 key=lambda index: signed_token_scores[index],
             )[:3]
-            candidates.append(
+            selected.append(
                 {
                     "id": f"L{layer}N{neuron:04d}",
                     "layer": layer,
@@ -660,14 +672,9 @@ def _mlp_neurons(cache: dict[str, Any], layers: list[int]) -> list[dict[str, Any
                     "activationsByToken": [
                         round(float(activation), 6) for activation in signed_token_scores
                     ],
-                    "maxAbsoluteActivation": round(float(value), 6),
+                    "maxAbsoluteActivation": round(value, 6),
                 }
             )
-    selected: list[dict[str, Any]] = []
-    for layer in layers:
-        layer_candidates = [item for item in candidates if item["layer"] == layer]
-        layer_candidates.sort(key=lambda item: item["activation"], reverse=True)
-        selected.extend(layer_candidates[:16])
     return selected
 
 

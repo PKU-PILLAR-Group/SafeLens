@@ -20,6 +20,31 @@ _mlp_cells = MODULE._mlp_cells
 _nla_compatibility = MODULE._nla_compatibility
 
 
+def test_real_run_worker_uses_configured_gpu_and_dtype(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured = {}
+
+    class FakeWrapper:
+        def load_model(self) -> None:
+            captured["loaded"] = True
+
+    def fake_build(config):
+        captured["config"] = config
+        return FakeWrapper()
+
+    monkeypatch.setenv("SAFELENS_EXPLORER_JOB_DEVICE", "cuda:0")
+    monkeypatch.setenv("SAFELENS_EXPLORER_JOB_DTYPE", "bfloat16")
+    monkeypatch.setattr(MODULE, "HuggingFaceModelWrapper", FakeWrapper)
+    monkeypatch.setattr(MODULE, "build_model_wrapper", fake_build)
+
+    wrapper = MODULE._load_wrapper("Qwen/Qwen2.5-7B-Instruct", "/tmp/model-cache")
+
+    assert isinstance(wrapper, FakeWrapper)
+    assert captured["loaded"] is True
+    assert captured["config"].device == "cuda:0"
+    assert captured["config"].dtype == "bfloat16"
+    assert captured["config"].load_kwargs == {"low_cpu_mem_usage": True}
+
+
 def test_attention_cells_are_derived_from_matching_layer_patterns() -> None:
     cache = {
         "blocks.0.attn.hook_pattern": torch.tensor(
