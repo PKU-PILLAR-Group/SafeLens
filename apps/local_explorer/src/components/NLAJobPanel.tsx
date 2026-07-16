@@ -31,6 +31,7 @@ interface NLAJobPanelProps {
 }
 
 export function NLAJobPanel({ run, selectedToken, onRunReady }: NLAJobPanelProps) {
+  const availableRows = run.nla.filter((row) => row.status === "available").length;
   const [profiles, setProfiles] = useState<NLAProfile[]>([]);
   const [profileName, setProfileName] = useState(
     run.nlaCompatibility.profiles.find((profile) => profile.status !== "incompatible")?.name ??
@@ -43,6 +44,7 @@ export function NLAJobPanel({ run, selectedToken, onRunReady }: NLAJobPanelProps
   const [revision, setRevision] = useState("main");
   const [maxNewTokens, setMaxNewTokens] = useState(96);
   const [confirmGatedAccess, setConfirmGatedAccess] = useState(false);
+  const [setupOpen, setSetupOpen] = useState(availableRows === 0);
   const runner = useNlaRunner(onRunReady);
   const profile = profiles.find((candidate) => candidate.name === profileName);
   const isRunning = runner.submitting || runner.job?.status === "idle" || runner.job?.status === "loading";
@@ -120,11 +122,33 @@ export function NLAJobPanel({ run, selectedToken, onRunReady }: NLAJobPanelProps
     <section id="nla-job" className="surface nla-job-panel" tabIndex={-1}>
       <div className="surface-header nla-job-header">
         <div>
-          <h3>NLA explanation job</h3>
-          <p>Run exact activation verbalization and reconstruction fidelity for a compatible profile.</p>
+          <span className="nla-module-kicker">Natural Language Autoencoder</span>
+          <h3>Explain an internal activation</h3>
+          <p>Select exact token positions, generate a natural-language explanation, and verify it with reconstruction fidelity.</p>
         </div>
-        <span className="evidence-kind">safety method</span>
+        <span className={`nla-module-state ${availableRows > 0 ? "ready" : preflight?.canSubmit ? "compatible" : "blocked"}`}>
+          {availableRows > 0 ? `${availableRows} results` : preflightLoading ? "checking" : preflight?.canSubmit ? "ready to run" : "setup required"}
+        </span>
       </div>
+
+      <div className="nla-job-summary" aria-label="NLA run summary">
+        <span><small>Model</small><strong>{run.modelName}</strong></span>
+        <span><small>Profile</small><strong>{profileName || "loading"}</strong></span>
+        <span><small>Target</small><strong>{preflight ? `L${preflight.layer} · ${preflight.component}` : "checking"}</strong></span>
+        <span><small>Width</small><strong>d_model {run.nlaCompatibility.dModel}</strong></span>
+      </div>
+
+      {availableRows > 0 && (
+        <div className="nla-existing-actions">
+          <span>Exact explanations and reconstruction metrics are loaded below.</span>
+          <button onClick={() => setSetupOpen((current) => !current)}>
+            {setupOpen ? "Hide generation setup" : "Generate more positions"}
+          </button>
+        </div>
+      )}
+
+      {(availableRows === 0 || setupOpen) && <>
+      <div className="nla-step-heading"><b>1</b><span>Profile and decoder</span></div>
 
       <div className="nla-job-setup">
         <label>
@@ -205,7 +229,7 @@ export function NLAJobPanel({ run, selectedToken, onRunReady }: NLAJobPanelProps
 
       <div className="nla-position-picker">
         <div className="inline-heading">
-          <h4>Exact token positions</h4>
+          <h4><b>2</b> Choose exact token positions</h4>
           <span>{positions.length}/8 selected</span>
         </div>
         <div role="group" aria-label="NLA token positions">
@@ -243,9 +267,9 @@ export function NLAJobPanel({ run, selectedToken, onRunReady }: NLAJobPanelProps
             <Square size={14} /> Cancel NLA job
           </button>
         ) : (
-          <button className="nla-job-run" disabled={!canSubmit} onClick={submit}>
+          <button className="nla-job-run" aria-label="Run exact NLA" disabled={!canSubmit} onClick={submit}>
             {runner.error ? <RefreshCw size={14} /> : <Send size={14} />}
-            {runner.error ? "Retry exact NLA" : "Run exact NLA"}
+            {runner.error ? "Retry NLA generation" : `Generate ${positions.length} explanation${positions.length === 1 ? "" : "s"}`}
           </button>
         )}
         {(runner.error || runner.job?.status === "cancelled") && (
@@ -282,6 +306,7 @@ export function NLAJobPanel({ run, selectedToken, onRunReady }: NLAJobPanelProps
           )}
         </div>
       )}
+      </>}
 
       {provenance && (
         <details className="nla-job-provenance">

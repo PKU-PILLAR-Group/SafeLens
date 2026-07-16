@@ -271,8 +271,9 @@ function App() {
           records={library.records}
           activeRecord={library.activeRecord}
           remoteState={library.remoteState}
-          onOpenRun={(key, view) => openExplorer(key, view)}
-          onNewAnalysis={() => openExplorer(library.activeRecord.key, "overview", "prompt")}
+          onSelectConversation={(key) => library.selectRun(key, undefined, "none")}
+          onRunReady={(generatedRun, job) => library.addGeneratedRun(generatedRun, job.id)}
+          onRemoveRun={library.removeRun}
         />
       ) : (
         <ExplorerWorkspace
@@ -1565,7 +1566,7 @@ function ExplorerWorkspace({
             <WorkspaceTabs view={view} setView={selection.selectView} />
           </div>
 
-          <TokenTimeline
+          {view !== "nla" && <TokenTimeline
             run={run}
             selectedToken={selectedToken}
             selectedLayer={selectedLayer}
@@ -1579,7 +1580,7 @@ function ExplorerWorkspace({
             pinned={pinnedTokenIndices}
             timeline={timeline}
             onTimelineChange={setTimeline}
-          />
+          />}
           <SelectionWorkbench
             visible={workspaceLayout === "focus" && selectionActivated}
             tokenText={selectedTokenInfo.text}
@@ -1618,13 +1619,13 @@ function ExplorerWorkspace({
             }}
           />
           <div
-            className="mobile-selection-summary"
+            className={`mobile-selection-summary ${view === "nla" ? "nla-selection-summary" : ""}`}
             role="region"
             aria-label="Current evidence actions"
           >
-            <span><b>{selectedTokenInfo.text}</b>token</span>
+            <span><b>{view === "nla" ? `P${selectedToken}` : selectedTokenInfo.text}</b>{view === "nla" ? "position" : "token"}</span>
             <span><b>L{selectedLayer}</b>layer</span>
-            <span><b>{formatScore(selectedTokenInfo.risk)}</b>safety proxy</span>
+            <span><b>{view === "nla" ? selectedNlaComponent : formatScore(selectedTokenInfo.risk)}</b>{view === "nla" ? "component" : "safety proxy"}</span>
             <button
               className={isCurrentPinned ? "active" : ""}
               aria-label={isCurrentPinned ? "Unpin current evidence" : "Pin current evidence"}
@@ -1695,7 +1696,7 @@ function ExplorerWorkspace({
           >
             <div className="left-analysis-stack">
               {workspaceLayout === "focus" && focusExperimentOpen &&
-                ["attribution", "nla", "patching", "intervention"].includes(view) && (
+                ["attribution", "patching", "intervention"].includes(view) && (
                 <div className="focus-experiment-toolbar" role="region" aria-label="Experiment setup controls">
                   <span><FlaskConical size={15} /> Experiment setup</span>
                   <button aria-label="Close experiment setup" onClick={() => setFocusExperimentOpen(false)}>
@@ -1703,7 +1704,7 @@ function ExplorerWorkspace({
                   </button>
                 </div>
               )}
-              {hydration.partial && ["attribution", "nla", "patching", "intervention"].includes(view) && (
+              {hydration.partial && ["attribution", "patching", "intervention"].includes(view) && (
                 <FullHydrationGate
                   onLoad={() => void library.loadFullActiveRun().catch(() => undefined)}
                 />
@@ -1723,7 +1724,7 @@ function ExplorerWorkspace({
                   )}
                 />
               )}
-              {!hydration.partial && (workspaceLayout === "dense" || focusExperimentOpen) && view === "nla" && (
+              {view === "nla" && (
                 <NLAJobPanel
                   run={run}
                   selectedToken={selectedToken}

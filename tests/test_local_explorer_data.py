@@ -45,6 +45,41 @@ def test_real_run_worker_uses_configured_gpu_and_dtype(monkeypatch: pytest.Monke
     assert captured["config"].load_kwargs == {"low_cpu_mem_usage": True}
 
 
+def test_real_run_worker_uses_complete_local_snapshot_without_network(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    model_id = "Qwen/Qwen2.5-7B-Instruct"
+    repository = tmp_path / "models--Qwen--Qwen2.5-7B-Instruct"
+    snapshot = repository / "snapshots" / "revision-1"
+    snapshot.mkdir(parents=True)
+    (repository / "refs").mkdir()
+    (repository / "refs" / "main").write_text("revision-1", encoding="utf-8")
+    for name in ["config.json", "tokenizer_config.json", "model-00001-of-00001.safetensors"]:
+        (snapshot / name).write_text("cached", encoding="utf-8")
+    captured = {}
+
+    class FakeWrapper:
+        def load_model(self) -> None:
+            pass
+
+    def fake_build(config):
+        captured["config"] = config
+        return FakeWrapper()
+
+    monkeypatch.setattr(MODULE, "HuggingFaceModelWrapper", FakeWrapper)
+    monkeypatch.setattr(MODULE, "build_model_wrapper", fake_build)
+
+    MODULE._load_wrapper(model_id, str(tmp_path))
+
+    assert captured["config"].load_kwargs == {
+        "low_cpu_mem_usage": False,
+        "local_files_only": True,
+    }
+    assert captured["config"].tokenizer_kwargs == {"local_files_only": True}
+    assert captured["config"].source == "local"
+    assert captured["config"].local_dir == str(snapshot)
+
+
 def test_attention_cells_are_derived_from_matching_layer_patterns() -> None:
     cache = {
         "blocks.0.attn.hook_pattern": torch.tensor(

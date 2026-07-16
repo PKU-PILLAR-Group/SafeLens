@@ -119,15 +119,23 @@ def _load_wrapper(model_id: str, cache_dir: str) -> HuggingFaceModelWrapper:
         "SAFELENS_EXPLORER_JOB_DTYPE",
         "float32" if device == "cpu" else "bfloat16",
     )
+    local_snapshot = _complete_hf_snapshot(model_id, cache_dir)
+    load_kwargs = {"low_cpu_mem_usage": device != "cpu"}
+    tokenizer_kwargs: dict[str, Any] = {}
+    if local_snapshot is not None:
+        load_kwargs["local_files_only"] = True
+        tokenizer_kwargs["local_files_only"] = True
     config = PipelineConfig.model_validate(
         {
             "model": {
-                "source": "huggingface",
+                "source": "local" if local_snapshot is not None else "huggingface",
                 "name": model_id,
+                "local_dir": str(local_snapshot) if local_snapshot is not None else None,
                 "device": device,
                 "dtype": dtype,
                 "cache_dir": cache_dir,
-                "load_kwargs": {"low_cpu_mem_usage": device != "cpu"},
+                "load_kwargs": load_kwargs,
+                "tokenizer_kwargs": tokenizer_kwargs,
             }
         }
     )
@@ -136,6 +144,23 @@ def _load_wrapper(model_id: str, cache_dir: str) -> HuggingFaceModelWrapper:
         raise TypeError(f"expected HuggingFaceModelWrapper, got {type(wrapper).__name__}")
     wrapper.load_model()
     return wrapper
+
+
+def _complete_hf_snapshot(model_id: str, cache_dir: str) -> Path | None:
+    repository = Path(cache_dir) / f"models--{model_id.replace('/', '--')}"
+    reference = repository / "refs" / "main"
+    if not reference.is_file():
+        return None
+    revision = reference.read_text(encoding="utf-8").strip()
+    snapshot = repository / "snapshots" / revision
+    if not (snapshot / "config.json").is_file() or not (snapshot / "tokenizer_config.json").is_file():
+        return None
+    weight_files = list(snapshot.glob("*.safetensors")) + list(snapshot.glob("pytorch_model*.bin"))
+    if not weight_files:
+        return None
+    if not all(path.is_file() and path.stat().st_size > 0 for path in weight_files):
+        return None
+    return snapshot
 
 
 def _build_run(

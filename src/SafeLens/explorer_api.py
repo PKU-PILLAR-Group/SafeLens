@@ -54,6 +54,7 @@ class RemoteRunSummary(BaseModel):
     sourceName: str
     modifiedAt: str
     sizeBytes: int = Field(ge=0)
+    promptPreview: str | None = None
     chunkProtocol: Literal["safelens-chunks-v1"] = "safelens-chunks-v1"
 
 
@@ -350,6 +351,7 @@ class ExplorerJobManager:
         self._jobs: dict[str, _ExplorerJob] = {}
         self._queue: queue.Queue[str | None] = queue.Queue()
         self._lock = threading.Lock()
+        self._active_job_id: str | None = None
         self._worker = threading.Thread(target=self._work, daemon=True)
         self._worker.start()
 
@@ -361,22 +363,28 @@ class ExplorerJobManager:
     ) -> JobSnapshot:
         job_id = uuid.uuid4().hex
         now = _utc_now()
-        job = _ExplorerJob(
-            snapshot=JobSnapshot(
-                id=job_id,
-                kind=self._kind,
-                status="idle",
-                stage="queued",
-                progress=0,
-                detail="Waiting for the local model worker.",
-                createdAt=now,
-                updatedAt=now,
-                request=public_request or payload.model_dump(),
-            ),
-            payload=payload,
-            cancel_event=threading.Event(),
-        )
         with self._lock:
+            jobs_ahead = self._queue.qsize() + int(self._active_job_id is not None)
+            queue_detail = (
+                f"Queued behind {jobs_ahead} local model job{'' if jobs_ahead == 1 else 's'}."
+                if jobs_ahead
+                else "Waiting for the local model worker."
+            )
+            job = _ExplorerJob(
+                snapshot=JobSnapshot(
+                    id=job_id,
+                    kind=self._kind,
+                    status="idle",
+                    stage="queued",
+                    progress=0,
+                    detail=queue_detail,
+                    createdAt=now,
+                    updatedAt=now,
+                    request=public_request or payload.model_dump(),
+                ),
+                payload=payload,
+                cancel_event=threading.Event(),
+            )
             self._jobs[job_id] = job
         self._queue.put(job_id)
         return job.snapshot.model_copy(deep=True)
@@ -416,6 +424,7 @@ class ExplorerJobManager:
                 job = self._jobs.get(job_id)
                 if job is None or job.cancel_event.is_set():
                     continue
+                self._active_job_id = job_id
                 job.snapshot = job.snapshot.model_copy(
                     update={
                         "status": "loading",
@@ -458,6 +467,10 @@ class ExplorerJobManager:
                             "updatedAt": _utc_now(),
                         }
                     )
+            finally:
+                with self._lock:
+                    if self._active_job_id == job_id:
+                        self._active_job_id = None
 
     def _progress_callback(self, job_id: str) -> JobProgress:
         def progress(value: int, stage: str, detail: str) -> None:
@@ -1207,7 +1220,9 @@ def _subprocess_prompt_runner(*, root: Path) -> PromptRunner:
         final_artifact = root / "generated" / f"{run_id}.explorer.json"
         final_artifact.parent.mkdir(parents=True, exist_ok=True)
         prompt = _render_prompt(payload.prompt, payload.template)
-        progress(8, "model", f"Loading {payload.model} on the local worker.")
+        configured_device = os.environ.get("SAFELENS_EXPLORER_JOB_DEVICE", "cpu")
+        device_label = "GPU" if configured_device.startswith("cuda") else "CPU"
+        progress(8, "model", f"Loading {payload.model} on the local {device_label} worker.")
         command = [
             sys.executable,
             str(script),
@@ -1238,7 +1253,12 @@ def _subprocess_prompt_runner(*, root: Path) -> PromptRunner:
                 stderr=subprocess.PIPE,
                 text=True,
             )
-            progress(35, "forward", "Running generation and collecting model activations.")
+            progress(
+                35,
+                "forward",
+                f"Running generation and collecting model activations on {device_label}; "
+                "progress is coarse during the model forward pass.",
+            )
             while True:
                 try:
                     stdout, stderr = process.communicate(timeout=0.1)
@@ -2071,6 +2091,8 @@ def _sample_summary(
     modified_at: str,
     size_bytes: int,
 ) -> RemoteRunSummary:
+    prompt = sample.get("prompt")
+    prompt_preview = " ".join(prompt.split())[:160] if isinstance(prompt, str) else None
     return RemoteRunSummary(
         runId=sample["runId"],
         sampleId=sample["sampleId"],
@@ -2082,6 +2104,7 @@ def _sample_summary(
         sourceName=source_name,
         modifiedAt=modified_at,
         sizeBytes=size_bytes,
+        promptPreview=prompt_preview or None,
     )
 
 

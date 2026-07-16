@@ -23,6 +23,7 @@ def _sample(*, run_id: str = "run-a", sample_id: str = "sample-a") -> dict[str, 
         "sampleId": sample_id,
         "modelName": "test/model",
         "modelSource": "test",
+        "prompt": "fixture prompt",
         "tokens": [{"index": 0, "text": "test"}],
         "layers": [0],
         "payloadMarker": "served-exactly",
@@ -82,6 +83,7 @@ def test_explorer_api_indexes_and_serves_exact_samples(tmp_path: Path) -> None:
     ]
     assert all(row["sourceName"] == "nested/runs.explorer.json" for row in payload["runs"])
     assert all(row["chunkProtocol"] == "safelens-chunks-v1" for row in payload["runs"])
+    assert all(row["promptPreview"] == "fixture prompt" for row in payload["runs"])
 
     sample = client.get("/api/runs/run-a/samples/sample-b")
     assert sample.status_code == 200
@@ -503,6 +505,30 @@ def test_prompt_job_can_cancel_a_running_worker(tmp_path: Path) -> None:
     assert cancelled.json()["status"] == "cancelled"
     assert cancelled.json()["result"] is None
     assert _wait_for_job(client, job_id, "cancelled")["stage"] == "cancelled"
+
+
+def test_prompt_job_reports_how_many_local_jobs_are_ahead(tmp_path: Path) -> None:
+    started = threading.Event()
+    release = threading.Event()
+
+    def runner(payload, _cancel_event, _progress):
+        if payload.prompt == "first":
+            started.set()
+            assert release.wait(timeout=2)
+        return _sample(run_id=f"run-{payload.prompt}")
+
+    client = TestClient(create_app(tmp_path, prompt_runner=runner))
+    first = client.post("/api/jobs/prompt", json={"prompt": "first"}).json()
+    assert started.wait(timeout=1)
+    second = client.post("/api/jobs/prompt", json={"prompt": "second"}).json()
+
+    assert second["status"] == "idle"
+    assert second["progress"] == 0
+    assert second["detail"] == "Queued behind 1 local model job."
+
+    release.set()
+    assert _wait_for_job(client, first["id"], "ready")["progress"] == 100
+    assert _wait_for_job(client, second["id"], "ready")["progress"] == 100
 
 
 def test_attribution_job_uses_shared_queue_contract_and_returns_derived_run(

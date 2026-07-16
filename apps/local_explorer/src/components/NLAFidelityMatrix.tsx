@@ -87,14 +87,18 @@ export function NLAFidelityMatrix({
     () => unique(rows.map((row) => row.component)),
     [rows]
   );
-  const matrixRows: MatrixRow[] = useMemo(
-    () => layers.flatMap((layer) =>
-      (componentFilter === "all" ? components : [componentFilter as NLARow["component"]]).map(
-        (rowComponent) => ({ layer, component: rowComponent })
-      )
-    ),
-    [componentFilter, components, layers]
-  );
+  const matrixRows: MatrixRow[] = useMemo(() => {
+    const selectedComponents = componentFilter === "all"
+      ? new Set(components)
+      : new Set([componentFilter as NLARow["component"]]);
+    const seen = new Set<string>();
+    return rows.flatMap((row) => {
+      const key = `${row.layer}:${row.component}`;
+      if (!selectedComponents.has(row.component) || seen.has(key)) return [];
+      seen.add(key);
+      return [{ layer: row.layer, component: row.component }];
+    }).sort((left, right) => left.layer - right.layer || left.component.localeCompare(right.component));
+  }, [componentFilter, components, rows]);
   const rowLookup = useMemo(
     () => new Map(rows.map((row) => [`${row.layer}:${row.component}:${row.tokenIndex}`, row])),
     [rows]
@@ -137,7 +141,7 @@ export function NLAFidelityMatrix({
     return true;
   });
   const compatibleProfiles = compatibility.profiles.filter(
-    (profile) => profile.status === "compatible"
+    (profile) => profile.status !== "incompatible"
   ).length;
   const expectedCells = matrixRows.length * tokens.length;
   const coveredCells = matrixRows.reduce(
@@ -230,6 +234,53 @@ export function NLAFidelityMatrix({
     });
   }
 
+  if (availableRows.length === 0) {
+    return (
+      <section className="surface nla-empty-results" aria-label="NLA results">
+        <header>
+          <div>
+            <span>Results</span>
+            <h3>No NLA artifact yet</h3>
+            <p>The activation cache is compatible, but AV/AR decoding has not been generated for the selected positions.</p>
+          </div>
+          <b>waiting for generation</b>
+        </header>
+        <div className="nla-result-flow" aria-label="NLA result stages">
+          <span><b>1</b><strong>Activation</strong><small>L{selectedLayer} · {selectedComponent}</small></span>
+          <i>→</i>
+          <span><b>2</b><strong>Explanation</strong><small>AV text output</small></span>
+          <i>→</i>
+          <span><b>3</b><strong>Reconstruction</strong><small>AR activation</small></span>
+          <i>→</i>
+          <span><b>4</b><strong>Fidelity</strong><small>cosine · MSE · FVE</small></span>
+        </div>
+        <div className="nla-empty-candidates" aria-label="NLA cached candidates">
+          <header><strong>Cached activation candidates</strong><span>{rows.length} exact rows</span></header>
+          <div>
+            {rows.map((row) => (
+              <button
+                key={`${row.layer}:${row.component}:${row.tokenIndex}`}
+                className={row.layer === selectedLayer && row.component === selectedComponent && row.tokenIndex === selectedToken ? "selected" : ""}
+                onClick={() => onSelectCell(row.layer, row.tokenIndex, row.component)}
+              >
+                <strong>{row.token?.trim() || tokens.find((token) => token.index === row.tokenIndex)?.text.trim() || `T${row.tokenIndex}`}</strong>
+                <span>L{row.layer} · {row.component}</span>
+                <small>norm {row.activationNorm.toFixed(3)}</small>
+                <b>decoder not run</b>
+              </button>
+            ))}
+          </div>
+        </div>
+        <dl>
+          <div><dt>Selected token</dt><dd>T{selectedToken} · {tokens.find((token) => token.index === selectedToken)?.text.trim() || "space"}</dd></div>
+          <div><dt>Cached candidates</dt><dd>{rows.length} exact activations</dd></div>
+          <div><dt>Compatible profiles</dt><dd>{compatibleProfiles}/{compatibility.profiles.length}</dd></div>
+          <div><dt>Run width</dt><dd>d_model {compatibility.dModel}</dd></div>
+        </dl>
+      </section>
+    );
+  }
+
   return (
     <section className="surface nla-fidelity-section">
       <div className="surface-header">
@@ -310,7 +361,7 @@ export function NLAFidelityMatrix({
       />
       <MatrixRangeSummary label="Token" range={selectedRange} onClear={() => onRangeSelect(undefined)} />
 
-      <section className="nla-review-queue" aria-labelledby="nla-review-title">
+      {availableRows.length > 0 && <section className="nla-review-queue" aria-labelledby="nla-review-title">
         <header>
           <div>
             <h4 id="nla-review-title">NLA review queue</h4>
@@ -377,7 +428,7 @@ export function NLAFidelityMatrix({
             </button>
           ))}
         </div>
-      </section>
+      </section>}
 
       <div className="nla-compatibility-banner">
         <AlertTriangle size={17} />
@@ -385,10 +436,12 @@ export function NLAFidelityMatrix({
           <strong>
             {availableRows.length > 0
               ? `${availableRows.length} exact NLA rows loaded`
-              : "No compatible NLA result artifact is loaded"}
+              : compatibleProfiles > 0
+                ? "Compatible activation cache; generate NLA explanations above"
+                : "This run is not compatible with a registered NLA profile"}
           </strong>
           <p>
-            Run model: {compatibility.modelName} · d_model {compatibility.dModel} · cached layers {compatibility.availableLayers.map((layer) => `L${layer}`).join(", ")}
+            Run model: {compatibility.modelName} · d_model {compatibility.dModel} · {layerRangeLabel(compatibility.availableLayers)}
           </p>
         </div>
       </div>
@@ -840,6 +893,12 @@ function shortComponent(component: NLARow["component"]) {
   if (component === "resid_post") return "resid";
   if (component === "attn_result") return "attn";
   return "mlp";
+}
+
+function layerRangeLabel(layers: number[]) {
+  if (layers.length === 0) return "no cached layers";
+  if (layers.length === 1) return `cached layer L${layers[0]}`;
+  return `${layers.length} cached layers (L${layers[0]}–L${layers[layers.length - 1]})`;
 }
 
 function unique<T>(values: T[]) {

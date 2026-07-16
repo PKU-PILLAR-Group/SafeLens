@@ -1315,7 +1315,7 @@ test("hydrates chunk-v1 views and loads the full sample for experiments or matri
     "failed"
   );
   await page.getByRole("button", { name: "Retry", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "NLA fidelity coverage" })).toBeVisible();
+  await expect(page.getByLabel("NLA results")).toContainText("No NLA artifact yet");
   expect(nlaRequests).toBe(2);
   expect(requestedComponents).toContain("nla");
   expect(fullSampleRequests).toBe(0);
@@ -3683,7 +3683,11 @@ test("keeps mobile deep links at the page context while profile rails reveal sel
   for (const [view, label] of views) {
     await page.goto(`/explorer?view=${view}&token=10&layer=1`);
     await expect(page.getByRole("tab", { name: label })).toHaveAttribute("aria-selected", "true");
-    await expect(page.getByRole("region", { name: "Token timeline" })).toBeVisible();
+    if (view === "nla") {
+      await expect(page.getByRole("group", { name: "NLA token positions" })).toBeVisible();
+    } else {
+      await expect(page.getByRole("region", { name: "Token timeline" })).toBeVisible();
+    }
     await page.waitForTimeout(500);
     expect(await page.evaluate(() => window.scrollY), `${label} moved the document on mount`).toBe(0);
     await expect(page.locator(".topbar")).toBeVisible();
@@ -4059,7 +4063,7 @@ test("keeps visualization and selection states visible in forced colors", async 
     const selector = view === "MLP"
       ? ".mlp-activation-cell"
       : view === "NLA"
-        ? ".nla-fidelity-cell"
+        ? ".nla-empty-candidates button"
         : ".attribution-value-cell";
     await expect(page.locator(selector).first()).toBeVisible();
     expect(await page.locator(selector).first().evaluate(
@@ -5336,11 +5340,6 @@ test("brushes and synchronizes token ranges across specialized matrices", async 
       view: "Attribution",
       start: '.attribution-token-label[data-range-token="6"]',
       end: '.attribution-token-label[data-range-token="10"]'
-    },
-    {
-      view: "NLA",
-      start: '.nla-token-label[data-range-token="6"]',
-      end: '.nla-token-label[data-range-token="10"]'
     }
   ];
   for (const matrix of matrices) {
@@ -5474,12 +5473,6 @@ test("keeps viewport controls consistent across specialized matrices", async ({ 
       controls: "Attribution matrix controls",
       label: "attribution matrix",
       viewport: ".attribution-matrix-scroll"
-    },
-    {
-      view: "NLA",
-      controls: "NLA fidelity controls",
-      label: "NLA matrix",
-      viewport: ".nla-matrix-scroll"
     }
   ];
 
@@ -5674,14 +5667,13 @@ test("uses one keyboard entry point in every specialized matrix", async ({ page 
   await expect(page.locator('.attribution-value-cell[data-token="10"][tabindex="0"]')).toBeFocused();
 
   await page.getByRole("tab", { name: "NLA", exact: true }).click();
-  cells = page.locator('.nla-fidelity-cell[tabindex="0"]');
-  await expect(cells).toHaveCount(1);
-  await cells.focus();
-  await expect(cells).not.toHaveAttribute("aria-keyshortcuts", /Space/);
+  await expect(page.getByLabel("NLA results")).toContainText("No NLA artifact yet");
   await expect(page.getByLabel("Pin selected NLA evidence")).toHaveCount(0);
-  await page.keyboard.press("ArrowRight");
+  const nlaCandidates = page.getByLabel("NLA cached candidates").getByRole("button");
+  await expect(nlaCandidates).toHaveCount(3);
+  await nlaCandidates.filter({ hasText: "strategy" }).click();
   await expect(page).toHaveURL(/token=11/);
-  await expect(page.locator('.nla-fidelity-cell[data-token="11"][tabindex="0"]')).toBeFocused();
+  await expect(page).toHaveURL(/nlaComponent=mlp_out/);
 });
 
 test("shows real residual logit-lens predictions and trajectories by layer", async ({ page }, testInfo) => {
@@ -6207,25 +6199,23 @@ test("audits attribution balance and compares method snapshots without cross-sca
 test("diagnoses exact NLA coverage without substituting nearby rows", async ({ page }) => {
   await page.goto("/explorer?view=nla&token=10&layer=1&metric=nla_cosine");
 
-  const controls = page.getByLabel("NLA fidelity controls");
-  await expect(controls).toBeVisible();
-  await expect(page.getByLabel("NLA coverage summary")).toContainText("0available fidelity rows");
-  await expect(page.getByLabel("NLA coverage summary")).toContainText("3/120candidate coverage");
-  await expect(page.locator(".nla-fidelity-cell.incompatible")).toHaveCount(3);
-  await expect(page.locator(".nla-row-label")).toHaveCount(6);
-  await expect(page.getByLabel("NLA profile compatibility").locator("article")).toHaveCount(2);
-
-  await controls.getByRole("combobox").first().selectOption("mse");
-  await expect(page).toHaveURL(/metric=nla_mse/);
-  await controls.getByPlaceholder("token, component, explanation").fill("break");
-  await expect(page.getByLabel("NLA cached candidates").getByRole("button")).toHaveCount(1);
+  const emptyResults = page.getByLabel("NLA results");
+  await expect(emptyResults).toContainText("No NLA artifact yet");
+  await expect(emptyResults).toContainText("Activation");
+  await expect(emptyResults).toContainText("Explanation");
+  await expect(emptyResults).toContainText("Reconstruction");
+  await expect(emptyResults).toContainText("Fidelity");
+  await expect(emptyResults).toContainText("3 exact activations");
+  await expect(page.getByLabel("NLA fidelity controls")).toHaveCount(0);
+  await expect(page.locator(".nla-fidelity-cell")).toHaveCount(0);
+  const candidates = page.getByLabel("NLA cached candidates").getByRole("button");
+  await expect(candidates).toHaveCount(3);
   await expect(page.getByLabel("Pin inspector evidence")).toBeDisabled();
 
-  await page.locator(
-    '.nla-fidelity-cell[data-layer="1"][data-component="resid_post"][data-token="9"]'
-  ).click();
-  await expect(page).toHaveURL(/token=9/);
+  await candidates.filter({ hasText: "break" }).click();
+  await expect(page).toHaveURL(/token=10/);
   await expect(page).toHaveURL(/layer=1/);
+  await expect(page).toHaveURL(/nlaComponent=attn_result/);
   await expect(page.getByRole("heading", { name: "Exact NLA evidence" })).toBeVisible();
   await expect(page.getByText("Activation is cached; NLA decoding is unavailable")).toBeVisible();
 });
@@ -7775,8 +7765,7 @@ test("keeps primary visualization controls at mobile touch size", async ({ page 
     { view: "Residual", controls: "Matrix controls" },
     { view: "Attention", controls: "Attention matrix controls" },
     { view: "MLP", controls: "MLP matrix controls" },
-    { view: "Attribution", controls: "Attribution matrix controls" },
-    { view: "NLA", controls: "NLA fidelity controls" }
+    { view: "Attribution", controls: "Attribution matrix controls" }
   ];
   for (const matrix of matrices) {
     await page.getByRole("tab", { name: matrix.view, exact: true }).click();
@@ -7789,6 +7778,11 @@ test("keeps primary visualization controls at mobile touch size", async ({ page 
     if (await formControls.count()) await expectTouchHeight(formControls);
     await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
   }
+  await page.getByRole("tab", { name: "NLA", exact: true }).click();
+  const nlaPositions = page.getByRole("group", { name: "NLA token positions" }).getByRole("button");
+  await expectTouchHeight(nlaPositions);
+  await expectTouchHeight(page.getByRole("button", { name: "Run exact NLA" }));
+  await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
   const axeResults = await new AxeBuilder({ page })
     .include(".main-panel")
     .withTags(["wcag2a", "wcag2aa"])

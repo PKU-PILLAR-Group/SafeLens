@@ -16,6 +16,7 @@ const remoteSummarySchema = z.object({
   sourceName: z.string().min(1),
   modifiedAt: z.string().min(1),
   sizeBytes: z.number().int().nonnegative(),
+  promptPreview: z.string().max(160).nullable().optional(),
   chunkProtocol: z.literal("safelens-chunks-v1").optional()
 });
 
@@ -483,6 +484,14 @@ export const promptJobSchema = z.object({
 export type PromptJob = z.infer<typeof promptJobSchema>;
 export type PromptRunInput = PromptJob["request"];
 
+const promptOptionsSchema = z.object({
+  models: z.array(z.string().min(1)).min(1),
+  templates: z.array(z.enum(["plain", "chat"])),
+  maxNewTokens: z.number().int().positive()
+});
+
+export type PromptOptions = z.infer<typeof promptOptionsSchema>;
+
 export const attributionJobSchema = z.object({
   id: z.string().min(1),
   kind: z.literal("attribution"),
@@ -725,6 +734,25 @@ export async function submitPromptJob(input: PromptRunInput): Promise<PromptJob>
     throw await jobResponseError(response, "prompt_submit_error");
   }
   return parsePromptJob(await response.json());
+}
+
+export async function fetchPromptOptions(signal?: AbortSignal): Promise<PromptOptions> {
+  const response = await fetch(`${API_BASE}/prompt/options`, {
+    headers: { Accept: "application/json" },
+    signal
+  });
+  if (!response.ok) {
+    throw await jobResponseError(response, "prompt_options_error");
+  }
+  const parsed = promptOptionsSchema.safeParse(await response.json());
+  if (!parsed.success) {
+    throw new ExplorerApiError(
+      "prompt_options_invalid_schema",
+      "Prompt options failed validation.",
+      response.status
+    );
+  }
+  return parsed.data;
 }
 
 export async function cancelPromptJob(jobId: string): Promise<PromptJob> {
