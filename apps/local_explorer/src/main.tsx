@@ -184,9 +184,9 @@ function screenFromLocation(): AppScreen {
 }
 
 function App() {
-  const library = useRunLibrary(realRun);
-  const run = library.activeRecord.run;
   const [screen, setScreen] = useState<AppScreen>(screenFromLocation);
+  const library = useRunLibrary(realRun, screen === "explorer");
+  const run = library.activeRecord.run;
   const [pendingSession, setPendingSession] = useState<ExplorerSession | null>(null);
   const [contextNotice, setContextNotice] = useState<ContextNotice | null>(null);
   const noticeSequenceRef = React.useRef(0);
@@ -272,8 +272,16 @@ function App() {
           activeRecord={library.activeRecord}
           remoteState={library.remoteState}
           onSelectConversation={(key) => library.selectRun(key, undefined, "none")}
-          onRunReady={(generatedRun, job) => library.addGeneratedRun(generatedRun, job.id)}
-          onRemoveRun={library.removeRun}
+          onRunReady={(generatedRun, job) => library.addGeneratedRun(
+            generatedRun,
+            job.id,
+            undefined,
+            {
+              kind: job.kind === "prompt-run" ? "prompt" : job.kind,
+              updateLocation: false
+            }
+          )}
+          onRemoveRuns={library.removeRuns}
         />
       ) : (
         <ExplorerWorkspace

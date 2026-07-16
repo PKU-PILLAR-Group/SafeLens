@@ -2,8 +2,10 @@ from __future__ import annotations
 
 # ruff: noqa: E402
 import argparse
+import gc
 import importlib.metadata
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -14,8 +16,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from SafeLens.attribution import attribute_response_token_input
-from SafeLens.core.base import PipelineConfig
-from SafeLens.utils import HuggingFaceModelWrapper, build_model_wrapper
+from SafeLens.explorer_model import load_explorer_hf_model
 
 
 def main() -> None:
@@ -31,7 +32,7 @@ def main() -> None:
     request = job_input["request"]
     if run.get("modelName") != args.model:
         raise ValueError("Requested model does not match the source Explorer run.")
-    wrapper = _load_wrapper(args.model)
+    wrapper = load_explorer_hf_model(args.model)
     try:
         result = attribute_response_token_input(
             wrapper,
@@ -39,6 +40,9 @@ def main() -> None:
             response=request["response"],
             target_response_index=int(request["targetResponseIndex"]),
             n_steps=int(request["nSteps"]),
+            internal_batch_size=int(
+                os.environ.get("SAFELENS_EXPLORER_ATTRIBUTION_INTERNAL_BATCH_SIZE", "1")
+            ),
             baseline=request["baseline"],
             prepend_bos=False,
         )
@@ -50,29 +54,10 @@ def main() -> None:
         )
     finally:
         wrapper.remove_hooks()
+        del wrapper
+        gc.collect()
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(derived, indent=2), encoding="utf-8")
-
-
-def _load_wrapper(model_id: str) -> HuggingFaceModelWrapper:
-    config = PipelineConfig.model_validate(
-        {
-            "model": {
-                "source": "huggingface",
-                "name": model_id,
-                "device": "cpu",
-                "dtype": "float32",
-                "cache_dir": ".cache/safelens/local-explorer-real-flow",
-                "load_kwargs": {"low_cpu_mem_usage": False},
-            }
-        }
-    )
-    wrapper = build_model_wrapper(config.model)
-    if not isinstance(wrapper, HuggingFaceModelWrapper):
-        raise TypeError(f"expected HuggingFaceModelWrapper, got {type(wrapper).__name__}")
-    wrapper.load_model()
-    return wrapper
-
 
 def _merge_result(
     run: dict[str, Any],

@@ -1619,7 +1619,7 @@ class HuggingFaceModelWrapper(ModelWrapper):
         )
         self.model = AutoModelForCausalLM.from_pretrained(
             pretrained_path,
-            torch_dtype=torch_dtype,
+            dtype=torch_dtype,
             trust_remote_code=self.trust_remote_code,
             **pretrained_kwargs,
             **self.load_kwargs,
@@ -3866,7 +3866,7 @@ class TransformerLensCompatibleModelWrapper(HuggingFaceModelWrapper):
             )
             self.model = AutoModel.from_pretrained(
                 pretrained_path,
-                torch_dtype=torch_dtype,
+                dtype=torch_dtype,
                 trust_remote_code=self.trust_remote_code,
                 **pretrained_kwargs,
                 **self.load_kwargs,
@@ -3886,7 +3886,7 @@ class TransformerLensCompatibleModelWrapper(HuggingFaceModelWrapper):
                 model_cls = AutoModelForCausalLM
             self.model = model_cls.from_pretrained(
                 pretrained_path,
-                torch_dtype=torch_dtype,
+                dtype=torch_dtype,
                 trust_remote_code=self.trust_remote_code,
                 **pretrained_kwargs,
                 **self.load_kwargs,

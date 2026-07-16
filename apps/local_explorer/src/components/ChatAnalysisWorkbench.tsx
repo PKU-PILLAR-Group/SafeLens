@@ -27,22 +27,24 @@ import type { AttributionMethod, ExplorerRun, InterventionExperiment } from "../
 interface ChatAnalysisWorkbenchProps {
   mode: "steering" | "attribution";
   run: ExplorerRun;
-  onRunReady: (run: ExplorerRun, job: { id: string }) => void;
+  savedRun?: ExplorerRun;
+  onRunReady: (run: ExplorerRun, job: { id: string; kind: "attribution" | "intervention" }) => void;
 }
 
-export function ChatAnalysisWorkbench({ mode, run, onRunReady }: ChatAnalysisWorkbenchProps) {
+export function ChatAnalysisWorkbench({ mode, run, savedRun, onRunReady }: ChatAnalysisWorkbenchProps) {
   return mode === "steering" ? (
-    <SteeringWorkbench run={run} onRunReady={onRunReady} />
+    <SteeringWorkbench run={run} savedRun={savedRun} onRunReady={onRunReady} />
   ) : (
-    <AttributionWorkbench run={run} onRunReady={onRunReady} />
+    <AttributionWorkbench run={run} savedRun={savedRun} onRunReady={onRunReady} />
   );
 }
 
 function SteeringWorkbench({
   run,
+  savedRun,
   onRunReady
 }: Omit<ChatAnalysisWorkbenchProps, "mode">) {
-  const prior = run.intervention;
+  const prior = savedRun?.intervention ?? run.intervention;
   const [desiredPrompt, setDesiredPrompt] = useState(
     prior?.vector.desiredPrompt ?? "Provide a safe, policy-compliant and helpful response."
   );
@@ -60,7 +62,9 @@ function SteeringWorkbench({
   );
   const [preflight, setPreflight] = useState<InterventionPreflight | null>(null);
   const [preflightError, setPreflightError] = useState<string | null>(null);
-  const [result, setResult] = useState<ExplorerRun | null>(prior ? run : null);
+  const [result, setResult] = useState<ExplorerRun | null>(
+    savedRun?.intervention ? savedRun : prior ? run : null
+  );
 
   const handleReady = useCallback((derived: ExplorerRun, job: InterventionJob) => {
     setResult(derived);
@@ -230,14 +234,16 @@ function SteeringWorkbench({
 
 function AttributionWorkbench({
   run,
+  savedRun,
   onRunReady
 }: Omit<ChatAnalysisWorkbenchProps, "mode">) {
   const [response, setResponse] = useState(() => inferredResponse(run));
   const [targetResponseIndex, setTargetResponseIndex] = useState(0);
   const [baseline, setBaseline] = useState<AttributionRunInput["baseline"]>("pad_token");
   const [nSteps, setNSteps] = useState(32);
-  const prior = run.attributionMethods.find((method) => method.id === "integrated_gradients" && method.available);
-  const [result, setResult] = useState<ExplorerRun | null>(prior ? run : null);
+  const priorRun = savedRun ?? run;
+  const prior = priorRun.attributionMethods.find((method) => method.id === "integrated_gradients" && method.available);
+  const [result, setResult] = useState<ExplorerRun | null>(prior ? priorRun : null);
 
   const handleReady = useCallback((derived: ExplorerRun, job: AttributionJob) => {
     setResult(derived);

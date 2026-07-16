@@ -28,6 +28,10 @@ const attributionValues = generatedRun.tokens.map((_, index) =>
 const attributionRun = {
   ...generatedRun,
   runId: "chat-attribution-derived",
+  metadata: {
+    ...generatedRun.metadata,
+    parentRun: { runId: generatedRun.runId, sampleId: generatedRun.sampleId }
+  },
   attributionMethods: [
     ...generatedRun.attributionMethods.filter((method) => method.id !== "integrated_gradients"),
     {
@@ -46,6 +50,10 @@ const attributionRun = {
 const steeringRun = {
   ...generatedRun,
   runId: "chat-steering-derived",
+  metadata: {
+    ...generatedRun.metadata,
+    parentRun: { runId: generatedRun.runId, sampleId: generatedRun.sampleId }
+  },
   intervention: {
     vector: {
       method: "contrastive_mean_difference",
@@ -332,6 +340,7 @@ test("runs the real prompt-job protocol and keeps the conversation above two foc
   await expect(page.getByRole("button", { name: /Causal evidence/ })).toHaveCount(0);
   await expect(page.getByLabel("Analysis prompt")).toBeVisible();
   await expect(page.getByLabel("Analysis prompt")).toHaveValue("");
+  await expect(page).toHaveURL(/\/$/);
   expect(submitted()).toEqual({
     prompt: generatedRun.prompt,
     template: "chat",
@@ -378,7 +387,12 @@ test("runs input attribution from Chat and renders signed token contributions", 
   await expect(page.getByLabel("Input attribution result")).toBeVisible();
   await expect(page.getByLabel("Input attribution result").locator(".chat-attribution-tokens span"))
     .toHaveCount(generatedRun.tokens.length);
-  expect(await page.evaluate(() => window.location.pathname)).toBe("/");
+  await expect(page).toHaveURL(/\/$/);
+  await expect(page.locator(".chat-history-row")).toHaveCount(2);
+  const attributionRecords = await page.evaluate(() => JSON.parse(
+    window.localStorage.getItem("safelens.localExplorer.importedRuns.v1") ?? "[]"
+  ));
+  expect(attributionRecords[0].sourceName).toContain("attribution job");
   expect(submitted()).toMatchObject({
     response: "The selected token matters.",
     objective: "response_token_logit",
@@ -403,7 +417,12 @@ test("runs steering from Chat and compares original with steered generation", as
   await expect(result).toContainText("Original model response.");
   await expect(result).toContainText("Safer steered response.");
   await expect(result).toContainText("+0.250");
-  expect(await page.evaluate(() => window.location.pathname)).toBe("/");
+  await expect(page).toHaveURL(/\/$/);
+  await expect(page.locator(".chat-history-row")).toHaveCount(2);
+  const steeringRecords = await page.evaluate(() => JSON.parse(
+    window.localStorage.getItem("safelens.localExplorer.importedRuns.v1") ?? "[]"
+  ));
+  expect(steeringRecords[0].sourceName).toContain("intervention job");
   expect(submitted()).toMatchObject({
     component: "resid_post",
     scale: 1,
@@ -447,8 +466,13 @@ test("hides the bundled example conversation without deleting its artifact", asy
 test("restores and deletes a generated conversation after explicit confirmation", async ({ page }) => {
   await prepareHome(page);
   await mockReadyPromptJob(page);
+  await mockReadyAttributionJob(page);
   await page.goto("/");
   await runReadyAnalysis(page);
+
+  await page.getByRole("button", { name: /Input attribution Measure/ }).click();
+  await page.getByRole("button", { name: "Run attribution" }).click();
+  await expect(page.getByLabel("Input attribution result")).toBeVisible();
 
   await expect(page.locator(".chat-history-row")).toHaveCount(2);
   await page.getByRole("button", { name: "New chat" }).click();
@@ -456,6 +480,8 @@ test("restores and deletes a generated conversation after explicit confirmation"
   await page.locator(".chat-history-row").filter({ hasText: "Why does the model focus" })
     .locator(".chat-history-open").click();
   await expect(page.locator(".chat-assistant-message")).toContainText("strongest residual alignment");
+  await page.getByRole("button", { name: /Input attribution Measure/ }).click();
+  await expect(page.getByLabel("Input attribution result")).toBeVisible();
 
   await page.getByLabel("Delete conversation chat-home-generated seed-0").click();
   const dialog = page.getByRole("dialog", { name: "Delete this conversation?" });
@@ -473,6 +499,7 @@ test("restores and deletes a generated conversation after explicit confirmation"
   await expect(page.getByText("chat-home-generated")).toHaveCount(0);
   const saved = await page.evaluate(() => window.localStorage.getItem("safelens.localExplorer.importedRuns.v1"));
   expect(saved).not.toContain("chat-home-generated");
+  expect(saved).not.toContain("chat-attribution-derived");
 });
 
 test("persists removal of a read-only workspace entry from Chat", async ({ page }) => {

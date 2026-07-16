@@ -6,7 +6,6 @@ import difflib
 import gc
 import json
 import math
-import os
 import random
 import sys
 from pathlib import Path
@@ -17,9 +16,9 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from SafeLens.core.base import PipelineConfig
+from SafeLens.explorer_model import load_explorer_hf_model
 from SafeLens.steering import ContrastiveSteeringVector
-from SafeLens.utils import HuggingFaceModelWrapper, build_model_wrapper
+from SafeLens.utils import HuggingFaceModelWrapper
 
 RISK_TERMS = ("jail", "break", "attack", "harm", "weapon", "malware", "bypass", "exploit")
 
@@ -34,7 +33,7 @@ def main() -> None:
     payload = json.loads(args.input.read_text(encoding="utf-8"))
     run = payload["run"]
     request = payload["request"]
-    wrapper = _load_wrapper(str(run["modelName"]))
+    wrapper = load_explorer_hf_model(str(run["modelName"]))
     try:
         prompt_tokens = wrapper.to_tokens(str(run["prompt"]), prepend_bos=False)
         prompt_ids = _flat_token_ids(prompt_tokens)
@@ -141,28 +140,6 @@ def main() -> None:
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(derived, indent=2), encoding="utf-8")
-
-
-def _load_wrapper(model_id: str) -> HuggingFaceModelWrapper:
-    config = PipelineConfig.model_validate(
-        {
-            "model": {
-                "source": "huggingface",
-                "name": model_id,
-                "device": os.environ.get("SAFELENS_EXPLORER_JOB_DEVICE", "cpu"),
-                "dtype": "float32",
-                "cache_dir": ".cache/safelens/local-explorer-real-flow",
-                "trust_remote_code": False,
-                "load_kwargs": {"low_cpu_mem_usage": False},
-            }
-        }
-    )
-    wrapper = build_model_wrapper(config.model)
-    if not isinstance(wrapper, HuggingFaceModelWrapper):
-        raise TypeError(f"expected HuggingFaceModelWrapper, got {type(wrapper).__name__}")
-    wrapper.load_model()
-    return wrapper
-
 
 def _reference_vector(
     wrapper: HuggingFaceModelWrapper,

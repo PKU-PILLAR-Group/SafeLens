@@ -78,7 +78,7 @@ export interface RemoteRunState {
   detail: string;
 }
 
-export function useRunLibrary(builtInRun: ExplorerRun) {
+export function useRunLibrary(builtInRun: ExplorerRun, syncLocation = true) {
   const builtInRecord = useMemo<RunRecord>(() => ({
     key: runKey(builtInRun),
     run: builtInRun,
@@ -302,12 +302,18 @@ export function useRunLibrary(builtInRun: ExplorerRun) {
   }, [refreshRemote]);
 
   useEffect(() => {
-    if (resolvingRequestedRun) return;
+    if (!syncLocation || resolvingRequestedRun) return;
     const params = new URLSearchParams(window.location.search);
     params.set("run", activeRecord.runId);
     params.set("sample", activeRecord.sampleId);
     writeLocation(params, "replace");
-  }, [activeRecord.key, activeRecord.runId, activeRecord.sampleId, resolvingRequestedRun]);
+  }, [
+    activeRecord.key,
+    activeRecord.runId,
+    activeRecord.sampleId,
+    resolvingRequestedRun,
+    syncLocation
+  ]);
 
   async function loadRemoteSummary(
     summary: RemoteRunSummary,
@@ -723,8 +729,13 @@ export function useRunLibrary(builtInRun: ExplorerRun) {
       tokenIndex?: number;
       layer?: number;
       kind: "attribution" | "nla" | "patching" | "intervention";
+    },
+    options?: {
+      kind?: "prompt" | "attribution" | "nla" | "patching" | "intervention";
+      updateLocation?: boolean;
     }
   ) {
+    const kind = options?.kind ?? restore?.kind ?? "prompt";
     initialRequestedKeyRef.current = undefined;
     const record: RunRecord = {
       key: runKey(run),
@@ -734,7 +745,7 @@ export function useRunLibrary(builtInRun: ExplorerRun) {
       modelName: run.modelName,
       tokenCount: run.tokens.length,
       layerCount: run.layers.length,
-      sourceName: `${restore?.kind ?? "prompt"} job ${jobId.slice(0, 8)}`,
+      sourceName: `${kind} job ${jobId.slice(0, 8)}`,
       importedAt: new Date().toISOString(),
       sourceType: "generated",
       artifactId: jobId,
@@ -753,18 +764,26 @@ export function useRunLibrary(builtInRun: ExplorerRun) {
       });
     }
     setImportedRecords(next);
-    writeGeneratedRunLocation(record, restore, "push");
+    if (options?.updateLocation !== false) {
+      writeGeneratedRunLocation(record, restore, "push");
+    }
     setActiveKey(record.key);
     setMessage({
       tone: "success",
-      title: `${restore?.kind === "nla" ? "NLA" : restore?.kind === "attribution" ? "Attribution" : restore?.kind === "patching" ? "Activation patching" : restore?.kind === "intervention" ? "Intervention comparison" : "Prompt analysis"} added to the Run Library`,
+      title: `${kind === "nla" ? "NLA" : kind === "attribution" ? "Attribution" : kind === "patching" ? "Activation patching" : kind === "intervention" ? "Intervention comparison" : "Prompt analysis"} added to the Run Library`,
       details: [`${run.runId} / ${run.sampleId} · job ${jobId.slice(0, 8)}`]
     });
   }
 
   function removeRun(key: string) {
+    removeRuns([key]);
+  }
+
+  function removeRuns(keys: string[]) {
+    const removedKeys = new Set(keys);
+    if (removedKeys.size === 0) return;
     initialRequestedKeyRef.current = undefined;
-    const next = importedRecords.filter((record) => record.key !== key);
+    const next = importedRecords.filter((record) => !removedKeys.has(record.key));
     try {
       window.localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
     } catch {
@@ -772,9 +791,9 @@ export function useRunLibrary(builtInRun: ExplorerRun) {
     }
     setImportedRecords(next);
     setRunUsage((current) => {
-      if (!(key in current)) return current;
+      if (![...removedKeys].some((key) => key in current)) return current;
       const nextUsage = { ...current };
-      delete nextUsage[key];
+      for (const key of removedKeys) delete nextUsage[key];
       try {
         window.localStorage.setItem(USAGE_STORAGE_KEY, JSON.stringify(nextUsage));
       } catch {
@@ -782,7 +801,7 @@ export function useRunLibrary(builtInRun: ExplorerRun) {
       }
       return nextUsage;
     });
-    if (activeKey === key) {
+    if (removedKeys.has(activeKey)) {
       writeRunLocation(builtInRecord, undefined, "replace");
       setActiveKey(builtInRecord.key);
     }
@@ -808,6 +827,7 @@ export function useRunLibrary(builtInRun: ExplorerRun) {
     addRuns,
     addGeneratedRun,
     removeRun,
+    removeRuns,
     remoteState,
     refreshRemote,
     cancelRemote,

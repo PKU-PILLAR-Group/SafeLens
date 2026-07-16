@@ -55,8 +55,8 @@ interface ExplorerHomeProps {
   activeRecord: RunRecord & { run: ExplorerRun };
   remoteState: RemoteRunState;
   onSelectConversation: (key: string) => void;
-  onRunReady: (run: ExplorerRun, job: { id: string }) => void;
-  onRemoveRun: (key: string) => void;
+  onRunReady: (run: ExplorerRun, job: { id: string; kind: "prompt-run" | "attribution" | "intervention" }) => void;
+  onRemoveRuns: (keys: string[]) => void;
 }
 
 export function ExplorerHome({
@@ -65,7 +65,7 @@ export function ExplorerHome({
   remoteState,
   onSelectConversation,
   onRunReady,
-  onRemoveRun
+  onRemoveRuns
 }: ExplorerHomeProps) {
   const [prompt, setPrompt] = useState("");
   const [submittedPrompt, setSubmittedPrompt] = useState("");
@@ -98,6 +98,19 @@ export function ExplorerHome({
   );
   const selectedSource = visibleRecords.find((record) => record.key === sourceKey) ??
     visibleRecords.find((record) => record.key === activeRecord.key) ?? visibleRecords[0] ?? activeRecord;
+  const savedAnalysisRuns = useMemo(
+    () => visibleRecords
+      .filter((record) => parentRunKey(record) === sourceKey && record.run)
+      .sort((left, right) => conversationTimestamp(right).localeCompare(conversationTimestamp(left))),
+    [sourceKey, visibleRecords]
+  );
+  const savedAnalysisRun = selectedGroupId === "steering"
+    ? savedAnalysisRuns.find((record) => record.run?.intervention)?.run ?? undefined
+    : selectedGroupId === "attribution"
+      ? savedAnalysisRuns.find((record) => record.run?.attributionMethods.some(
+        (method) => method.id === "integrated_gradients" && method.available
+      ))?.run ?? undefined
+      : undefined;
 
   useEffect(() => {
     const controller = new AbortController();
@@ -197,6 +210,18 @@ export function ExplorerHome({
   }
 
   function removeRunHistory(key: string) {
+    const relatedKeys = new Set([key]);
+    let foundChild = true;
+    while (foundChild) {
+      foundChild = false;
+      for (const candidate of records) {
+        const parentKey = parentRunKey(candidate);
+        if (parentKey && relatedKeys.has(parentKey) && !relatedKeys.has(candidate.key)) {
+          relatedKeys.add(candidate.key);
+          foundChild = true;
+        }
+      }
+    }
     const fallback = visibleRecords.find((record) => record.key !== key);
     if (sourceKey === key && fallback) setSourceKey(fallback.key);
     setHiddenRunKeys((current) => {
@@ -209,10 +234,11 @@ export function ExplorerHome({
       }
       return next;
     });
-    const record = records.find((item) => item.key === key);
-    if (record?.sourceType === "local" || record?.sourceType === "generated") {
-      onRemoveRun(key);
-    }
+    const removableKeys = records
+      .filter((record) => relatedKeys.has(record.key))
+      .filter((record) => record.sourceType === "local" || record.sourceType === "generated")
+      .map((record) => record.key);
+    onRemoveRuns(removableKeys);
     window.history.replaceState(null, "", "/");
   }
 
@@ -290,6 +316,7 @@ export function ExplorerHome({
                   key={`${displayRun.runId}:${displayRun.sampleId}:${selectedGroupId}`}
                   mode={selectedGroupId}
                   run={displayRun}
+                  savedRun={savedAnalysisRun}
                   onRunReady={onRunReady}
                 />
               )}
@@ -322,6 +349,16 @@ export function ExplorerHome({
       )}
     </div>
   );
+}
+
+function parentRunKey(record: RunRecord) {
+  const parent = record.run?.metadata?.parentRun;
+  if (!parent || typeof parent !== "object" || Array.isArray(parent)) return null;
+  const runId = "runId" in parent ? parent.runId : undefined;
+  const sampleId = "sampleId" in parent ? parent.sampleId : undefined;
+  return typeof runId === "string" && typeof sampleId === "string"
+    ? `${runId}::${sampleId}`
+    : null;
 }
 
 function PromptComposer({
