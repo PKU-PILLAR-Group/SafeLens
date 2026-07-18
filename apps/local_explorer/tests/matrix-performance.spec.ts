@@ -738,11 +738,13 @@ function specializedPerformanceRun() {
           }))
         : []
     })),
-    nla: [
-      { layer: 0, tokenIndex: 0, cosine: 0.94, mse: 0.04, fve: 0.91 },
-      { layer: 1, tokenIndex: 1, cosine: 0.88, mse: 0.08, fve: 0.84 },
-      { layer: 2, tokenIndex: 2, cosine: 0.81, mse: 0.12, fve: 0.76 }
-    ].map((value) => ({
+    nla: Array.from({ length: 30 }, (_, layer) => ({
+      layer,
+      tokenIndex: layer % run.tokens.length,
+      cosine: 0.94 - layer * 0.002,
+      mse: 0.04 + layer * 0.001,
+      fve: 0.91 - layer * 0.003
+    })).map((value) => ({
       ...realRun.nla[0],
       ...value,
       component: "resid_post" as const,

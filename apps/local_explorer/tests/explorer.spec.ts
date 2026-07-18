@@ -7924,7 +7924,7 @@ test("turns a token selection into an interactive analysis workflow in focus mod
   const methodMenu = page.getByRole("menu", { name: "Analyze selected token" });
   await expect(methodMenu).toBeVisible();
   await methodMenu.getByRole("menuitemradio", { name: "Attention" }).click();
-  await expect(page.getByRole("heading", { name: "Attention" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Attention", exact: true })).toBeVisible();
   await expect(page.getByRole("tab", { name: "Attention", exact: true })).toHaveAttribute("aria-selected", "true");
   await expect(methodMenu).toBeHidden();
 

@@ -108,6 +108,7 @@ rejected unless `--allow-remote` is explicitly supplied.
 cd apps/local_explorer
 npm run build
 npm run test:e2e
+npm run test:performance
 ```
 
 Install the local Chromium runtime once with `npx playwright install chromium`

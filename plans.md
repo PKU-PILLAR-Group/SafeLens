@@ -26,7 +26,7 @@ SafeLens Local Explorer 的目标不是只展示若干静态图表，而是成�
 
 当前 Local Explorer 已具备：
 
-- `Overview / Residual / Attention / MLP / NLA / Attribution` 统一主视图。
+- `Overview / Residual / Attention / MLP / NLA / Patching / Intervention / Attribution` 八个统一主视图。
 - Overview 已提供探索性 Primary finding、Supporting/Contradicting evidence、Limitations、Recommended
   analysis 和可跳转 Evidence graph，不把缺失证据或代理指标写成安全结论。
 - Residual Logit Lens 已提供每层 top-k 明细、target logit/probability 轨迹和 observed-target log-rank
@@ -2565,6 +2565,21 @@ Phase 3 尚余：Activation Patching job，以及大 activation 的 safetensors/
   完整支持可视化和 artifact 浏览，真实模型 jobs 明确要求 `.[explorer,models,attribution,nla]`，不把轻量容器误写成全模型运行环境。
 - 验收门禁：后端/CLI 目标测试、完整 Python 回归、前端 111 项 E2E、5 项性能门禁、production build、wheel 内容验证、已安装 wheel
   的根页面/API/deep-link smoke test；Docker 在本机工具可用时执行 image build 和 health check。
+
+### 2.101 Frontend Quality Gate / Navigation Ownership（2026-07-19）
+
+- CI 新增独立 `Frontend quality` job，固定 Node 22 后执行 production build、完整 Playwright E2E 和 production performance budget；
+  失败时上传 Playwright report、test results 与 performance artifacts，避免 Python quality job 通过时遗漏交互回归。
+- 修正性能门禁与当前可访问语义的漂移：Token Timeline 使用稳定 region 定位，NLA 大矩阵 fixture 扩展到真实 Canvas 路径；
+  WCAG 测试使用精确 heading，Run selector 辅助文字恢复 AA 对比度。完整 E2E 增至 124 passed，性能套件 5 passed。
+- `prepare_explorer_distribution.py` 在同步产物前清理源码与 build cache 中的旧 web/worker 目录；wheel 验证器从 `index.html`
+  递归解析可达 CSS/JS，并拒绝未被引用的陈旧 hash bundle。新增单元测试分别覆盖完整资源图与 stale asset 拒绝路径。
+- 将 Layer selector、响应式 View tabs 和 selected-token workbench 从 5,209 行的 `main.tsx` 拆入
+  `components/WorkspaceNavigation.tsx`，保留原有 ARIA、roving keyboard、分页滚动、Pin/Compare 与 preload 契约；主入口降至
+  4,802 行，继续只负责 workspace 数据编排与跨视图状态连接。
+- 本轮验收：production build、124 项前端 E2E、5 项性能预算、1016 项 Python 测试、Ruff、format、mypy 和 22-asset wheel
+  完整性检查全部通过。下一次结构拆分应围绕 Inspector evidence derivation/rendering 建立独立边界，不把 selection 或 provenance
+  计算分散回各个可视化组件。
 
 ## 3. 全局交互模型
 

@@ -11,6 +11,7 @@ WEB_DIST = WEB_APP / "dist"
 PACKAGE_ROOT = ROOT / "src" / "SafeLens"
 PACKAGE_WEB = PACKAGE_ROOT / "explorer_web"
 PACKAGE_WORKERS = PACKAGE_ROOT / "explorer_workers"
+BUILD_PACKAGE_ROOT = ROOT / "build" / "lib" / "SafeLens"
 WORKERS = (
     "build_local_explorer_real_run.py",
     "run_local_explorer_attribution.py",
@@ -45,6 +46,7 @@ def main() -> None:
         if not source.is_file():
             raise FileNotFoundError(f"Explorer worker is missing: {source}")
         shutil.copy2(source, PACKAGE_WORKERS / name)
+    _clear_stale_build_cache()
 
     asset_count = sum(1 for path in (PACKAGE_WEB / "assets").rglob("*") if path.is_file())
     print(f"Staged Explorer web bundle ({asset_count} assets) in {PACKAGE_WEB}")
@@ -59,6 +61,11 @@ def _validate_web_dist() -> None:
     assets = WEB_DIST / "assets"
     if not assets.is_dir() or not any(path.is_file() for path in assets.rglob("*")):
         raise FileNotFoundError(f"Explorer build has no static assets in {assets}")
+
+
+def _clear_stale_build_cache() -> None:
+    for relative in ("explorer_web", "explorer_workers"):
+        shutil.rmtree(BUILD_PACKAGE_ROOT / relative, ignore_errors=True)
 
 
 if __name__ == "__main__":

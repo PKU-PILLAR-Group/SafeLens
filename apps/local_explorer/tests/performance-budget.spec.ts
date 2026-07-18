@@ -42,7 +42,7 @@ test.beforeEach(async ({ page, context }) => {
 
 test("keeps the regular production workspace usable within two seconds", async ({ page }, testInfo) => {
   await page.goto("/explorer?view=overview&token=10&layer=1");
-  await expect(page.getByRole("heading", { name: "Token Timeline" })).toBeVisible();
+  await expect(page.getByRole("region", { name: "Token timeline" })).toBeVisible();
   await expect.poll(() => firstUsable(page)).toBeLessThan(2_000);
 
   const measurement = await page.evaluate(() => {

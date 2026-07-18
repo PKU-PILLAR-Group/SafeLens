@@ -39,6 +39,31 @@ jobs:
           path: coverage.xml
           if-no-files-found: error
 
+  frontend:
+    name: Frontend quality
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: apps/local_explorer/package-lock.json
+      - run: npm ci --prefix apps/local_explorer
+      - run: npx --prefix apps/local_explorer playwright install --with-deps chromium
+      - run: npm run build --prefix apps/local_explorer
+      - run: npm run test:e2e --prefix apps/local_explorer
+      - run: npm run test:performance --prefix apps/local_explorer
+      - name: Upload frontend test artifacts
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: frontend-test-results
+          path: apps/local_explorer/test-results
+          if-no-files-found: ignore
+
   build:
     name: Package build
     runs-on: ubuntu-latest

@@ -141,6 +141,7 @@ def main() -> None:
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(derived, indent=2), encoding="utf-8")
 
+
 def _reference_vector(
     wrapper: HuggingFaceModelWrapper,
     prompt: str,

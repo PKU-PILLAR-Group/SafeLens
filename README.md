@@ -635,13 +635,16 @@ Use the same checks as CI when changing code or docs:
 ```bash
 pre-commit run --all-files
 pytest --cov=SafeLens --cov-report=term-missing --cov-report=xml
+npm run build --prefix apps/local_explorer
+npm run test:e2e --prefix apps/local_explorer
+npm run test:performance --prefix apps/local_explorer
 python -m build
 python -m twine check --strict dist/*
 mkdocs build --strict
 ```
 
-The CI matrix validates Python 3.10, 3.11, and 3.12 quality jobs, package
-metadata, and the MkDocs documentation build.
+The CI matrix validates Python 3.10, 3.11, and 3.12 quality jobs, frontend
+build/E2E/performance gates, package metadata, and the MkDocs documentation build.
 
 ## Current Status
 

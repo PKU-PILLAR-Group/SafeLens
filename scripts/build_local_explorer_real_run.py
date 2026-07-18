@@ -153,7 +153,10 @@ def _complete_hf_snapshot(model_id: str, cache_dir: str) -> Path | None:
         return None
     revision = reference.read_text(encoding="utf-8").strip()
     snapshot = repository / "snapshots" / revision
-    if not (snapshot / "config.json").is_file() or not (snapshot / "tokenizer_config.json").is_file():
+    if (
+        not (snapshot / "config.json").is_file()
+        or not (snapshot / "tokenizer_config.json").is_file()
+    ):
         return None
     weight_files = list(snapshot.glob("*.safetensors")) + list(snapshot.glob("pytorch_model*.bin"))
     if not weight_files:
