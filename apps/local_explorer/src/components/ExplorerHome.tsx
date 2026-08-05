@@ -1,54 +1,31 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   BrainCircuit,
-  CheckCircle2,
-  ChevronRight,
-  CircleStop,
-  LoaderCircle,
   MessageSquareText,
   PanelLeftOpen,
   Paperclip,
   Play,
-  RefreshCw,
-  ScanSearch,
-  SlidersHorizontal,
+  LoaderCircle,
   SquarePen,
   Trash2,
   X
 } from "lucide-react";
 
-import { fetchPromptOptions, type PromptJob } from "../api/explorerClient";
-import { usePromptRunner } from "../state/usePromptRunner";
-import type { RemoteRunState, RunRecord } from "../state/useRunLibrary";
+import { fetchPromptOptions } from "../api/explorerClient";
+import { useTurnManager } from "../state/useTurnManager";
+import {
+  listConversations,
+  type ConversationSummary,
+  type RemoteRunState,
+  type RunRecord
+} from "../state/useRunLibrary";
 import type { ExplorerRun } from "../types";
-import { ChatAnalysisWorkbench } from "./ChatAnalysisWorkbench";
-
-type AnalysisId = "steering" | "attribution";
-
-interface AnalysisDirection {
-  id: AnalysisId;
-  title: string;
-  description: string;
-  icon: React.ReactNode;
-}
+import { TurnList } from "./TurnList";
+import type { TurnView } from "../state/useTurnManager";
+import type { AnalysisId } from "./TurnCard";
 
 const DEFAULT_MODEL = "sshleifer/tiny-gpt2";
 const HIDDEN_RUN_STORAGE_KEY = "safelens.localExplorer.hiddenWork.v1";
-
-const analysisDirections: AnalysisDirection[] = [
-  {
-    id: "steering",
-    title: "Steering",
-    description: "Apply a contrastive direction and compare the generated response.",
-    icon: <SlidersHorizontal size={20} />
-  },
-  {
-    id: "attribution",
-    title: "Input attribution",
-    description: "Measure which input tokens support or suppress a response token.",
-    icon: <ScanSearch size={20} />
-  }
-];
 
 interface ExplorerHomeProps {
   records: RunRecord[];
@@ -68,49 +45,43 @@ export function ExplorerHome({
   onRemoveRuns
 }: ExplorerHomeProps) {
   const [prompt, setPrompt] = useState("");
-  const [submittedPrompt, setSubmittedPrompt] = useState("");
-  const [resultRun, setResultRun] = useState<ExplorerRun | null>(null);
   const [sourceKey, setSourceKey] = useState(activeRecord.key);
   const [models, setModels] = useState([DEFAULT_MODEL]);
   const [model, setModel] = useState(DEFAULT_MODEL);
-  const [selectedGroupId, setSelectedGroupId] = useState<AnalysisId | null>(null);
+  const [conversationId, setConversationId] = useState<string | null>(null);
+  const [analysisOpen, setAnalysisOpen] = useState<{ turnId: string; mode: AnalysisId } | null>(null);
   const [hiddenRunKeys, setHiddenRunKeys] = useState<Set<string>>(loadHiddenRunKeys);
-  const [pendingDelete, setPendingDelete] = useState<RunRecord | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<ConversationSummary | null>(null);
   const [pendingConversationKey, setPendingConversationKey] = useState<string | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
 
-  const handleRunReady = useCallback((run: ExplorerRun, job: PromptJob) => {
-    setResultRun(run);
-    onRunReady(run, job);
-  }, [onRunReady]);
-  const runner = usePromptRunner(handleRunReady);
-  const running = runner.submitting || runner.job?.status === "idle" || runner.job?.status === "loading";
-  const displayRun = resultRun ?? activeRecord.run;
   const visibleRecords = useMemo(
     () => records.filter((record) => !hiddenRunKeys.has(record.key)),
     [hiddenRunKeys, records]
   );
-  const conversations = useMemo(
-    () => visibleRecords.filter(isConversationRecord).sort((left, right) =>
-      conversationTimestamp(right).localeCompare(conversationTimestamp(left))
-    ),
-    [visibleRecords]
-  );
+  const conversations = useMemo(() => listConversations(visibleRecords), [visibleRecords]);
   const selectedSource = visibleRecords.find((record) => record.key === sourceKey) ??
     visibleRecords.find((record) => record.key === activeRecord.key) ?? visibleRecords[0] ?? activeRecord;
-  const savedAnalysisRuns = useMemo(
-    () => visibleRecords
-      .filter((record) => parentRunKey(record) === sourceKey && record.run)
-      .sort((left, right) => conversationTimestamp(right).localeCompare(conversationTimestamp(left))),
-    [sourceKey, visibleRecords]
-  );
-  const savedAnalysisRun = selectedGroupId === "steering"
-    ? savedAnalysisRuns.find((record) => record.run?.intervention)?.run ?? undefined
-    : selectedGroupId === "attribution"
-      ? savedAnalysisRuns.find((record) => record.run?.attributionMethods.some(
-        (method) => method.id === "integrated_gradients" && method.available
-      ))?.run ?? undefined
-      : undefined;
+
+  const turnsRef = useRef<TurnView[]>([]);
+  const turnManager = useTurnManager({
+    model,
+    conversationId,
+    onConversationStart: setConversationId,
+    onRunReady: (run, job, turnId) => {
+      const turnIndex = turnsRef.current.findIndex((turn) => turn.id === turnId);
+      onRunReady({
+        ...run,
+        metadata: {
+          ...run.metadata,
+          ...(conversationId ? { conversationId } : {}),
+          ...(turnIndex >= 0 ? { turnIndex } : {})
+        }
+      }, job);
+    }
+  });
+  turnsRef.current = turnManager.turns;
+  const running = turnManager.activeTurnId !== null;
 
   useEffect(() => {
     const controller = new AbortController();
@@ -128,89 +99,84 @@ export function ExplorerHome({
   }, [selectedSource.key, sourceKey, visibleRecords]);
 
   useEffect(() => {
-    if (!resultRun) return;
-    const generated = records.find(
-      (record) => record.runId === resultRun.runId && record.sampleId === resultRun.sampleId
-    );
-    if (generated) setSourceKey(generated.key);
-  }, [records, resultRun]);
-
-  useEffect(() => {
     if (!pendingConversationKey || activeRecord.key !== pendingConversationKey) return;
     restoreConversation(activeRecord);
     setPendingConversationKey(null);
   }, [activeRecord, pendingConversationKey]);
 
+  function turnsForConversation(conversation: ConversationSummary): TurnView[] {
+    return conversation.records
+      .filter((record): record is RunRecord & { run: ExplorerRun } => record.run !== null)
+      .map((record) => ({
+        id: record.key,
+        prompt: record.run.prompt,
+        run: record.run,
+        jobId: record.artifactId ?? null,
+        status: "ready" as const,
+        startedAt: record.importedAt
+      }));
+  }
+
   function restoreConversation(record: RunRecord & { run: ExplorerRun }) {
-    runner.reset();
+    const conversation = conversations.find((item) =>
+      item.records.some((candidate) => candidate.key === record.key)
+    );
+    const turns = conversation ? turnsForConversation(conversation) : [{
+      id: record.key,
+      prompt: record.run.prompt,
+      run: record.run,
+      jobId: record.artifactId ?? null,
+      status: "ready" as const,
+      startedAt: record.importedAt
+    }];
+    turnManager.hydrate(turns, conversation?.conversationId ?? record.key);
     setSourceKey(record.key);
-    setSubmittedPrompt(record.run.prompt);
     setPrompt("");
-    setResultRun(record.run);
-    setSelectedGroupId(null);
+    setAnalysisOpen(null);
     const previousModel = conversationModel(record.run);
     if (previousModel) setModel(previousModel);
     setHistoryOpen(false);
   }
 
-  function selectConversation(record: RunRecord) {
-    if (record.run) {
-      restoreConversation(record as RunRecord & { run: ExplorerRun });
+  function selectConversation(conversation: ConversationSummary) {
+    const first = conversation.firstRecord;
+    if (first.run) {
+      restoreConversation(first as RunRecord & { run: ExplorerRun });
       return;
     }
-    setPendingConversationKey(record.key);
-    setSourceKey(record.key);
+    setPendingConversationKey(first.key);
+    setSourceKey(first.key);
     setHistoryOpen(false);
-    onSelectConversation(record.key);
+    onSelectConversation(first.key);
   }
 
   function startNewConversation() {
-    runner.reset();
+    turnManager.reset();
+    setConversationId(null);
     setPendingConversationKey(null);
-    setSubmittedPrompt("");
-    setResultRun(null);
     setPrompt("");
-    setSelectedGroupId(null);
+    setAnalysisOpen(null);
     setHistoryOpen(false);
   }
 
   function submitPrompt() {
     const cleaned = prompt.trim();
     if (!cleaned || running) return;
-    setSubmittedPrompt(cleaned);
     setPrompt("");
-    setResultRun(null);
-    setSelectedGroupId(null);
-    void runner.submit({
-      prompt: cleaned,
-      template: "chat",
-      model,
-      seed: 0,
-      maxNewTokens: 8,
-      temperature: 0
-    });
+    setAnalysisOpen(null);
+    turnManager.submit(cleaned);
   }
 
-  function retryPrompt() {
-    if (!submittedPrompt || running) return;
-    setResultRun(null);
-    void runner.submit({
-      prompt: submittedPrompt,
-      template: "chat",
-      model,
-      seed: 0,
-      maxNewTokens: 8,
-      temperature: 0
-    });
+  function toggleAnalysis(turnId: string, mode: AnalysisId) {
+    setAnalysisOpen((current) =>
+      current?.turnId === turnId && current.mode === mode
+        ? null
+        : { turnId, mode }
+    );
   }
 
-  function useSourcePrompt() {
-    const sourcePrompt = selectedSource.run?.prompt;
-    if (sourcePrompt) setPrompt(sourcePrompt);
-  }
-
-  function removeRunHistory(key: string) {
-    const relatedKeys = new Set([key]);
+  function removeConversationHistory(conversation: ConversationSummary) {
+    const relatedKeys = new Set(conversation.records.map((record) => record.key));
     let foundChild = true;
     while (foundChild) {
       foundChild = false;
@@ -222,11 +188,11 @@ export function ExplorerHome({
         }
       }
     }
-    const fallback = visibleRecords.find((record) => record.key !== key);
-    if (sourceKey === key && fallback) setSourceKey(fallback.key);
+    const fallback = visibleRecords.find((record) => !relatedKeys.has(record.key));
+    if (fallback) setSourceKey(fallback.key);
     setHiddenRunKeys((current) => {
       const next = new Set(current);
-      next.add(key);
+      for (const key of relatedKeys) next.add(key);
       try {
         window.localStorage.setItem(HIDDEN_RUN_STORAGE_KEY, JSON.stringify([...next]));
       } catch {
@@ -239,14 +205,22 @@ export function ExplorerHome({
       .filter((record) => record.sourceType === "local" || record.sourceType === "generated")
       .map((record) => record.key);
     onRemoveRuns(removableKeys);
+    const isCurrentConversation = turnManager.turns.some((turn) =>
+      relatedKeys.has(turn.id)
+    );
+    if (isCurrentConversation) {
+      turnManager.reset();
+      setConversationId(null);
+      setAnalysisOpen(null);
+    }
     window.history.replaceState(null, "", "/");
   }
 
   return (
-    <div className={`chat-home ${submittedPrompt ? "has-conversation" : "is-empty"}`}>
+    <div className={`chat-home ${turnManager.turns.length > 0 ? "has-conversation" : "is-empty"}`}>
       <header className="chat-home-header">
         <a className="chat-home-brand" href="/" aria-label="SafeLens home">
-          <span><BrainCircuit size={20} /></span>
+          <span><BrainCircuit size={22} /></span>
           <strong>SafeLens</strong>
         </a>
         <button className="chat-history-toggle" aria-label="Open chat history" title="Chat history" onClick={() => setHistoryOpen(true)}>
@@ -260,15 +234,15 @@ export function ExplorerHome({
       <div className="chat-home-body">
         <ChatHistory
           open={historyOpen}
-          records={conversations}
-          activeKey={resultRun ? sourceKey : null}
+          conversations={conversations}
+          activeKey={null}
           onNew={startNewConversation}
           onSelect={selectConversation}
           onDelete={setPendingDelete}
           onClose={() => setHistoryOpen(false)}
         />
         <main className="chat-home-main">
-          {!submittedPrompt ? (
+          {turnManager.turns.length === 0 ? (
             <section className="chat-home-welcome" aria-labelledby="chat-home-title">
               <div>
                 <span><MessageSquareText size={19} /></span>
@@ -276,51 +250,15 @@ export function ExplorerHome({
               </div>
             </section>
           ) : (
-            <Conversation
-              prompt={submittedPrompt}
-              run={resultRun}
-              job={runner.job}
-              error={runner.error?.message}
-              running={running}
-              onCancel={() => {
-                setPrompt(submittedPrompt);
-                void runner.cancel();
-              }}
-              onRetry={retryPrompt}
+            <TurnList
+              turns={turnManager.turns}
+              activeTurnId={turnManager.activeTurnId}
+              analysisOpen={analysisOpen}
+              onRetry={turnManager.retry}
+              onCancel={turnManager.cancel}
+              onToggleAnalysis={toggleAnalysis}
+              onRunReady={onRunReady}
             />
-          )}
-
-          {resultRun && (
-            <section className="chat-analysis" aria-label="Analysis directions">
-              <header>
-                <span>Explore this run</span>
-                <p>Steer the response or trace it back to the input.</p>
-              </header>
-              <div className="chat-analysis-directions">
-                {analysisDirections.map((direction) => (
-                  <button
-                    key={direction.id}
-                    className={selectedGroupId === direction.id ? "active" : ""}
-                    aria-pressed={selectedGroupId === direction.id}
-                    onClick={() => setSelectedGroupId(direction.id)}
-                  >
-                    <span>{direction.icon}</span>
-                    <strong>{direction.title}</strong>
-                    <small>{direction.description}</small>
-                    <ChevronRight size={17} />
-                  </button>
-                ))}
-              </div>
-              {selectedGroupId && (
-                <ChatAnalysisWorkbench
-                  key={`${displayRun.runId}:${displayRun.sampleId}:${selectedGroupId}`}
-                  mode={selectedGroupId}
-                  run={displayRun}
-                  savedRun={savedAnalysisRun}
-                  onRunReady={onRunReady}
-                />
-              )}
-            </section>
           )}
 
         <PromptComposer
@@ -330,20 +268,21 @@ export function ExplorerHome({
           running={running}
           onPromptChange={setPrompt}
           onModelChange={setModel}
-          onUseSourcePrompt={useSourcePrompt}
+          onUseSourcePrompt={() => {
+            const sourcePrompt = selectedSource.run?.prompt;
+            if (sourcePrompt) setPrompt(sourcePrompt);
+          }}
           onSubmit={submitPrompt}
         />
         </main>
       </div>
       {pendingDelete && (
-        <DeleteRunDialog
-          record={pendingDelete}
+        <DeleteConversationDialog
+          conversation={pendingDelete}
           onCancel={() => setPendingDelete(null)}
           onConfirm={() => {
-            const removingCurrent = pendingDelete.key === sourceKey && Boolean(resultRun);
-            removeRunHistory(pendingDelete.key);
+            removeConversationHistory(pendingDelete);
             setPendingDelete(null);
-            if (removingCurrent) startNewConversation();
           }}
         />
       )}
@@ -412,7 +351,7 @@ function PromptComposer({
 
 function ChatHistory({
   open,
-  records,
+  conversations,
   activeKey,
   onNew,
   onSelect,
@@ -420,11 +359,11 @@ function ChatHistory({
   onClose
 }: {
   open: boolean;
-  records: RunRecord[];
+  conversations: ConversationSummary[];
   activeKey: string | null;
   onNew: () => void;
-  onSelect: (record: RunRecord) => void;
-  onDelete: (record: RunRecord) => void;
+  onSelect: (conversation: ConversationSummary) => void;
+  onDelete: (conversation: ConversationSummary) => void;
   onClose: () => void;
 }) {
   return (
@@ -440,17 +379,20 @@ function ChatHistory({
         </header>
         <nav aria-label="Conversation history">
           <span>Recent</span>
-          {records.length ? records.map((record) => (
-            <div key={record.key} className={`chat-history-row ${record.key === activeKey ? "active" : ""}`}>
-              <button className="chat-history-open" onClick={() => onSelect(record)}>
-                <strong>{conversationTitle(record)}</strong>
-                <small>{shortModelName(record.modelName)}</small>
+          {conversations.length ? conversations.map((conversation) => (
+            <div key={conversation.conversationId} className={`chat-history-row ${conversation.firstRecord.key === activeKey ? "active" : ""}`}>
+              <button className="chat-history-open" onClick={() => onSelect(conversation)}>
+                <strong>{conversation.title}</strong>
+                <small>
+                  {shortModelName(conversation.firstRecord.modelName)}
+                  {conversation.turnCount > 1 ? ` · ${conversation.turnCount} turns` : ""}
+                </small>
               </button>
               <button
                 className="chat-history-delete"
-                aria-label={`Delete conversation ${record.runId} ${record.sampleId}`}
+                aria-label={`Delete conversation ${conversation.title}`}
                 title="Delete conversation"
-                onClick={() => onDelete(record)}
+                onClick={() => onDelete(conversation)}
               >
                 <Trash2 size={15} />
               </button>
@@ -465,60 +407,8 @@ function ChatHistory({
   );
 }
 
-function Conversation({
-  prompt,
-  run,
-  job,
-  error,
-  running,
-  onCancel,
-  onRetry
-}: {
-  prompt: string;
-  run: ExplorerRun | null;
-  job: PromptJob | null;
-  error?: string;
-  running: boolean;
-  onCancel: () => void;
-  onRetry: () => void;
-}) {
-  return (
-    <section className="chat-conversation" aria-label="Analysis conversation">
-      <div className="chat-user-message">{prompt}</div>
-      <div className="chat-assistant-message">
-        <span className="chat-assistant-mark"><BrainCircuit size={18} /></span>
-        <div>
-          {run ? (
-            <>
-              <p>{generatedResponse(run)}</p>
-              <span className="chat-run-ready"><CheckCircle2 size={14} /> Activation cache ready</span>
-            </>
-          ) : error ? (
-            <>
-              <p>{error}</p>
-              <button onClick={onRetry}>Retry</button>
-            </>
-          ) : (
-            <div className="chat-job-progress">
-              <span><LoaderCircle size={16} /> {job?.detail ?? "Submitting the analysis..."}</span>
-              <i><b style={{ width: `${job?.progress ?? 4}%` }} /></i>
-              <small>{job?.progress ?? 0}%</small>
-              {running && <button aria-label="Cancel analysis" onClick={onCancel}><CircleStop size={16} /></button>}
-              {job?.status === "cancelled" && (
-                <button aria-label="Retry analysis" title="Retry analysis" onClick={onRetry}>
-                  <RefreshCw size={15} />
-                </button>
-              )}
-            </div>
-          )}
-        </div>
-      </div>
-    </section>
-  );
-}
-
-function DeleteRunDialog({ record, onCancel, onConfirm }: {
-  record: RunRecord;
+function DeleteConversationDialog({ conversation, onCancel, onConfirm }: {
+  conversation: ConversationSummary;
   onCancel: () => void;
   onConfirm: () => void;
 }) {
@@ -534,7 +424,7 @@ function DeleteRunDialog({ record, onCancel, onConfirm }: {
           </div>
           <button aria-label="Close remove confirmation" onClick={onCancel}><X size={18} /></button>
         </header>
-        <p>This removes <strong>{conversationTitle(record)}</strong> from Chat history. Workspace source files are not modified.</p>
+        <p>This removes <strong>{conversation.title}</strong> from Chat history. Workspace source files are not modified.</p>
         <footer>
           <button autoFocus onClick={onCancel}>Cancel</button>
           <button className="danger" onClick={onConfirm}><Trash2 size={15} /> Delete conversation</button>
@@ -544,34 +434,9 @@ function DeleteRunDialog({ record, onCancel, onConfirm }: {
   );
 }
 
-function generatedResponse(run: ExplorerRun) {
-  const generated = run.metadata?.generatedContinuation;
-  if (typeof generated !== "string" || !generated.trim()) return "The model run is complete and its internal activations are ready to inspect.";
-  const response = generated.startsWith(run.prompt) ? generated.slice(run.prompt.length).trim() : generated.trim();
-  return response || "The model run is complete and its internal activations are ready to inspect.";
-}
-
 function shortModelName(model: string) {
   const parts = model.split("/");
   return parts[parts.length - 1] ?? model;
-}
-
-function isConversationRecord(record: RunRecord) {
-  if (record.builtIn) return true;
-  if (record.sourceType === "remote") return /(^|\/)generated\/prompt-[^/]+\.explorer\.json$/i.test(record.sourceName);
-  return record.sourceName.startsWith("prompt job ");
-}
-
-function conversationTitle(record: RunRecord) {
-  const prompt = (record.run?.prompt ?? record.remoteSummary?.promptPreview)?.trim().replace(/\s+/g, " ");
-  if (!prompt) return record.runId;
-  return prompt.length > 46 ? `${prompt.slice(0, 45).trimEnd()}...` : prompt;
-}
-
-function conversationTimestamp(record: RunRecord) {
-  if (record.lastUsedAt) return record.lastUsedAt;
-  if (record.importedAt !== "built in") return record.importedAt;
-  return "0000-00-00T00:00:00.000Z";
 }
 
 function conversationModel(run: ExplorerRun) {

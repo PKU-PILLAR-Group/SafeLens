@@ -281,7 +281,9 @@ function App() {
             undefined,
             {
               kind: job.kind === "prompt-run" ? "prompt" : job.kind,
-              updateLocation: false
+              updateLocation: false,
+              conversationId: generatedRun.metadata?.conversationId as string | undefined,
+              turnIndex: generatedRun.metadata?.turnIndex as number | undefined
             }
           )}
           onRemoveRuns={library.removeRuns}
@@ -2692,37 +2694,37 @@ function TraceEvidence({
     component === "attention"
       ? selectedHead.difference
         ? [
-            ["object", attentionHeadLabel(selectedHead)],
+            ["attention head (diff)", attentionHeadLabel(selectedHead)],
             ["selected", selectedHead.difference.selectedHeadId],
             ["baseline", selectedHead.difference.baselineHeadId],
             ["evidence", "derived signed proxy"]
           ]
         : selectedHead.rollout
         ? [
-            ["object", attentionHeadLabel(selectedHead)],
+            ["attention path", attentionHeadLabel(selectedHead)],
             ["layers", selectedHead.rollout.layers.map((layer) => `L${layer}`).join(" → ")],
             ["members", `${selectedHead.rollout.memberHeadIds.length} retained heads`],
             ["evidence", "derived path proxy"]
           ]
         : selectedHead.aggregation
         ? [
-            ["object", attentionAggregationLabel(selectedHead.aggregation)],
+            ["aggregation", attentionAggregationLabel(selectedHead.aggregation)],
             ["members", selectedHead.memberHeadIds?.join(" · ") ?? "retained heads"],
             ["evidence", "derived proxy"]
           ]
         : [
-            ["object", selectedHead.id],
+            ["attention head", selectedHead.id],
             ["keyword mass", formatScore(selectedHead.riskContribution)],
             ["entropy", formatScore(selectedHead.entropy)]
           ]
       : component === "mlp" && neuron
         ? [
-            ["object", neuron.id],
+            ["MLP neuron", neuron.id],
             ["activation", formatScore(neuron.activation, "mlp_signed_activation")],
             ["top tokens", neuron.topTokens.map((index) => explorerRun.tokens[index].text).join(" · ")]
           ]
         : [
-            ["object", "resid_post"],
+            ["residual stream", "resid_post"],
             ["norm", (residualCell?.norm ?? 0).toFixed(1)],
             ["direction", formatScore(residualCell?.riskDirection ?? 0, "residual_direction")]
           ];

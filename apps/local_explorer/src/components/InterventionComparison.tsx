@@ -28,9 +28,9 @@ export function InterventionComparison({ experiment, onPin }: InterventionCompar
       </div>
 
       <div className="intervention-output-compare">
-        <OutputColumn title="Original" output={experiment.original} kinds={originalKinds} />
-        <div className="intervention-output-arrow"><ArrowRight size={18} /><span>{experiment.deltas.generationChanged ? "changed" : "unchanged"}</span></div>
-        <OutputColumn title="Steered" output={experiment.steered} kinds={steeredKinds} />
+        <OutputColumn side="original" title="Original" output={experiment.original} kinds={originalKinds} />
+        <div className="intervention-output-arrow"><ArrowRight size={18} /><span className={experiment.deltas.generationChanged ? "changed" : "unchanged"}>{experiment.deltas.generationChanged ? "changed" : "unchanged"}</span></div>
+        <OutputColumn side="steered" title="Steered" output={experiment.steered} kinds={steeredKinds} />
       </div>
 
       <div className="intervention-provenance-strip">
@@ -49,15 +49,17 @@ function Metric({ label, value, kind }: { label: string; value: string; kind: st
 }
 
 function OutputColumn({
+  side,
   title,
   output,
   kinds
 }: {
+  side: "original" | "steered";
   title: string;
   output: InterventionExperiment["original"];
   kinds: Map<number, string>;
 }) {
-  return <article>
+  return <article data-side={side}>
     <header><h4>{title}</h4><span>logit {output.targetLogit.toFixed(4)} · lexical {output.lexicalRisk.toFixed(4)}</span></header>
     <p>{output.text || "No continuation text"}</p>
     <div className="intervention-output-tokens">

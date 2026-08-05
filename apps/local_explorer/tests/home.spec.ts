@@ -186,7 +186,7 @@ async function mockReadyPromptJob(page: Page) {
 async function runReadyAnalysis(page: Page) {
   await page.getByLabel("Analysis prompt").fill(generatedRun.prompt);
   await page.getByLabel("Run analysis").click();
-  await expect(page.getByText("Explore this run")).toBeVisible();
+  await expect(page.getByText("Activation cache ready")).toBeVisible();
 }
 
 async function mockReadyAttributionJob(page: Page) {
@@ -333,11 +333,9 @@ test("runs the real prompt-job protocol and keeps the conversation above two foc
 
   await expect(page.locator(".chat-user-message")).toHaveText(generatedRun.prompt);
   await expect(page.locator(".chat-assistant-message")).toContainText("strongest residual alignment");
-  await expect(page.locator(".chat-analysis-directions > button")).toHaveCount(2);
-  await expect(page.getByRole("button", { name: /Steering/ })).toBeVisible();
-  await expect(page.getByRole("button", { name: /Input attribution/ })).toBeVisible();
-  await expect(page.getByRole("button", { name: /Activations/ })).toHaveCount(0);
-  await expect(page.getByRole("button", { name: /Causal evidence/ })).toHaveCount(0);
+  await expect(page.locator(".chat-turn-explore-bar > button")).toHaveCount(2);
+  await expect(page.getByRole("button", { name: /Steer/ })).toBeVisible();
+  await expect(page.getByRole("button", { name: /Attribute/ })).toBeVisible();
   await expect(page.getByLabel("Analysis prompt")).toBeVisible();
   await expect(page.getByLabel("Analysis prompt")).toHaveValue("");
   await expect(page).toHaveURL(/\/$/);
@@ -356,21 +354,18 @@ test("switches between steering and input attribution inside the current chat", 
   await mockReadyPromptJob(page);
   await page.goto("/");
   await runReadyAnalysis(page);
-  const conversation = await page.locator(".chat-conversation").innerText();
 
-  await page.getByRole("button", { name: /Steering Apply a contrastive/ }).click();
+  await page.getByRole("button", { name: /Steer/ }).click();
   await expect(page.getByRole("heading", { name: "Steering" })).toBeVisible();
   await expect(page.getByLabel("Steering desired behavior")).toBeVisible();
   await expect(page.getByLabel("Steering strength")).toHaveValue("1");
-  expect(await page.locator(".chat-conversation").innerText()).toBe(conversation);
 
-  await page.getByRole("button", { name: /Input attribution Measure which/ }).click();
+  await page.getByRole("button", { name: /Attribute/ }).click();
   await expect(page.getByRole("heading", { name: "Input attribution" })).toBeVisible();
   await expect(page.getByLabel("Attribution response")).toBeVisible();
   await expect(page.getByLabel("Attribution integration steps")).toHaveValue("32");
   await expect(page.getByRole("button", { name: "Open Explorer" })).toHaveCount(0);
   expect(await page.evaluate(() => window.location.pathname)).toBe("/");
-  expect(await page.locator(".chat-conversation").innerText()).toBe(conversation);
 });
 
 test("runs input attribution from Chat and renders signed token contributions", async ({ page }) => {
@@ -380,7 +375,7 @@ test("runs input attribution from Chat and renders signed token contributions", 
   await page.goto("/");
   await runReadyAnalysis(page);
 
-  await page.getByRole("button", { name: /Input attribution Measure which/ }).click();
+  await page.getByRole("button", { name: /Attribute/ }).click();
   await page.getByLabel("Attribution response").fill("The selected token matters.");
   await page.getByRole("button", { name: "Run attribution" }).click();
 
@@ -409,7 +404,7 @@ test("runs steering from Chat and compares original with steered generation", as
   await page.goto("/");
   await runReadyAnalysis(page);
 
-  await page.getByRole("button", { name: /Steering Apply a contrastive/ }).click();
+  await page.getByRole("button", { name: /Steer/ }).click();
   await expect(page.getByRole("button", { name: "Run steering" })).toBeEnabled();
   await page.getByRole("button", { name: "Run steering" }).click();
 
@@ -440,8 +435,8 @@ test("restores a previous conversation and its analysis entry points", async ({ 
 
   await expect(page.getByRole("button", { name: "Work" })).toHaveCount(0);
   await page.locator(".chat-history-open").click();
-  await expect(page.locator(".chat-conversation")).toBeVisible();
-  await expect(page.getByText("Explore this run")).toBeVisible();
+  await expect(page.locator(".chat-turn-card")).toBeVisible();
+  await expect(page.getByText("Activation cache ready")).toBeVisible();
   expect(await page.evaluate(() => window.location.pathname)).toBe("/");
 });
 
@@ -450,7 +445,7 @@ test("hides the bundled example conversation without deleting its artifact", asy
   await page.goto("/");
 
   await page.getByLabel(
-    `Delete conversation ${realRun.runId} ${realRun.sampleId}`
+    `Delete conversation ${realRun.prompt.slice(0, 45).trimEnd()}...`
   ).click();
   const dialog = page.getByRole("dialog", { name: "Delete this conversation?" });
   await expect(dialog).toContainText("Compare a benign safety explanation");
@@ -470,7 +465,7 @@ test("restores and deletes a generated conversation after explicit confirmation"
   await page.goto("/");
   await runReadyAnalysis(page);
 
-  await page.getByRole("button", { name: /Input attribution Measure/ }).click();
+  await page.getByRole("button", { name: /Attribute/ }).click();
   await page.getByRole("button", { name: "Run attribution" }).click();
   await expect(page.getByLabel("Input attribution result")).toBeVisible();
 
@@ -480,17 +475,24 @@ test("restores and deletes a generated conversation after explicit confirmation"
   await page.locator(".chat-history-row").filter({ hasText: "Why does the model focus" })
     .locator(".chat-history-open").click();
   await expect(page.locator(".chat-assistant-message")).toContainText("strongest residual alignment");
-  await page.getByRole("button", { name: /Input attribution Measure/ }).click();
+  await page.getByRole("button", { name: /Attribute/ }).click();
+  await expect(page.getByRole("heading", { name: "Input attribution" })).toBeVisible();
+  await expect(page.getByLabel("Attribution response")).toHaveValue(/strongest residual alignment/);
+  await page.getByRole("button", { name: "Run attribution" }).click();
   await expect(page.getByLabel("Input attribution result")).toBeVisible();
 
-  await page.getByLabel("Delete conversation chat-home-generated seed-0").click();
+  await page.getByLabel(
+    `Delete conversation ${generatedRun.prompt}`
+  ).click();
   const dialog = page.getByRole("dialog", { name: "Delete this conversation?" });
   await expect(dialog).toContainText("Why does the model focus");
   await expect(dialog.getByRole("button", { name: "Cancel" })).toBeFocused();
 
   await dialog.getByRole("button", { name: "Cancel" }).click();
   await expect(dialog).toBeHidden();
-  await page.getByLabel("Delete conversation chat-home-generated seed-0").click();
+  await page.getByLabel(
+    `Delete conversation ${generatedRun.prompt}`
+  ).click();
   await page.getByRole("dialog", { name: "Delete this conversation?" })
     .getByRole("button", { name: "Delete conversation" }).click();
 
@@ -549,7 +551,7 @@ test("persists removal of a read-only workspace entry from Chat", async ({ page 
   await expect(page.locator(".chat-user-message")).toHaveText(workspaceConversation.prompt);
   await expect(page.locator(".chat-assistant-message")).toContainText("restored from the workspace");
 
-  await page.getByLabel("Delete conversation workspace-history-run workspace-sample").click();
+  await page.getByLabel("Delete conversation Inspect this saved workspace conversation.").click();
   await page.getByRole("dialog", { name: "Delete this conversation?" })
     .getByRole("button", { name: "Delete conversation" }).click();
   await expect(page.getByText("workspace-history-run")).toHaveCount(0);

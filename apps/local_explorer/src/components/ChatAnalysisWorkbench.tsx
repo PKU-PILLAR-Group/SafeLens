@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   AlertCircle,
-  ArrowRight,
   CheckCircle2,
   GitCompareArrows,
   LoaderCircle,
@@ -23,6 +22,8 @@ import {
 import { useAttributionRunner } from "../state/useAttributionRunner";
 import { useInterventionRunner } from "../state/useInterventionRunner";
 import type { AttributionMethod, ExplorerRun, InterventionExperiment } from "../types";
+import { PresetSuggestTextarea } from "./PresetSuggestTextarea";
+import { ResponseTokenPicker } from "./ResponseTokenPicker";
 
 interface ChatAnalysisWorkbenchProps {
   mode: "steering" | "attribution";
@@ -141,26 +142,22 @@ function SteeringWorkbench({
       </header>
 
       <div className="chat-steering-references">
-        <label>
-          <span>Steer toward</span>
-          <textarea
-            aria-label="Steering desired behavior"
-            rows={3}
-            value={desiredPrompt}
-            disabled={running}
-            onChange={(event) => setDesiredPrompt(event.target.value)}
-          />
-        </label>
-        <label>
-          <span>Steer away from</span>
-          <textarea
-            aria-label="Steering undesired behavior"
-            rows={3}
-            value={undesiredPrompt}
-            disabled={running}
-            onChange={(event) => setUndesiredPrompt(event.target.value)}
-          />
-        </label>
+        <PresetSuggestTextarea
+          ariaLabel="Steering desired behavior"
+          label="Steer toward"
+          direction="toward"
+          value={desiredPrompt}
+          disabled={running}
+          onChange={setDesiredPrompt}
+        />
+        <PresetSuggestTextarea
+          ariaLabel="Steering undesired behavior"
+          label="Steer away from"
+          direction="away"
+          value={undesiredPrompt}
+          disabled={running}
+          onChange={setUndesiredPrompt}
+        />
       </div>
 
       <div className="chat-steering-controls">
@@ -293,18 +290,12 @@ function AttributionWorkbench({
       </label>
 
       <div className="chat-attribution-controls">
-        <label>
-          <span>Target response index</span>
-          <input
-            aria-label="Attribution target response index"
-            type="number"
-            min={0}
-            max={63}
-            value={targetResponseIndex}
-            disabled={running}
-            onChange={(event) => setTargetResponseIndex(clampInteger(event.target.value, 0, 63))}
-          />
-        </label>
+        <ResponseTokenPicker
+          response={response}
+          selectedIndex={targetResponseIndex}
+          disabled={running}
+          onSelect={setTargetResponseIndex}
+        />
         <fieldset>
           <legend>Baseline</legend>
           <button type="button" className={baseline === "pad_token" ? "active" : ""} aria-pressed={baseline === "pad_token"} disabled={running} onClick={() => setBaseline("pad_token")}>Pad token</button>
@@ -330,7 +321,7 @@ function AttributionWorkbench({
         failed={Boolean(runner.error)}
       />
 
-      {method && <AttributionResult method={method} run={result!} />}
+      {method && <AttributionResult method={method} run={result!} targetIndex={targetResponseIndex} />}
     </section>
   );
 }
@@ -388,13 +379,15 @@ function SteeringResult({ experiment }: { experiment: InterventionExperiment }) 
         <span>L{experiment.layer} · {experiment.component} · {signed(experiment.scale)}</span>
       </header>
       <div className="chat-steering-output">
-        <article>
+        <article className="is-original">
           <span>Original</span>
           <p>{experiment.original.text || "No continuation"}</p>
           <small>Target logit {experiment.original.targetLogit.toFixed(3)}</small>
         </article>
-        <ArrowRight size={18} />
-        <article>
+        <span className="chat-steering-delta-pill" title="Target logit delta">
+          {signed(experiment.deltas.targetLogit)}
+        </span>
+        <article className="is-steered">
           <span>Steered</span>
           <p>{experiment.steered.text || "No continuation"}</p>
           <small>Target logit {experiment.steered.targetLogit.toFixed(3)}</small>
@@ -409,17 +402,23 @@ function SteeringResult({ experiment }: { experiment: InterventionExperiment }) 
   );
 }
 
-function AttributionResult({ method, run }: { method: AttributionMethod; run: ExplorerRun }) {
+function AttributionResult({ method, run, targetIndex }: { method: AttributionMethod; run: ExplorerRun; targetIndex?: number }) {
   const values = method.rows[method.rows.length - 1]?.values ?? [];
   const maximum = Math.max(1e-8, ...values.map((value) => Math.abs(value)));
   const ranked = run.tokens
     .map((token, index) => ({ token, value: values[index] ?? 0 }))
     .sort((left, right) => Math.abs(right.value) - Math.abs(left.value))
     .slice(0, 3);
+  const targetToken = targetIndex !== undefined ? run.tokens[targetIndex] : undefined;
   return (
     <section className="chat-attribution-result" aria-label="Input attribution result">
       <header>
         <div><ScanSearch size={16} /><strong>Token contributions</strong></div>
+        {targetToken && (
+          <span className="chat-attribution-target" title="Selected target token">
+            Target <b>T{targetToken.index}</b> · {visibleToken(targetToken.text)}
+          </span>
+        )}
         <span><i className="positive" /> supports target <i className="negative" /> suppresses target</span>
       </header>
       <div className="chat-attribution-tokens">
@@ -473,9 +472,4 @@ function visibleToken(value: string) {
 
 function signed(value: number) {
   return `${value > 0 ? "+" : ""}${Math.abs(value) < 0.001 && value !== 0 ? value.toExponential(2) : value.toFixed(3)}`;
-}
-
-function clampInteger(value: string, minimum: number, maximum: number) {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? Math.max(minimum, Math.min(maximum, Math.round(parsed))) : minimum;
 }

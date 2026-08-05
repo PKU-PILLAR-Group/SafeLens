@@ -733,18 +733,30 @@ export function useRunLibrary(builtInRun: ExplorerRun, syncLocation = true) {
     options?: {
       kind?: "prompt" | "attribution" | "nla" | "patching" | "intervention";
       updateLocation?: boolean;
+      conversationId?: string;
+      turnIndex?: number;
     }
   ) {
     const kind = options?.kind ?? restore?.kind ?? "prompt";
     initialRequestedKeyRef.current = undefined;
+    const runWithConversation: ExplorerRun = options?.conversationId !== undefined || options?.turnIndex !== undefined
+      ? {
+          ...run,
+          metadata: {
+            ...run.metadata,
+            ...(options.conversationId !== undefined ? { conversationId: options.conversationId } : {}),
+            ...(options.turnIndex !== undefined ? { turnIndex: options.turnIndex } : {})
+          }
+        }
+      : run;
     const record: RunRecord = {
-      key: runKey(run),
-      run,
-      runId: run.runId,
-      sampleId: run.sampleId,
-      modelName: run.modelName,
-      tokenCount: run.tokens.length,
-      layerCount: run.layers.length,
+      key: runKey(runWithConversation),
+      run: runWithConversation,
+      runId: runWithConversation.runId,
+      sampleId: runWithConversation.sampleId,
+      modelName: runWithConversation.modelName,
+      tokenCount: runWithConversation.tokens.length,
+      layerCount: runWithConversation.layers.length,
       sourceName: `${kind} job ${jobId.slice(0, 8)}`,
       importedAt: new Date().toISOString(),
       sourceType: "generated",
@@ -971,6 +983,68 @@ function remoteFailureKind(
 
 export function runKey(run: Pick<ExplorerRun, "runId" | "sampleId">) {
   return `${run.runId}::${run.sampleId}`;
+}
+
+export interface ConversationSummary {
+  conversationId: string;
+  title: string;
+  lastUsedAt: string;
+  turnCount: number;
+  firstRecord: RunRecord;
+  records: RunRecord[];
+}
+
+export function listConversations(records: RunRecord[]): ConversationSummary[] {
+  const groups = new Map<string, RunRecord[]>();
+  for (const record of records) {
+    if (!isConversationRecord(record)) continue;
+    const conversationId = conversationIdOf(record);
+    const group = groups.get(conversationId);
+    if (group) group.push(record);
+    else groups.set(conversationId, [record]);
+  }
+  return [...groups.entries()]
+    .map(([conversationId, group]) => {
+      const sorted = group.slice().sort(compareTurns);
+      const last = sorted[sorted.length - 1];
+      return {
+        conversationId,
+        title: conversationTitle(sorted[0]),
+        lastUsedAt: last.lastUsedAt ?? last.importedAt,
+        turnCount: sorted.length,
+        firstRecord: sorted[0],
+        records: sorted
+      } satisfies ConversationSummary;
+    })
+    .sort((left, right) => right.lastUsedAt.localeCompare(left.lastUsedAt));
+}
+
+function conversationIdOf(record: RunRecord): string {
+  const candidate = record.run?.metadata?.conversationId;
+  return typeof candidate === "string" ? candidate : `legacy:${record.key}`;
+}
+
+function turnIndexOf(record: RunRecord): number {
+  const candidate = record.run?.metadata?.turnIndex;
+  return typeof candidate === "number" && Number.isInteger(candidate) ? candidate : 0;
+}
+
+function compareTurns(left: RunRecord, right: RunRecord) {
+  const turnDelta = turnIndexOf(left) - turnIndexOf(right);
+  if (turnDelta !== 0) return turnDelta;
+  return left.importedAt.localeCompare(right.importedAt);
+}
+
+function isConversationRecord(record: RunRecord) {
+  if (record.builtIn) return true;
+  if (record.sourceType === "remote") return /(^|\/)generated\/prompt-[^/]+\.explorer\.json$/i.test(record.sourceName);
+  return record.sourceName.startsWith("prompt job ");
+}
+
+function conversationTitle(record: RunRecord) {
+  const prompt = (record.run?.prompt ?? record.remoteSummary?.promptPreview)?.trim().replace(/\s+/g, " ");
+  if (!prompt) return record.runId;
+  return prompt.length > 46 ? `${prompt.slice(0, 45).trimEnd()}...` : prompt;
 }
 
 function requestedRunKey() {
