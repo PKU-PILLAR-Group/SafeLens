@@ -22,7 +22,7 @@ from typing import Any, Literal
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from SafeLens.explorer_chunks import MANIFEST_PROTOCOL
 
@@ -146,6 +146,11 @@ class HealthResponse(BaseModel):
     artifactCount: int = Field(ge=0)
 
 
+class PromptMessage(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str = Field(min_length=1, max_length=8_000)
+
+
 class PromptRunRequest(BaseModel):
     prompt: str = Field(min_length=1, max_length=8_000)
     template: Literal["plain", "chat"] = "plain"
@@ -153,12 +158,38 @@ class PromptRunRequest(BaseModel):
     seed: int = Field(default=0, ge=0, le=2_147_483_647)
     maxNewTokens: int = Field(default=8, ge=1, le=64)
     temperature: float = Field(default=0.0, ge=0.0, le=2.0)
+    messages: list[PromptMessage] = Field(default_factory=list, max_length=24)
+
+    @model_validator(mode="after")
+    def validate_context_size(self) -> PromptRunRequest:
+        total_chars = len(self.prompt) + sum(len(message.content) for message in self.messages)
+        if total_chars > 32_000:
+            raise ValueError("conversation context exceeds the 32,000 character limit")
+        return self
 
 
 class PromptOptionsResponse(BaseModel):
     models: list[str]
     templates: list[str] = ["plain", "chat"]
     maxNewTokens: int = 64
+
+
+class TokenizeRequest(BaseModel):
+    modelName: str = Field(min_length=1)
+    text: str = Field(min_length=1, max_length=4_000)
+
+
+class TokenizedToken(BaseModel):
+    index: int = Field(ge=0)
+    tokenId: int = Field(ge=0)
+    text: str
+
+
+class TokenizeResponse(BaseModel):
+    modelName: str
+    text: str
+    tokens: list[TokenizedToken]
+    truncated: bool = False
 
 
 class AttributionRunRequest(BaseModel):
@@ -566,6 +597,7 @@ def create_app(
         intervention_manager,
     )
     load_patching_tokenizer = patching_tokenizer_loader or _default_patching_tokenizer_loader
+    load_response_tokenizer = patching_tokenizer_loader or _default_patching_tokenizer_loader
     load_intervention_tokenizer = (
         intervention_tokenizer_loader or _default_patching_tokenizer_loader
     )
@@ -578,6 +610,44 @@ def create_app(
     @app.get("/api/prompt/options", response_model=PromptOptionsResponse)
     def prompt_options() -> PromptOptionsResponse:
         return PromptOptionsResponse(models=list(allowed_models))
+
+    @app.post("/api/tokenize", response_model=TokenizeResponse)
+    def tokenize_response(payload: TokenizeRequest) -> TokenizeResponse:
+        if payload.modelName not in allowed_models:
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "model_not_allowed", "message": "Select an allowed local model."},
+            )
+        try:
+            tokenizer = load_response_tokenizer(payload.modelName)
+            token_ids = [int(token_id) for token_id in tokenizer.encode(
+                payload.text,
+                add_special_tokens=False,
+            )]
+            truncated = len(token_ids) > 64
+            token_ids = token_ids[:64]
+            tokens = [
+                TokenizedToken(
+                    index=index,
+                    tokenId=token_id,
+                    text=str(tokenizer.decode(
+                        [token_id],
+                        clean_up_tokenization_spaces=False,
+                    )),
+                )
+                for index, token_id in enumerate(token_ids)
+            ]
+            return TokenizeResponse(
+                modelName=payload.modelName,
+                text=payload.text,
+                tokens=tokens,
+                truncated=truncated,
+            )
+        except (OSError, TypeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "tokenize_error", "message": str(exc)},
+            ) from exc
 
     @app.get("/api/nla/profiles")
     def nla_profiles() -> list[dict[str, Any]]:
@@ -1219,7 +1289,7 @@ def _subprocess_prompt_runner(*, root: Path) -> PromptRunner:
         temp_artifact = output_dir / f"{job_suffix}.tmp.json"
         final_artifact = root / "generated" / f"{run_id}.explorer.json"
         final_artifact.parent.mkdir(parents=True, exist_ok=True)
-        prompt = _render_prompt(payload.prompt, payload.template)
+        prompt = _render_prompt(payload.prompt, payload.template, payload.messages)
         configured_device = os.environ.get("SAFELENS_EXPLORER_JOB_DEVICE", "cpu")
         device_label = "GPU" if configured_device.startswith("cuda") else "CPU"
         progress(8, "model", f"Loading {payload.model} on the local {device_label} worker.")
@@ -1287,6 +1357,10 @@ def _subprocess_prompt_runner(*, root: Path) -> PromptRunner:
                 "seed": payload.seed,
                 "maxNewTokens": payload.maxNewTokens,
                 "temperature": payload.temperature,
+                "contextMessages": [
+                    message.model_dump(mode="json") for message in payload.messages
+                ],
+                "userPrompt": payload.prompt,
             }
             artifact["samples"] = [sample]
             _require_not_cancelled(cancel_event)
@@ -1833,9 +1907,19 @@ def _communicate_cancellable(
             raise RuntimeError("Explorer job cancelled") from None
 
 
-def _render_prompt(prompt: str, template: str) -> str:
+def _render_prompt(
+    prompt: str,
+    template: str,
+    messages: list[PromptMessage] | None = None,
+) -> str:
     cleaned = prompt.strip()
-    return cleaned if template == "plain" else f"User: {cleaned}\nAssistant:"
+    if template != "chat" or not messages:
+        return cleaned if template == "plain" else f"User: {cleaned}\nAssistant:"
+    history = "\n".join(
+        f"{'User' if message.role == 'user' else 'Assistant'}: {message.content.strip()}"
+        for message in messages
+    )
+    return f"{history}\nUser: {cleaned}\nAssistant:"
 
 
 def _require_not_cancelled(cancel_event: threading.Event) -> None:

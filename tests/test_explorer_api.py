@@ -10,8 +10,10 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from SafeLens.explorer_api import (
+    PromptMessage,
     _read_artifact_cached,
     _read_physical_block_cached,
+    _render_prompt,
     create_app,
 )
 from SafeLens.explorer_chunks import build_explorer_sidecar
@@ -463,6 +465,24 @@ def test_prompt_job_completes_with_progress_and_sse_snapshot(tmp_path: Path) -> 
     assert '"status":"ready"' in body
 
 
+def test_chat_prompt_renders_prior_turns_in_order() -> None:
+    rendered = _render_prompt(
+        "What follows?",
+        "chat",
+        [
+            PromptMessage(role="user", content="First question?"),
+            PromptMessage(role="assistant", content="First answer."),
+        ],
+    )
+
+    assert rendered == (
+        "User: First question?\n"
+        "Assistant: First answer.\n"
+        "User: What follows?\n"
+        "Assistant:"
+    )
+
+
 def test_prompt_job_rejects_unapproved_models(tmp_path: Path) -> None:
     client = TestClient(create_app(tmp_path, prompt_runner=lambda *_args: {}))
     response = client.post(
@@ -746,6 +766,39 @@ class _PatchingTokenizer:
     def decode(self, token_ids: list[int], clean_up_tokenization_spaces: bool = False) -> str:
         assert clean_up_tokenization_spaces is False
         return f"token-{token_ids[0]}"
+
+
+def test_tokenize_endpoint_uses_the_selected_model_tokenizer(tmp_path: Path) -> None:
+    loaded: list[str] = []
+
+    def loader(model_name: str):
+        loaded.append(model_name)
+        return _PatchingTokenizer()
+
+    client = TestClient(create_app(tmp_path, patching_tokenizer_loader=loader))
+    response = client.post(
+        "/api/tokenize",
+        json={"modelName": "sshleifer/tiny-gpt2", "text": "clean prompt"},
+    )
+
+    assert response.status_code == 200
+    assert loaded == ["sshleifer/tiny-gpt2"]
+    assert response.json() == {
+        "modelName": "sshleifer/tiny-gpt2",
+        "text": "clean prompt",
+        "tokens": [
+            {"index": 0, "tokenId": 11, "text": "token-11"},
+            {"index": 1, "tokenId": 12, "text": "token-12"},
+        ],
+        "truncated": False,
+    }
+
+    rejected = client.post(
+        "/api/tokenize",
+        json={"modelName": "remote/custom-model", "text": "clean prompt"},
+    )
+    assert rejected.status_code == 422
+    assert rejected.json()["detail"]["code"] == "model_not_allowed"
 
 
 def test_patching_preflight_reports_exact_alignment_and_rejects_unapproved_model(

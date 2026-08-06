@@ -36,7 +36,8 @@ export function PromptRunnerPanel({ run, onRunReady }: PromptRunnerPanelProps) {
       model: DEFAULT_MODEL,
       seed,
       maxNewTokens,
-      temperature
+      temperature,
+      messages: []
     });
   }
 

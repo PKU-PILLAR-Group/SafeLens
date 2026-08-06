@@ -1042,7 +1042,12 @@ function isConversationRecord(record: RunRecord) {
 }
 
 function conversationTitle(record: RunRecord) {
-  const prompt = (record.run?.prompt ?? record.remoteSummary?.promptPreview)?.trim().replace(/\s+/g, " ");
+  const promptRunner = record.run?.metadata?.promptRunner;
+  const userPrompt = promptRunner && typeof promptRunner === "object"
+    ? (promptRunner as Record<string, unknown>).userPrompt
+    : undefined;
+  const prompt = (typeof userPrompt === "string" ? userPrompt : record.run?.prompt ?? record.remoteSummary?.promptPreview)
+    ?.trim().replace(/\s+/g, " ");
   if (!prompt) return record.runId;
   return prompt.length > 46 ? `${prompt.slice(0, 45).trimEnd()}...` : prompt;
 }

@@ -25,6 +25,7 @@ export interface TurnView {
 
 interface TurnCardProps {
   turn: TurnView;
+  analysisRuns: ExplorerRun[];
   active: boolean;
   analysisOpen: AnalysisId | null;
   onRetry: () => void;
@@ -35,6 +36,7 @@ interface TurnCardProps {
 
 export function TurnCard({
   turn,
+  analysisRuns,
   active,
   analysisOpen,
   onRetry,
@@ -42,6 +44,20 @@ export function TurnCard({
   onToggleAnalysis,
   onRunReady
 }: TurnCardProps) {
+  const savedRun = turn.run && analysisOpen
+    ? analysisRuns.find((candidate) => {
+        const parent = candidate.metadata?.parentRun;
+        if (!parent || typeof parent !== "object" || Array.isArray(parent)) return false;
+        const source = parent as Record<string, unknown>;
+        const belongsToTurn = source.runId === turn.run?.runId && source.sampleId === turn.run?.sampleId;
+        if (!belongsToTurn) return false;
+        return analysisOpen === "steering"
+          ? Boolean(candidate.intervention)
+          : candidate.attributionMethods.some(
+              (method) => method.id === "integrated_gradients" && method.available
+            );
+      })
+    : undefined;
   return (
     <article className="chat-turn-card" aria-label="Conversation turn">
       <div className="chat-user-message">{turn.prompt}</div>
@@ -99,7 +115,8 @@ export function TurnCard({
                 key={`${turn.run.runId}:${turn.run.sampleId}:${analysisOpen}`}
                 mode={analysisOpen}
                 run={turn.run}
-                savedRun={undefined}
+                savedRun={savedRun}
+                suggestionQuery={turn.prompt}
                 onRunReady={onRunReady}
               />
             </div>
@@ -115,6 +132,14 @@ function generatedResponse(run: ExplorerRun) {
   if (typeof generated !== "string" || !generated.trim()) {
     return "The model run is complete and its internal activations are ready to inspect.";
   }
-  const response = generated.startsWith(run.prompt) ? generated.slice(run.prompt.length).trim() : generated.trim();
+  const promptRunner = run.metadata?.promptRunner;
+  const userPrompt = promptRunner && typeof promptRunner === "object"
+    ? (promptRunner as Record<string, unknown>).userPrompt
+    : undefined;
+  const response = generated.startsWith(run.prompt)
+    ? generated.slice(run.prompt.length).trim()
+    : typeof userPrompt === "string" && generated.startsWith(userPrompt)
+      ? generated.slice(userPrompt.length).trim()
+      : generated.trim();
   return response || "The model run is complete and its internal activations are ready to inspect.";
 }

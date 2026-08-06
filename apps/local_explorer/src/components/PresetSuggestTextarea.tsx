@@ -14,6 +14,7 @@ interface PresetSuggestTextareaProps {
   label: string;
   value: string;
   direction: "toward" | "away";
+  contextQuery?: string;
   disabled?: boolean;
   onChange: (value: string) => void;
 }
@@ -23,6 +24,7 @@ export function PresetSuggestTextarea({
   label,
   value,
   direction,
+  contextQuery = "",
   disabled = false,
   onChange
 }: PresetSuggestTextareaProps) {
@@ -36,8 +38,8 @@ export function PresetSuggestTextarea({
   const listId = useId();
 
   const matches = useMemo(
-    () => matchPresets(value, direction, userPresets),
-    [direction, userPresets, value]
+    () => matchPresets(value, direction, userPresets, contextQuery),
+    [contextQuery, direction, userPresets, value]
   );
   const safeHighlighted = Math.min(highlighted, Math.max(0, matches.length - 1));
   const highlightedPreset = matches[safeHighlighted];
@@ -135,6 +137,19 @@ export function PresetSuggestTextarea({
           }
         }}
       />
+      {matches.length > 0 && (
+        <div className="preset-suggest-chips" aria-label={`${label} suggested presets`}>
+          {matches.slice(0, 3).map((preset) => (
+            <button
+              key={`chip-${preset.id}`}
+              type="button"
+              disabled={disabled}
+              title={preset.text}
+              onClick={() => choose(preset)}
+            >{preset.label}</button>
+          ))}
+        </div>
+      )}
       {saveOpen && (
         <div className="preset-suggest-save-form" role="group" aria-label={`Save ${label} preset`}>
           <input

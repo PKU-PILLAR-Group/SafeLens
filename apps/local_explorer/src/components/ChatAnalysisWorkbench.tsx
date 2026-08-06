@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   AlertCircle,
+  ArrowRight,
   CheckCircle2,
   GitCompareArrows,
   LoaderCircle,
@@ -29,12 +30,13 @@ interface ChatAnalysisWorkbenchProps {
   mode: "steering" | "attribution";
   run: ExplorerRun;
   savedRun?: ExplorerRun;
+  suggestionQuery?: string;
   onRunReady: (run: ExplorerRun, job: { id: string; kind: "attribution" | "intervention" }) => void;
 }
 
-export function ChatAnalysisWorkbench({ mode, run, savedRun, onRunReady }: ChatAnalysisWorkbenchProps) {
+export function ChatAnalysisWorkbench({ mode, run, savedRun, suggestionQuery, onRunReady }: ChatAnalysisWorkbenchProps) {
   return mode === "steering" ? (
-    <SteeringWorkbench run={run} savedRun={savedRun} onRunReady={onRunReady} />
+    <SteeringWorkbench run={run} savedRun={savedRun} suggestionQuery={suggestionQuery} onRunReady={onRunReady} />
   ) : (
     <AttributionWorkbench run={run} savedRun={savedRun} onRunReady={onRunReady} />
   );
@@ -43,6 +45,7 @@ export function ChatAnalysisWorkbench({ mode, run, savedRun, onRunReady }: ChatA
 function SteeringWorkbench({
   run,
   savedRun,
+  suggestionQuery,
   onRunReady
 }: Omit<ChatAnalysisWorkbenchProps, "mode">) {
   const prior = savedRun?.intervention ?? run.intervention;
@@ -146,6 +149,7 @@ function SteeringWorkbench({
           ariaLabel="Steering desired behavior"
           label="Steer toward"
           direction="toward"
+          contextQuery={suggestionQuery}
           value={desiredPrompt}
           disabled={running}
           onChange={setDesiredPrompt}
@@ -154,6 +158,7 @@ function SteeringWorkbench({
           ariaLabel="Steering undesired behavior"
           label="Steer away from"
           direction="away"
+          contextQuery={suggestionQuery}
           value={undesiredPrompt}
           disabled={running}
           onChange={setUndesiredPrompt}
@@ -168,16 +173,16 @@ function SteeringWorkbench({
           </select>
         </label>
         <label>
-          <span>Component</span>
-          <select aria-label="Steering component" value={component} disabled={running} onChange={(event) => setComponent(event.target.value as PatchingComponent)}>
-            <option value="resid_post">Residual stream</option>
+          <span>Activation site</span>
+          <select aria-label="Steering activation site" value={component} disabled={running} onChange={(event) => setComponent(event.target.value as PatchingComponent)}>
+            <option value="resid_post">Residual stream · post-layer</option>
             <option value="attn_out">Attention output</option>
             <option value="mlp_out">MLP output</option>
           </select>
         </label>
         <label>
-          <span>Objective</span>
-          <select aria-label="Steering objective token" value={targetTokenId} disabled={running} onChange={(event) => setTargetTokenId(Number(event.target.value))}>
+          <span>Tracked output token</span>
+          <select aria-label="Steering tracked output token" value={targetTokenId} disabled={running} onChange={(event) => setTargetTokenId(Number(event.target.value))}>
             {targetOptions.map((option) => (
               <option key={option.tokenId} value={option.tokenId}>{visibleToken(option.tokenText)} · #{option.tokenId}</option>
             ))}
@@ -235,7 +240,8 @@ function AttributionWorkbench({
   onRunReady
 }: Omit<ChatAnalysisWorkbenchProps, "mode">) {
   const [response, setResponse] = useState(() => inferredResponse(run));
-  const [targetResponseIndex, setTargetResponseIndex] = useState(0);
+  const [targetResponseIndex, setTargetResponseIndex] = useState(() => attributionTargetIndex(savedRun ?? run) ?? 0);
+  const [responseTokens, setResponseTokens] = useState<Array<{ index: number; tokenId: number; text: string }>>([]);
   const [baseline, setBaseline] = useState<AttributionRunInput["baseline"]>("pad_token");
   const [nSteps, setNSteps] = useState(32);
   const priorRun = savedRun ?? run;
@@ -248,6 +254,10 @@ function AttributionWorkbench({
   }, [onRunReady]);
   const runner = useAttributionRunner(handleReady);
   const running = runner.submitting || runner.job?.status === "idle" || runner.job?.status === "loading";
+  const handleTokensChange = useCallback(
+    (tokens: Array<{ index: number; tokenId: number; text: string }>) => setResponseTokens(tokens),
+    []
+  );
 
   function submit() {
     if (!response.trim() || running) return;
@@ -291,10 +301,12 @@ function AttributionWorkbench({
 
       <div className="chat-attribution-controls">
         <ResponseTokenPicker
+          modelName={run.modelName}
           response={response}
           selectedIndex={targetResponseIndex}
           disabled={running}
           onSelect={setTargetResponseIndex}
+          onTokensChange={handleTokensChange}
         />
         <fieldset>
           <legend>Baseline</legend>
@@ -311,7 +323,7 @@ function AttributionWorkbench({
 
       <WorkbenchActions
         running={running}
-        disabled={!response.trim() || running}
+        disabled={!response.trim() || responseTokens.length === 0 || running}
         runLabel="Run attribution"
         status={runner.error?.message ?? runner.job?.detail}
         progress={runner.job?.progress}
@@ -321,7 +333,7 @@ function AttributionWorkbench({
         failed={Boolean(runner.error)}
       />
 
-      {method && <AttributionResult method={method} run={result!} targetIndex={targetResponseIndex} />}
+      {method && <AttributionResult method={method} run={result!} targetIndex={targetResponseIndex} responseTokens={responseTokens} />}
     </section>
   );
 }
@@ -384,9 +396,10 @@ function SteeringResult({ experiment }: { experiment: InterventionExperiment }) 
           <p>{experiment.original.text || "No continuation"}</p>
           <small>Target logit {experiment.original.targetLogit.toFixed(3)}</small>
         </article>
-        <span className="chat-steering-delta-pill" title="Target logit delta">
-          {signed(experiment.deltas.targetLogit)}
-        </span>
+        <div className="chat-steering-transition" title="Target logit delta">
+          <ArrowRight size={20} />
+          <span>{signed(experiment.deltas.targetLogit)}</span>
+        </div>
         <article className="is-steered">
           <span>Steered</span>
           <p>{experiment.steered.text || "No continuation"}</p>
@@ -402,21 +415,38 @@ function SteeringResult({ experiment }: { experiment: InterventionExperiment }) 
   );
 }
 
-function AttributionResult({ method, run, targetIndex }: { method: AttributionMethod; run: ExplorerRun; targetIndex?: number }) {
+function AttributionResult({
+  method,
+  run,
+  targetIndex,
+  responseTokens
+}: {
+  method: AttributionMethod;
+  run: ExplorerRun;
+  targetIndex?: number;
+  responseTokens: Array<{ index: number; tokenId: number; text: string }>;
+}) {
   const values = method.rows[method.rows.length - 1]?.values ?? [];
   const maximum = Math.max(1e-8, ...values.map((value) => Math.abs(value)));
   const ranked = run.tokens
     .map((token, index) => ({ token, value: values[index] ?? 0 }))
     .sort((left, right) => Math.abs(right.value) - Math.abs(left.value))
     .slice(0, 3);
-  const targetToken = targetIndex !== undefined ? run.tokens[targetIndex] : undefined;
+  const attributionJobs = run.metadata?.attributionJobs;
+  const targetJob = Array.isArray(attributionJobs)
+    ? attributionJobs[attributionJobs.length - 1]
+    : undefined;
+  const targetToken = targetIndex !== undefined ? responseTokens[targetIndex] : undefined;
+  const targetText = targetJob && typeof targetJob === "object" && "targetTokenText" in targetJob
+    ? String(targetJob.targetTokenText)
+    : targetToken?.text;
   return (
     <section className="chat-attribution-result" aria-label="Input attribution result">
       <header>
         <div><ScanSearch size={16} /><strong>Token contributions</strong></div>
-        {targetToken && (
+        {(targetToken || targetText) && (
           <span className="chat-attribution-target" title="Selected target token">
-            Target <b>T{targetToken.index}</b> · {visibleToken(targetToken.text)}
+            Target <b>T{targetIndex ?? 0}</b> · {visibleToken(targetText ?? "")}
           </span>
         )}
         <span><i className="positive" /> supports target <i className="negative" /> suppresses target</span>
@@ -463,7 +493,23 @@ function steeringTargetOptions(run: ExplorerRun) {
 function inferredResponse(run: ExplorerRun) {
   const generated = run.metadata?.generatedContinuation;
   if (typeof generated !== "string") return "";
-  return (generated.startsWith(run.prompt) ? generated.slice(run.prompt.length) : generated).trim();
+  if (generated.startsWith(run.prompt)) return generated.slice(run.prompt.length).trim();
+  const promptRunner = run.metadata?.promptRunner;
+  const userPrompt = promptRunner && typeof promptRunner === "object"
+    ? (promptRunner as Record<string, unknown>).userPrompt
+    : undefined;
+  return (typeof userPrompt === "string" && generated.startsWith(userPrompt)
+    ? generated.slice(userPrompt.length)
+    : generated).trim();
+}
+
+function attributionTargetIndex(run: ExplorerRun) {
+  const jobs = run.metadata?.attributionJobs;
+  if (!Array.isArray(jobs)) return undefined;
+  const latest = jobs[jobs.length - 1];
+  if (!latest || typeof latest !== "object") return undefined;
+  const value = (latest as Record<string, unknown>).targetResponseIndex;
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : undefined;
 }
 
 function visibleToken(value: string) {

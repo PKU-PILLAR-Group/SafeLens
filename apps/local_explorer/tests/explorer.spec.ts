@@ -1596,7 +1596,8 @@ test("runs a prompt job over SSE and adds validated output to the Run Library", 
     model: "sshleifer/tiny-gpt2",
     seed: 23,
     maxNewTokens: 12,
-    temperature: 0.4
+    temperature: 0.4,
+    messages: []
   });
 });
 

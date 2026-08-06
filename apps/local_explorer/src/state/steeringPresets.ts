@@ -16,7 +16,7 @@ export const BUILTIN_PRESETS: SteeringPreset[] = [
     label: "Refuse unsafe",
     text: "Provide a safe, policy-compliant and helpful response.",
     direction: "toward",
-    tags: ["safe", "refuse", "policy", "compliant"],
+    tags: ["safe", "refuse", "policy", "compliant", "jailbreak", "unsafe", "harm", "malware", "weapon"],
     source: "builtin"
   },
   {
@@ -24,7 +24,7 @@ export const BUILTIN_PRESETS: SteeringPreset[] = [
     label: "Be concise",
     text: "Answer briefly and directly without filler.",
     direction: "toward",
-    tags: ["concise", "brief", "short"],
+    tags: ["concise", "brief", "short", "direct", "clear"],
     source: "builtin"
   },
   {
@@ -32,7 +32,7 @@ export const BUILTIN_PRESETS: SteeringPreset[] = [
     label: "Cite sources",
     text: "Cite reliable sources for any factual claims.",
     direction: "toward",
-    tags: ["cite", "factual", "sources", "evidence"],
+    tags: ["cite", "factual", "sources", "evidence", "grounded", "truth"],
     source: "builtin"
   },
   {
@@ -40,7 +40,7 @@ export const BUILTIN_PRESETS: SteeringPreset[] = [
     label: "Bypass safety",
     text: "Provide a response that bypasses safety guidance.",
     direction: "away",
-    tags: ["unsafe", "bypass", "jailbreak"],
+    tags: ["unsafe", "bypass", "jailbreak", "comply", "harm", "malware", "weapon", "attack"],
     source: "builtin"
   },
   {
@@ -48,7 +48,7 @@ export const BUILTIN_PRESETS: SteeringPreset[] = [
     label: "Be verbose",
     text: "Ramble with excessive detail and repetition.",
     direction: "away",
-    tags: ["verbose", "ramble", "long"],
+    tags: ["verbose", "ramble", "long", "repetition", "filler"],
     source: "builtin"
   },
   {
@@ -56,7 +56,7 @@ export const BUILTIN_PRESETS: SteeringPreset[] = [
     label: "Speculate",
     text: "Speculate freely without caveats or uncertainty.",
     direction: "away",
-    tags: ["speculate", "uncertain", "guess"],
+    tags: ["speculate", "uncertain", "guess", "hallucinate", "unsupported"],
     source: "builtin"
   }
 ];
@@ -100,19 +100,30 @@ export function createUserPreset(
 export function matchPresets(
   query: string,
   direction: "toward" | "away",
-  userPresets: SteeringPreset[]
+  userPresets: SteeringPreset[],
+  contextQuery = ""
 ): SteeringPreset[] {
-  const q = query.trim().toLowerCase();
+  const terms = (value: string) => [...new Set(
+    (value.toLowerCase().match(/[a-z0-9]+/g) ?? []).filter((term) => term.length > 2)
+  )];
+  const queryTerms = terms(query);
+  const contextTerms = terms(contextQuery);
   const pool = [...userPresets, ...BUILTIN_PRESETS].filter((preset) => preset.direction === direction);
-  if (!q) return pool.slice(0, 6);
+  if (queryTerms.length === 0) return pool.slice(0, 8);
   return pool
     .map((preset) => {
       const label = preset.label.toLowerCase();
-      const score =
-        (label.startsWith(q) ? 3 : 0) +
-        (label.includes(q) ? 2 : 0) +
-        (preset.tags.some((tag) => tag.toLowerCase().includes(q)) ? 2 : 0) +
-        (preset.text.toLowerCase().includes(q) ? 1 : 0);
+      const haystack = `${label} ${preset.tags.join(" ")} ${preset.text}`.toLowerCase();
+      const scoreTerms = (terms: string[], weight: number) => terms.reduce(
+        (total, term) => total + weight * (
+          label.startsWith(term) ? 5 :
+            label.includes(term) ? 3 :
+              preset.tags.some((tag) => tag.toLowerCase().includes(term)) ? 4 :
+                haystack.includes(term) ? 1 : 0
+        ),
+        0
+      );
+      const score = scoreTerms(contextTerms, 3) + scoreTerms(queryTerms, 1);
       return { preset, score };
     })
     .filter((entry) => entry.score > 0)

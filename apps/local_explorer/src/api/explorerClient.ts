@@ -460,6 +460,11 @@ export class ExplorerApiError extends Error {
   }
 }
 
+const promptMessageSchema = z.object({
+  role: z.enum(["user", "assistant"]),
+  content: z.string().min(1)
+});
+
 export const promptJobSchema = z.object({
   id: z.string().min(1),
   kind: z.literal("prompt-run"),
@@ -475,12 +480,14 @@ export const promptJobSchema = z.object({
     model: z.string(),
     seed: z.number().int(),
     maxNewTokens: z.number().int(),
-    temperature: z.number()
+    temperature: z.number(),
+    messages: z.array(promptMessageSchema).default([])
   }),
   result: explorerRunSchema.nullable(),
   error: z.string().nullable()
 });
 
+export type PromptMessage = z.infer<typeof promptMessageSchema>;
 export type PromptJob = z.infer<typeof promptJobSchema>;
 export type PromptRunInput = PromptJob["request"];
 
@@ -491,6 +498,19 @@ const promptOptionsSchema = z.object({
 });
 
 export type PromptOptions = z.infer<typeof promptOptionsSchema>;
+
+const tokenizeResponseSchema = z.object({
+  modelName: z.string().min(1),
+  text: z.string(),
+  tokens: z.array(z.object({
+    index: z.number().int().nonnegative(),
+    tokenId: z.number().int().nonnegative(),
+    text: z.string()
+  })),
+  truncated: z.boolean()
+});
+
+export type TokenizedResponse = z.infer<typeof tokenizeResponseSchema>;
 
 export const attributionJobSchema = z.object({
   id: z.string().min(1),
@@ -751,6 +771,27 @@ export async function fetchPromptOptions(signal?: AbortSignal): Promise<PromptOp
       "Prompt options failed validation.",
       response.status
     );
+  }
+  return parsed.data;
+}
+
+export async function fetchTokenizedResponse(
+  modelName: string,
+  text: string,
+  signal?: AbortSignal
+): Promise<TokenizedResponse> {
+  const response = await fetch(`${API_BASE}/tokenize`, {
+    method: "POST",
+    headers: { Accept: "application/json", "Content-Type": "application/json" },
+    body: JSON.stringify({ modelName, text }),
+    signal
+  });
+  if (!response.ok) {
+    throw await jobResponseError(response, "tokenize_error");
+  }
+  const parsed = tokenizeResponseSchema.safeParse(await response.json());
+  if (!parsed.success) {
+    throw new ExplorerApiError("tokenize_invalid_schema", "Response tokenization failed validation.", response.status);
   }
   return parsed.data;
 }

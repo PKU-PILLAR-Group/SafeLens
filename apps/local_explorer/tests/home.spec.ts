@@ -123,6 +123,18 @@ async function prepareHome(page: Page) {
       }
     });
   });
+  await page.route("**/api/tokenize", async (route) => {
+    const request = route.request().postDataJSON() as { modelName: string; text: string };
+    const pieces = request.text.match(/[A-Za-z0-9_]+|[^\sA-Za-z0-9_]/g) ?? [];
+    await route.fulfill({
+      json: {
+        modelName: request.modelName,
+        text: request.text,
+        tokens: pieces.map((text, index) => ({ index, tokenId: 1_000 + index, text })),
+        truncated: false
+      }
+    });
+  });
   await page.route("**/api/intervention/preflight", async (route) => {
     const request = route.request().postDataJSON();
     await route.fulfill({
@@ -181,6 +193,81 @@ async function mockReadyPromptJob(page: Page) {
     });
   });
   return () => submitted;
+}
+
+async function mockReadyPromptSequence(page: Page) {
+  const submissions: Array<Record<string, unknown>> = [];
+  const jobs = new Map<string, { request: Record<string, unknown>; result: typeof generatedRun }>();
+  await page.route("**/api/jobs/prompt", async (route) => {
+    const request = route.request().postDataJSON() as Record<string, unknown>;
+    submissions.push(request);
+    const index = submissions.length;
+    const id = `chat-sequence-${index}`;
+    const prompt = String(request.prompt);
+    const messages = Array.isArray(request.messages)
+      ? request.messages as Array<{ role: "user" | "assistant"; content: string }>
+      : [];
+    const rendered = [
+      ...messages.map((message) => `${message.role === "user" ? "User" : "Assistant"}: ${message.content}`),
+      `User: ${prompt}`,
+      "Assistant:"
+    ].join("\n");
+    const answer = index === 1 ? "First answer from the model." : "Second answer uses the prior turn.";
+    const result = {
+      ...generatedRun,
+      runId: `chat-sequence-run-${index}`,
+      prompt: rendered,
+      metadata: {
+        ...generatedRun.metadata,
+        generatedContinuation: `${rendered} ${answer}`,
+        promptRunner: {
+          ...generatedRun.metadata.promptRunner,
+          contextMessages: messages,
+          userPrompt: prompt
+        }
+      }
+    };
+    jobs.set(id, { request, result });
+    await route.fulfill({
+      status: 202,
+      json: promptJob(id, request, null, "idle")
+    });
+  });
+  await page.route(/\/api\/jobs\/chat-sequence-\d+\/events$/, async (route) => {
+    const id = new URL(route.request().url()).pathname.split("/").at(-2) ?? "";
+    const job = jobs.get(id);
+    if (!job) {
+      await route.fulfill({ status: 404 });
+      return;
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: "text/event-stream",
+      body: `event: job\ndata: ${JSON.stringify(promptJob(id, job.request, job.result, "ready"))}\n\n`
+    });
+  });
+  return submissions;
+}
+
+function promptJob(
+  id: string,
+  request: Record<string, unknown>,
+  result: typeof generatedRun | null,
+  status: "idle" | "ready"
+) {
+  return {
+    id,
+    kind: "prompt-run",
+    status,
+    stage: status === "ready" ? "complete" : "queued",
+    progress: status === "ready" ? 100 : 0,
+    detail: status === "ready" ? "Analysis ready." : "Waiting for the local model worker.",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    request,
+    result,
+    error: null
+  };
 }
 
 async function runReadyAnalysis(page: Page) {
@@ -319,6 +406,8 @@ test("opens as the minimal Chat interface shown in the reference figures", async
   await expect(page.getByRole("button", { name: "Work" })).toHaveCount(0);
   await expect(page.getByLabel("Preloaded dataset")).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Run analysis" })).toBeDisabled();
+  await page.getByRole("button", { name: "Trace input influence" }).click();
+  await expect(page.getByLabel("Analysis prompt")).toHaveValue(/input tokens most influenced/);
   await expect(page.locator(".home-stats, .home-viz-grid, .home-nla-panel")).toHaveCount(0);
 
   const layout = await page.evaluate(() => ({ viewport: innerWidth, document: document.documentElement.scrollWidth }));
@@ -345,7 +434,32 @@ test("runs the real prompt-job protocol and keeps the conversation above two foc
     model: "sshleifer/tiny-gpt2",
     seed: 0,
     maxNewTokens: 8,
-    temperature: 0
+    temperature: 0,
+    messages: []
+  });
+});
+
+test("sends prior user and assistant turns as real model context", async ({ page }) => {
+  await prepareHome(page);
+  const submissions = await mockReadyPromptSequence(page);
+  await page.goto("/");
+
+  await page.getByLabel("Analysis prompt").fill("First question?");
+  await page.getByLabel("Run analysis").click();
+  await expect(page.locator(".chat-assistant-message")).toContainText("First answer from the model.");
+
+  await page.getByLabel("Analysis prompt").fill("What follows from that?");
+  await page.getByLabel("Run analysis").click();
+  await expect(page.locator(".chat-turn-card")).toHaveCount(2);
+  await expect(page.locator(".chat-assistant-message").last()).toContainText("Second answer uses the prior turn.");
+
+  expect(submissions).toHaveLength(2);
+  expect(submissions[1]).toMatchObject({
+    prompt: "What follows from that?",
+    messages: [
+      { role: "user", content: "First question?" },
+      { role: "assistant", content: "First answer from the model." }
+    ]
   });
 });
 

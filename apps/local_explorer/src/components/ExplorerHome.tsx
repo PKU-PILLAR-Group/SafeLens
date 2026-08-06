@@ -1,11 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   BrainCircuit,
+  GitCompareArrows,
   MessageSquareText,
   PanelLeftOpen,
   Paperclip,
   Play,
   LoaderCircle,
+  ScanSearch,
+  ShieldCheck,
   SquarePen,
   Trash2,
   X
@@ -109,7 +112,7 @@ export function ExplorerHome({
       .filter((record): record is RunRecord & { run: ExplorerRun } => record.run !== null)
       .map((record) => ({
         id: record.key,
-        prompt: record.run.prompt,
+        prompt: userPromptForRun(record.run),
         run: record.run,
         jobId: record.artifactId ?? null,
         status: "ready" as const,
@@ -123,7 +126,7 @@ export function ExplorerHome({
     );
     const turns = conversation ? turnsForConversation(conversation) : [{
       id: record.key,
-      prompt: record.run.prompt,
+      prompt: userPromptForRun(record.run),
       run: record.run,
       jobId: record.artifactId ?? null,
       status: "ready" as const,
@@ -247,11 +250,26 @@ export function ExplorerHome({
               <div>
                 <span><MessageSquareText size={19} /></span>
                 <h1 id="chat-home-title">What would you like to inspect?</h1>
+                <div className="chat-starter-grid" aria-label="Suggested analyses">
+                  <button type="button" onClick={() => setPrompt("Which input tokens most influenced this response?")}>
+                    <ScanSearch size={19} />
+                    <strong>Trace input influence</strong>
+                  </button>
+                  <button type="button" onClick={() => setPrompt("Steer this answer toward safer, more helpful behavior.")}>
+                    <ShieldCheck size={19} />
+                    <strong>Steer toward safety</strong>
+                  </button>
+                  <button type="button" onClick={() => setPrompt("Compare how the model responds to benign and risky requests.")}>
+                    <GitCompareArrows size={19} />
+                    <strong>Compare behaviors</strong>
+                  </button>
+                </div>
               </div>
             </section>
           ) : (
             <TurnList
               turns={turnManager.turns}
+              analysisRuns={visibleRecords.flatMap((record) => record.run ? [record.run] : [])}
               activeTurnId={turnManager.activeTurnId}
               analysisOpen={analysisOpen}
               onRetry={turnManager.retry}
@@ -444,6 +462,15 @@ function conversationModel(run: ExplorerRun) {
   if (!promptRunner || typeof promptRunner !== "object") return null;
   const value = (promptRunner as Record<string, unknown>).model;
   return typeof value === "string" ? value : null;
+}
+
+function userPromptForRun(run: ExplorerRun) {
+  const promptRunner = run.metadata?.promptRunner;
+  if (promptRunner && typeof promptRunner === "object") {
+    const value = (promptRunner as Record<string, unknown>).userPrompt;
+    if (typeof value === "string" && value.trim()) return value;
+  }
+  return run.prompt;
 }
 
 function loadHiddenRunKeys() {

@@ -6,6 +6,7 @@ import { TurnCard, type AnalysisId } from "./TurnCard";
 
 interface TurnListProps {
   turns: TurnView[];
+  analysisRuns: ExplorerRun[];
   activeTurnId: string | null;
   analysisOpen: { turnId: string; mode: AnalysisId } | null;
   onRetry: (turnId: string) => void;
@@ -16,6 +17,7 @@ interface TurnListProps {
 
 export function TurnList({
   turns,
+  analysisRuns,
   activeTurnId,
   analysisOpen,
   onRetry,
@@ -35,6 +37,7 @@ export function TurnList({
         <TurnCard
           key={turn.id}
           turn={turn}
+          analysisRuns={analysisRuns}
           active={turn.id === activeTurnId}
           analysisOpen={analysisOpen?.turnId === turn.id ? analysisOpen.mode : null}
           onRetry={() => onRetry(turn.id)}

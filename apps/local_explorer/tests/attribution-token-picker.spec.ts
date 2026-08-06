@@ -42,6 +42,18 @@ async function prepareHome(page: Page) {
       }
     });
   });
+  await page.route("**/api/tokenize", async (route) => {
+    const request = route.request().postDataJSON() as { modelName: string; text: string };
+    const pieces = request.text.match(/[A-Za-z0-9_]+|[^\sA-Za-z0-9_]/g) ?? [];
+    await route.fulfill({
+      json: {
+        modelName: request.modelName,
+        text: request.text,
+        tokens: pieces.map((text, index) => ({ index, tokenId: 2_000 + index, text })),
+        truncated: false
+      }
+    });
+  });
 }
 
 async function mockReadyPromptJob(page: Page) {

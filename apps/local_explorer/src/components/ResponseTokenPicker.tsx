@@ -1,28 +1,59 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
+
+import { fetchTokenizedResponse, type TokenizedResponse } from "../api/explorerClient";
 
 interface ResponseTokenPickerProps {
+  modelName: string;
   response: string;
   selectedIndex: number;
   disabled?: boolean;
   onSelect: (index: number) => void;
+  onTokensChange?: (tokens: TokenizedResponse["tokens"]) => void;
 }
 
-const TOKEN_SPLIT = /(\s+|[A-Za-z0-9_]+|[^\sA-Za-z0-9_])/g;
-
 export function ResponseTokenPicker({
+  modelName,
   response,
   selectedIndex,
   disabled = false,
-  onSelect
+  onSelect,
+  onTokensChange
 }: ResponseTokenPickerProps) {
-  const [draft, setDraft] = useState(response);
+  const [tokens, setTokens] = useState<TokenizedResponse["tokens"]>([]);
+  const [status, setStatus] = useState<"idle" | "loading" | "ready" | "error">("idle");
 
   useEffect(() => {
-    const timer = window.setTimeout(() => setDraft(response), 150);
-    return () => window.clearTimeout(timer);
-  }, [response]);
-
-  const tokens = useMemo(() => tokenize(draft), [draft]);
+    const cleaned = response.trim();
+    if (!cleaned) {
+      setTokens([]);
+      onTokensChange?.([]);
+      setStatus("idle");
+      return;
+    }
+    setTokens([]);
+    onTokensChange?.([]);
+    setStatus("loading");
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => {
+      void fetchTokenizedResponse(modelName, response, controller.signal)
+        .then((result) => {
+          setTokens(result.tokens);
+          onTokensChange?.(result.tokens);
+          setStatus("ready");
+        })
+        .catch(() => {
+          if (!controller.signal.aborted) {
+            setTokens([]);
+            onTokensChange?.([]);
+            setStatus("error");
+          }
+        });
+    }, 180);
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [modelName, onTokensChange, response]);
 
   useEffect(() => {
     if (tokens.length > 0 && selectedIndex >= tokens.length) {
@@ -31,9 +62,9 @@ export function ResponseTokenPicker({
   }, [onSelect, selectedIndex, tokens.length]);
 
   return (
-    <div className="response-token-picker" aria-label="Attribution target token">
+    <div className="response-token-picker" aria-label="Attribution target token" aria-busy={status === "loading"}>
       <header>
-        <span>Target token</span>
+        <span>Target response token</span>
         {tokens.length > 0 && (
           <button
             type="button"
@@ -44,19 +75,23 @@ export function ResponseTokenPicker({
           </button>
         )}
       </header>
-      {tokens.length > 0 ? (
+      {status === "loading" ? (
+        <div className="response-token-picker-empty" role="status">Tokenizing response...</div>
+      ) : status === "error" ? (
+        <div className="response-token-picker-empty is-error" role="status">Tokenizer unavailable. Check the local model worker.</div>
+      ) : tokens.length > 0 ? (
         <div className="response-token-picker-list" role="group" aria-label="Response tokens">
           {tokens.map((token, index) => (
             <button
-              key={`${index}:${token}`}
+              key={`${index}:${token.tokenId}`}
               type="button"
               className={index === selectedIndex ? "active" : ""}
               aria-pressed={index === selectedIndex}
               disabled={disabled}
-              title={`Target token ${index} · ${token}`}
+              title={`Target token ${index} · ${token.text || "space"} · ID ${token.tokenId}`}
               onClick={() => onSelect(index)}
             >
-              {token}
+              {token.text || "space"}
               <sub>T{index}</sub>
             </button>
           ))}
@@ -68,9 +103,4 @@ export function ResponseTokenPicker({
       )}
     </div>
   );
-}
-
-function tokenize(text: string): string[] {
-  if (!text.trim()) return [];
-  return text.split(TOKEN_SPLIT).filter((part) => part.length > 0 && !/^\s+$/.test(part));
 }
