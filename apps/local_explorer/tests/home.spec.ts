@@ -265,6 +265,40 @@ async function prepareHome(page: Page) {
       }
     });
   });
+  await page.route("**/api/patching/preflight", async (route) => {
+    const request = route.request().postDataJSON() as {
+      cleanPrompt: string;
+      corruptedPrompt: string;
+      cleanTokenIds: number[];
+      targetTokenId: number;
+    };
+    const differs = request.cleanPrompt !== request.corruptedPrompt;
+    const changedPositions = differs ? [Math.min(2, request.cleanTokenIds.length - 1)] : [];
+    await route.fulfill({
+      json: {
+        modelAllowed: true,
+        promptsDiffer: differs,
+        tokenCountMatches: true,
+        targetTokenValid: true,
+        componentSupported: true,
+        cleanTokenCount: request.cleanTokenIds.length,
+        corruptedTokenCount: request.cleanTokenIds.length,
+        changedPositions,
+        targetTokenId: request.targetTokenId,
+        targetTokenText: " target",
+        corruptedTokens: generatedRun.tokens.map((token, index) => ({
+          index,
+          tokenId: token.tokenId + (changedPositions.includes(index) ? 1 : 0),
+          text: changedPositions.includes(index) ? " changed" : token.text,
+          changed: changedPositions.includes(index)
+        })),
+        canSubmit: differs,
+        reason: differs
+          ? "Prompts are positionally aligned and ready for causal activation patching."
+          : "Clean and corrupted prompts must differ."
+      }
+    });
+  });
 }
 
 async function mockReadyPromptJob(page: Page, result: ExplorerRun = generatedRun) {
@@ -601,9 +635,106 @@ async function mockReadyJLensJob(page: Page) {
   return () => submitted;
 }
 
+async function mockReadyPatchingJob(page: Page) {
+  let submitted: Record<string, unknown> | undefined;
+  await page.route("**/api/jobs/patching", async (route) => {
+    submitted = route.request().postDataJSON();
+    const request = patchingRequest(submitted);
+    await route.fulfill({
+      status: 202,
+      json: derivedJob("patching-home-job", "patching", request, null, "idle")
+    });
+  });
+  await page.route("**/api/jobs/patching-home-job/events", async (route) => {
+    const request = patchingRequest(submitted ?? {});
+    const layers = request.layers as number[];
+    const positions = request.positions as number[];
+    const corruptedTokens = generatedRun.tokens.map((token, index) => ({
+      index,
+      tokenId: token.tokenId + (positions.includes(index) ? 1 : 0),
+      text: positions.includes(index) ? " changed" : token.text,
+      changed: positions.includes(index)
+    }));
+    const patchingRun: ExplorerRun = {
+      ...generatedRun,
+      runId: "chat-patching-derived",
+      metadata: {
+        ...generatedRun.metadata,
+        parentRun: { runId: generatedRun.runId, sampleId: generatedRun.sampleId }
+      },
+      patching: {
+        cleanPrompt: generatedRun.prompt,
+        corruptedPrompt: String(request.corruptedPrompt),
+        component: request.component as "resid_post" | "attn_out" | "z" | "mlp_out",
+        ...(request.head === undefined ? {} : { head: Number(request.head) }),
+        targetTokenId: Number(request.targetTokenId),
+        targetTokenText: " target",
+        cleanScore: 2.4,
+        corruptedScore: 0.4,
+        denominator: 2,
+        layers,
+        positions,
+        corruptedTokens,
+        cells: layers.flatMap((layer, layerIndex) => positions.map((position, positionIndex) => ({
+          layer,
+          tokenIndex: position,
+          patchedScore: 1.8 - layerIndex * 0.1 - positionIndex * 0.05,
+          causalEffect: 1.4 - layerIndex * 0.1 - positionIndex * 0.05,
+          recoveryPercentage: 70 - layerIndex * 5 - positionIndex * 2.5,
+          sourceKey: `layer_${layer}.${request.component}`
+        }))),
+        sourceRun: { runId: generatedRun.runId, sampleId: generatedRun.sampleId },
+        sourceKey: `activation_patching.${request.component}`
+      }
+    };
+    await route.fulfill({
+      status: 200,
+      contentType: "text/event-stream",
+      body: `event: job\ndata: ${JSON.stringify(derivedJob("patching-home-job", "patching", request, patchingRun, "ready"))}\n\n`
+    });
+  });
+  return () => submitted;
+}
+
+function patchingRequest(submitted: Record<string, unknown>) {
+  return {
+    corruptedPrompt: submitted.corruptedPrompt,
+    component: submitted.component,
+    layers: submitted.layers ?? [],
+    positions: submitted.positions ?? [],
+    ...(submitted.head === undefined ? {} : { head: submitted.head }),
+    targetTokenId: submitted.targetTokenId,
+    sourceRun: {
+      runId: generatedRun.runId,
+      sampleId: generatedRun.sampleId,
+      modelName: generatedRun.modelName
+    },
+    preflight: {
+      modelAllowed: true,
+      promptsDiffer: true,
+      tokenCountMatches: true,
+      targetTokenValid: true,
+      componentSupported: true,
+      cleanTokenCount: generatedRun.tokens.length,
+      corruptedTokenCount: generatedRun.tokens.length,
+      changedPositions: [2],
+      targetTokenId: submitted.targetTokenId,
+      targetTokenText: " target",
+      corruptedTokens: generatedRun.tokens.map((token, index) => ({
+        index,
+        tokenId: token.tokenId + (index === 2 ? 1 : 0),
+        text: index === 2 ? " changed" : token.text,
+        changed: index === 2
+      })),
+      canSubmit: true,
+      reason: "Prompts are positionally aligned and ready for causal activation patching."
+    }
+  };
+}
+
 function derivedJob(
   id: string,
-  kind: "attribution" | "intervention" | "nla" | "jlens",
+  kind: "attribution" | "intervention" | "patching" | "nla" | "jlens",
   request: Record<string, unknown>,
   result: unknown,
   status: "idle" | "ready"
@@ -629,7 +760,7 @@ test("opens as the minimal Chat interface shown in the reference figures", async
 
   await expect(page.getByRole("heading", { name: "What would you like to inspect?" })).toBeVisible();
   await expect(page.getByLabel("Analysis prompt")).toBeVisible();
-  await expect(page.getByLabel("Analysis model")).toHaveValue("sshleifer/tiny-gpt2");
+  await expect(page.getByLabel("Analysis model")).toHaveValue("Qwen/Qwen2.5-7B-Instruct");
   await expect(page.getByLabel("Maximum new tokens")).toHaveValue("128");
   await expect(page.getByRole("complementary", { name: "Chat history" })).toBeVisible();
   await expect(page.getByLabel("Conversation history").locator(".chat-history-row")).toHaveCount(1);
@@ -652,7 +783,8 @@ test("runs the real prompt-job protocol and keeps the conversation above two foc
 
   await expect(page.locator(".chat-user-message")).toHaveText(generatedRun.prompt);
   await expect(page.locator(".chat-assistant-message")).toContainText("strongest residual alignment");
-  await expect(page.locator(".chat-turn-explore-bar > button")).toHaveCount(4);
+  await expect(page.locator(".chat-turn-explore-bar > button")).toHaveCount(5);
+  await expect(page.getByRole("button", { name: /Patch/ })).toBeVisible();
   await expect(page.getByRole("button", { name: /Steer/ })).toBeVisible();
   await expect(page.getByRole("button", { name: /Attribute/ })).toBeVisible();
   await expect(page.getByRole("button", { name: /Explain/ })).toBeVisible();
@@ -663,7 +795,7 @@ test("runs the real prompt-job protocol and keeps the conversation above two foc
   expect(submitted()).toEqual({
     prompt: generatedRun.prompt,
     template: "chat",
-    model: "sshleifer/tiny-gpt2",
+    model: "Qwen/Qwen2.5-7B-Instruct",
     seed: 0,
     maxNewTokens: 192,
     temperature: 0,
@@ -801,12 +933,143 @@ test("visualizes real attention heads and updates the selected layer, head, and 
   })).toBeGreaterThan(0);
 });
 
-test("keeps Explanation and Attention usable on mobile", async ({ page }) => {
+test("hydrates every available attention head for a restored workspace turn", async ({ page }) => {
+  const runId = "workspace-attention-run";
+  const sampleId = "workspace-attention-sample";
+  const artifactId = "workspace-attention-artifact";
+  const prompt = "Inspect every attention head in this restored run.";
+  const tokenCount = generatedRun.tokens.length;
+  const layer = generatedRun.layers[generatedRun.layers.length - 1];
+  const sourceHeads = generatedRun.attentionHeads.filter((head) => head.layer === layer);
+  const heads = Array.from({ length: 4 }, (_, index) => ({
+    ...sourceHeads[index % sourceHeads.length],
+    id: `L${layer}H${index}`,
+    head: index,
+    chunk: {
+      destinationStart: 0,
+      destinationEnd: tokenCount,
+      sourceStart: 0,
+      sourceEnd: tokenCount
+    }
+  }));
+  let attentionRequests = 0;
+
+  await page.route(/\/api\/runs(?:\?.*)?$/, async (route) => {
+    await route.fulfill({
+      json: {
+        schemaVersion: "1.0",
+        source: "local-workspace",
+        rootName: "test-workspace",
+        diagnostics: [],
+        runs: [{
+          runId,
+          sampleId,
+          modelName: generatedRun.modelName,
+          modelSource: generatedRun.modelSource,
+          tokenCount,
+          layerCount: generatedRun.layers.length,
+          artifactId,
+          sourceName: "generated/prompt-workspace-attention.explorer.json",
+          modifiedAt: "2026-08-12T12:00:00Z",
+          sizeBytes: 8_192,
+          promptPreview: prompt,
+          parentRun: null,
+          chunkProtocol: "safelens-chunks-v1"
+        }]
+      }
+    });
+  });
+  await page.route(`**/api/runs/${runId}/samples/${sampleId}/metadata`, async (route) => {
+    await route.fulfill({
+      json: {
+        schemaVersion: "1.0",
+        protocol: "safelens-chunks-v1",
+        runId,
+        sampleId,
+        artifactId,
+        version: "test-version",
+        base: {
+          runId,
+          sampleId,
+          modelName: generatedRun.modelName,
+          modelSource: generatedRun.modelSource,
+          prompt,
+          tokens: generatedRun.tokens,
+          layers: generatedRun.layers,
+          nlaCompatibility: generatedRun.nlaCompatibility,
+          metricProvenance: generatedRun.metricProvenance,
+          metadata: {
+            ...generatedRun.metadata,
+            generatedContinuation: `${prompt} Restored response.`,
+            promptRunner: { ...generatedRun.metadata?.promptRunner, userPrompt: prompt },
+            attentionHeadCoverage: {
+              complete: true,
+              availableHeadCount: 8,
+              storedHeadCount: 8,
+              availableByLayer: { "0": 4, "1": 4 },
+              storedByLayer: { "0": 4, "1": 4 }
+            }
+          }
+        },
+        chunks: [
+          { component: "attentionHeads", itemCount: 8, rangeAxis: "token-square", layerFilter: true, selectorFilter: false },
+          { component: "residualCells", itemCount: 0, rangeAxis: "token", layerFilter: false, selectorFilter: false },
+          { component: "logitLens", itemCount: 0, rangeAxis: "token", layerFilter: false, selectorFilter: false }
+        ]
+      }
+    });
+  });
+  await page.route(`**/api/runs/${runId}/samples/${sampleId}/chunks/*`, async (route) => {
+    const url = new URL(route.request().url());
+    const component = url.pathname.split("/").at(-1);
+    if (component === "attentionHeads") attentionRequests += 1;
+    await route.fulfill({
+      json: {
+        schemaVersion: "1.0",
+        protocol: "safelens-chunks-v1",
+        runId,
+        sampleId,
+        artifactId,
+        version: "test-version",
+        component,
+        tokenRange: [0, tokenCount],
+        sourceRange: component === "attentionHeads" ? [0, tokenCount] : null,
+        layer: component === "attentionHeads" ? layer : null,
+        selector: null,
+        data: component === "attentionHeads" ? heads : []
+      }
+    });
+  });
+  await page.route("**/api/prompt/options", async (route) => {
+    await route.fulfill({ json: { models: [generatedRun.modelName], templates: ["plain", "chat"], maxNewTokens: 512 } });
+  });
+
+  await page.goto("/");
+  await page.locator(".chat-history-row").filter({ hasText: "Inspect every attention" }).locator(".chat-history-open").click();
+  await expect(page.locator(".chat-user-message")).toHaveText(prompt);
+  await page.getByRole("button", { name: /Attention/ }).click();
+
+  await expect(page.locator(".chat-head-overview > header > span")).toHaveText("4 / 4 heads · complete");
+  await expect(page.getByLabel("Attention head", { exact: true }).locator("option")).toHaveCount(4);
+  await expect(page.getByLabel("Attention head choices").getByRole("radio")).toHaveCount(4);
+  expect(attentionRequests).toBe(1);
+});
+
+test("keeps Patching, Explanation, and Attention usable on mobile", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await prepareHome(page);
   await mockReadyPromptJob(page);
+  await mockReadyPatchingJob(page);
   await page.goto("/");
   await runReadyAnalysis(page);
+
+  await page.getByRole("button", { name: /Patch/ }).click();
+  await page.getByLabel("Corrupt patching input").fill("Corrupted aligned prompt");
+  const runPatches = page.getByRole("button", { name: /Run \d+ patches/ });
+  await expect(runPatches).toBeEnabled();
+  await runPatches.click();
+  await expect(page.getByLabel("Patching recovery matrix")).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
 
   await page.getByRole("button", { name: /Explain/ }).click();
   await page.getByRole("tab", { name: /J-Lens/ }).click();
@@ -880,6 +1143,69 @@ test("runs steering from Chat and compares original with steered generation", as
     seed: 0,
     maxNewTokens: 16,
     temperature: 0
+  });
+});
+
+test("runs aligned activation patching from Chat and renders causal recovery", async ({ page }) => {
+  await prepareHome(page);
+  await mockReadyPromptJob(page);
+  const submitted = await mockReadyPatchingJob(page);
+  await page.goto("/");
+  await runReadyAnalysis(page);
+
+  await page.getByRole("button", { name: /Patch/ }).click();
+  await expect(page.getByRole("heading", { name: "Activation patching" })).toBeVisible();
+  await expect(page.getByLabel("Clean patching input")).toHaveValue(generatedRun.prompt);
+  await expect(page.getByRole("button", { name: /Run .*patch/ })).toBeDisabled();
+
+  await page.getByLabel("Corrupt patching input").fill("Corrupted aligned prompt");
+  await expect(page.getByText("Aligned", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: /Patch token 2:/ })).toHaveAttribute("aria-pressed", "true");
+  const runPatches = page.getByRole("button", { name: /Run \d+ patches/ });
+  await expect(runPatches).toBeEnabled();
+  await runPatches.click();
+
+  const result = page.getByLabel("Activation patching result");
+  await expect(result).toContainText("Clean logit");
+  await expect(result).toContainText("Corrupt logit");
+  await expect(result).toContainText("70.0%");
+  await expect(page.getByLabel("Patching recovery matrix")).toBeVisible();
+  await expect(page.locator(".chat-history-row")).toHaveCount(2);
+  expect(submitted()).toMatchObject({
+    corruptedPrompt: "Corrupted aligned prompt",
+    component: "resid_post",
+    positions: [2]
+  });
+  expect((submitted()?.layers as number[])).toHaveLength(generatedRun.layers.length);
+});
+
+test("selects one layer and one head for attention-head patching", async ({ page }) => {
+  await prepareHome(page);
+  await mockReadyPromptJob(page);
+  const submitted = await mockReadyPatchingJob(page);
+  await page.goto("/");
+  await runReadyAnalysis(page);
+
+  await page.getByRole("button", { name: /Patch/ }).click();
+  await page.getByRole("button", { name: "Attention head", exact: true }).click();
+  const headPicker = page.getByLabel("Patching attention head");
+  await expect(headPicker).toBeVisible();
+  await expect(headPicker.locator("option")).toHaveCount(2);
+  await headPicker.selectOption("1");
+
+  const layers = page.getByLabel("Patching layers").getByRole("button");
+  await layers.nth(0).click();
+  await expect(layers.nth(0)).toHaveAttribute("aria-pressed", "true");
+  await expect(layers.nth(1)).toHaveAttribute("aria-pressed", "false");
+
+  await page.getByLabel("Corrupt patching input").fill("Corrupted aligned prompt");
+  await page.getByRole("button", { name: /Run \d+ patch/ }).click();
+  await expect(page.getByLabel("Activation patching result")).toContainText("L0H1");
+  expect(submitted()).toMatchObject({
+    component: "z",
+    head: 1,
+    layers: [0],
+    positions: [2]
   });
 });
 

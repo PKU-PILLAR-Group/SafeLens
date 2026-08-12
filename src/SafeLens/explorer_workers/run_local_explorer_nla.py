@@ -49,13 +49,17 @@ def main() -> None:
     token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
     nla_cache_dir = ".cache/safelens/nla"
     runtime_profile, local_files_only = _localize_nla_profile(profile, nla_cache_dir)
+    requested_revision = str(request["revision"])
+    actor_revision = profile.av_revision or requested_revision
+    reconstructor_revision = profile.ar_revision or requested_revision
     client = NLAClient.from_profile(
         runtime_profile,
         load_reconstructor=True,
         cache_dir=nla_cache_dir,
         local_files_only=local_files_only,
         token=token,
-        revision=request["revision"],
+        revision=actor_revision,
+        reconstructor_revision=reconstructor_revision,
         device=os.environ.get("SAFELENS_EXPLORER_JOB_DEVICE", "cpu"),
         dtype=os.environ.get("SAFELENS_EXPLORER_JOB_DTYPE", "auto"),
         trust_remote_code=False,
@@ -75,7 +79,7 @@ def main() -> None:
         [result.to_dict() for result in results],
         profile=profile,
         positions=[int(position) for position in request["positions"]],
-        revision=str(request["revision"]),
+        revision=requested_revision,
         actor_checkpoint=client.verbalizer.checkpoint,
         reconstructor_checkpoint=(
             client.reconstructor.checkpoint if client.reconstructor is not None else None

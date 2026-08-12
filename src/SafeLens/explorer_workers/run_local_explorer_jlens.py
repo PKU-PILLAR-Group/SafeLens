@@ -40,7 +40,10 @@ def _run_jlens(run: dict[str, Any], request: dict[str, Any], *, run_id: str) -> 
         "float32" if device == "cpu" else "bfloat16",
     )
     dtype = getattr(torch, dtype_name, "auto") if dtype_name != "auto" else "auto"
-    cache_dir = ".cache/safelens/local-explorer-real-flow"
+    cache_dir = os.environ.get(
+        "SAFELENS_EXPLORER_MODEL_CACHE",
+        ".cache/safelens/local-explorer-real-flow",
+    )
     local_snapshot = _complete_hf_snapshot(model_name, cache_dir)
     model_source = str(local_snapshot) if local_snapshot is not None else model_name
     tokenizer = AutoTokenizer.from_pretrained(
@@ -59,10 +62,15 @@ def _run_jlens(run: dict[str, Any], request: dict[str, Any], *, run_id: str) -> 
     )
     model.to(device)
     lens_model = jlens.from_hf(model, tokenizer, force_bos=False)
-    lens = jlens.JacobianLens.from_pretrained(
+    lens = _load_lens(
+        jlens,
         str(request["lensSource"]),
         filename=str(request["filename"]),
         revision=str(request["revision"]),
+        cache_dir=os.environ.get(
+            "SAFELENS_EXPLORER_JLENS_CACHE",
+            ".cache/safelens/jlens",
+        ),
     )
     layer = int(request["layer"])
     position = int(request["position"])
@@ -153,14 +161,87 @@ def _complete_hf_snapshot(model_id: str, cache_dir: str) -> Path | None:
         or not (snapshot / "tokenizer_config.json").is_file()
     ):
         return None
-    weight_files = list(snapshot.glob("*.safetensors")) + list(
-        snapshot.glob("pytorch_model*.bin")
-    )
+    weight_files: list[Path] = []
+    for index_name in ("model.safetensors.index.json", "pytorch_model.bin.index.json"):
+        index_path = snapshot / index_name
+        if not index_path.is_file():
+            continue
+        try:
+            index = json.loads(index_path.read_text(encoding="utf-8"))
+            filenames = set(index["weight_map"].values())
+        except (json.JSONDecodeError, KeyError, TypeError, AttributeError):
+            return None
+        if not filenames or not all(isinstance(name, str) and name for name in filenames):
+            return None
+        weight_files.extend(snapshot / name for name in sorted(filenames))
+    if not weight_files:
+        weight_files = list(snapshot.glob("*.safetensors")) + list(
+            snapshot.glob("pytorch_model*.bin")
+        )
     if not weight_files or not all(
         path.is_file() and path.stat().st_size > 0 for path in weight_files
     ):
         return None
     return snapshot
+
+
+def _load_lens(
+    jlens: Any,
+    source: str,
+    *,
+    filename: str,
+    revision: str,
+    cache_dir: str,
+) -> Any:
+    source_path = Path(source).expanduser()
+    if source_path.is_file() or source_path.is_dir():
+        return jlens.JacobianLens.from_pretrained(
+            str(source_path),
+            filename=filename,
+            revision=revision,
+        )
+
+    cached_checkpoint = _cached_lens_checkpoint(
+        source,
+        filename=filename,
+        revision=revision,
+        cache_dir=cache_dir,
+    )
+    if cached_checkpoint is not None:
+        return jlens.JacobianLens.load(str(cached_checkpoint))
+
+    from huggingface_hub import snapshot_download
+
+    snapshot = snapshot_download(
+        source,
+        allow_patterns=[filename],
+        revision=revision,
+        cache_dir=cache_dir,
+    )
+    checkpoint = Path(snapshot) / filename
+    if not checkpoint.is_file() or checkpoint.stat().st_size == 0:
+        raise FileNotFoundError(
+            f"J-Lens checkpoint {filename!r} was not downloaded from {source!r}."
+        )
+    return jlens.JacobianLens.load(str(checkpoint))
+
+
+def _cached_lens_checkpoint(
+    source: str,
+    *,
+    filename: str,
+    revision: str,
+    cache_dir: str,
+) -> Path | None:
+    repository = Path(cache_dir) / f"models--{source.replace('/', '--')}"
+    snapshot_revision = revision
+    reference = repository / "refs" / revision
+    if reference.is_file():
+        snapshot_revision = reference.read_text(encoding="utf-8").strip()
+    checkpoint = repository / "snapshots" / snapshot_revision / filename
+    if checkpoint.is_file() and checkpoint.stat().st_size > 0:
+        return checkpoint
+    return None
 
 
 def _result_row(

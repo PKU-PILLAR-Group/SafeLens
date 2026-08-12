@@ -2,6 +2,7 @@ import {
   BrainCircuit,
   CheckCircle2,
   CircleStop,
+  GitCompareArrows,
   LoaderCircle,
   Network,
   RefreshCw,
@@ -10,10 +11,11 @@ import {
   Sparkles
 } from "lucide-react";
 
+import type { RemoteRunSummary } from "../api/explorerClient";
 import type { ExplorerRun } from "../types";
 import { ChatAnalysisWorkbench } from "./ChatAnalysisWorkbench";
 
-export type AnalysisId = "steering" | "attribution" | "explanation" | "attention";
+export type AnalysisId = "steering" | "attribution" | "patching" | "explanation" | "attention";
 
 export interface TurnView {
   id: string;
@@ -27,17 +29,19 @@ export interface TurnView {
 
 interface TurnCardProps {
   turn: TurnView;
+  remoteSummary?: RemoteRunSummary;
   analysisRuns: ExplorerRun[];
   active: boolean;
   analysisOpen: AnalysisId | null;
   onRetry: () => void;
   onCancel: () => void;
   onToggleAnalysis: (mode: AnalysisId) => void;
-  onRunReady: (run: ExplorerRun, job: { id: string; kind: "prompt-run" | "attribution" | "intervention" | "nla" | "jlens" }) => void;
+  onRunReady: (run: ExplorerRun, job: { id: string; kind: "prompt-run" | "attribution" | "intervention" | "patching" | "nla" | "jlens" }) => void;
 }
 
 export function TurnCard({
   turn,
+  remoteSummary,
   analysisRuns,
   active,
   analysisOpen,
@@ -57,6 +61,7 @@ export function TurnCard({
         if (analysisOpen === "attribution") return candidate.attributionMethods.some(
               (method) => method.id === "integrated_gradients" && method.available
             );
+        if (analysisOpen === "patching") return Boolean(candidate.patching);
         if (analysisOpen === "explanation") {
           return candidate.nla.some((row) => row.status === "available") || candidate.jLens.length > 0;
         }
@@ -99,6 +104,14 @@ export function TurnCard({
           <div className="chat-turn-explore-bar" aria-label="Explore this run">
             <button
               type="button"
+              className={analysisOpen === "patching" ? "active" : ""}
+              aria-pressed={analysisOpen === "patching"}
+              onClick={() => onToggleAnalysis("patching")}
+            >
+              <GitCompareArrows size={16} /> Patch
+            </button>
+            <button
+              type="button"
               className={analysisOpen === "steering" ? "active" : ""}
               aria-pressed={analysisOpen === "steering"}
               onClick={() => onToggleAnalysis("steering")}
@@ -136,6 +149,7 @@ export function TurnCard({
                 key={`${turn.run.runId}:${turn.run.sampleId}:${analysisOpen}`}
                 mode={analysisOpen}
                 run={turn.run}
+                remoteSummary={remoteSummary}
                 savedRun={savedRun}
                 suggestionQuery={turn.prompt}
                 onRunReady={onRunReady}

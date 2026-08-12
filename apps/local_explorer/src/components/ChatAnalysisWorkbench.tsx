@@ -14,41 +14,290 @@ import {
 
 import {
   fetchInterventionPreflight,
+  fetchPatchingPreflight,
+  type ActivationComponent,
   type AttributionJob,
   type AttributionRunInput,
   type InterventionJob,
   type InterventionPreflight,
   type JLensJob,
   type NLAJob,
-  type PatchingComponent
+  type PatchingComponent,
+  type PatchingJob,
+  type PatchingPreflight,
+  type RemoteRunSummary
 } from "../api/explorerClient";
 import { useAttributionRunner } from "../state/useAttributionRunner";
 import { useInterventionRunner } from "../state/useInterventionRunner";
-import type { AttributionMethod, ExplorerRun, InterventionExperiment } from "../types";
+import { usePatchingRunner } from "../state/usePatchingRunner";
+import type {
+  AttributionMethod,
+  ExplorerRun,
+  InterventionExperiment,
+  PatchingCell,
+  PatchingExperiment
+} from "../types";
 import { ChatAttentionWorkbench } from "./ChatAttentionWorkbench";
 import { ChatExplanationWorkbench } from "./ChatExplanationWorkbench";
 import { PresetSuggestTextarea } from "./PresetSuggestTextarea";
 import { ResponseTokenPicker } from "./ResponseTokenPicker";
 
 interface ChatAnalysisWorkbenchProps {
-  mode: "steering" | "attribution" | "explanation" | "attention";
+  mode: "steering" | "attribution" | "patching" | "explanation" | "attention";
   run: ExplorerRun;
+  remoteSummary?: RemoteRunSummary;
   savedRun?: ExplorerRun;
   suggestionQuery?: string;
-  onRunReady: (run: ExplorerRun, job: AttributionJob | InterventionJob | NLAJob | JLensJob) => void;
+  onRunReady: (run: ExplorerRun, job: AttributionJob | InterventionJob | PatchingJob | NLAJob | JLensJob) => void;
 }
 
-export function ChatAnalysisWorkbench({ mode, run, savedRun, suggestionQuery, onRunReady }: ChatAnalysisWorkbenchProps) {
+export function ChatAnalysisWorkbench({ mode, run, remoteSummary, savedRun, suggestionQuery, onRunReady }: ChatAnalysisWorkbenchProps) {
   if (mode === "steering") {
     return <SteeringWorkbench run={run} savedRun={savedRun} suggestionQuery={suggestionQuery} onRunReady={onRunReady} />;
   }
   if (mode === "attribution") {
     return <AttributionWorkbench run={run} savedRun={savedRun} onRunReady={onRunReady} />;
   }
+  if (mode === "patching") {
+    return <PatchingWorkbench run={run} savedRun={savedRun} onRunReady={onRunReady} />;
+  }
   if (mode === "explanation") {
     return <ChatExplanationWorkbench run={run} savedRun={savedRun} onRunReady={onRunReady} />;
   }
-  return <ChatAttentionWorkbench run={run} />;
+  return <ChatAttentionWorkbench run={run} remoteSummary={remoteSummary} />;
+}
+
+function PatchingWorkbench({
+  run,
+  savedRun,
+  onRunReady
+}: Omit<ChatAnalysisWorkbenchProps, "mode">) {
+  const prior = savedRun?.patching ?? run.patching;
+  const [corruptedPrompt, setCorruptedPrompt] = useState(prior?.corruptedPrompt ?? run.prompt);
+  const [component, setComponent] = useState<PatchingComponent>(prior?.component ?? "resid_post");
+  const [layers, setLayers] = useState<number[]>(prior?.layers ?? defaultPatchingLayers(run.layers));
+  const [head, setHead] = useState(prior?.head ?? 0);
+  const [positions, setPositions] = useState<number[]>(prior?.positions ?? []);
+  const targetOptions = useMemo(() => steeringTargetOptions(run), [run]);
+  const [targetTokenId, setTargetTokenId] = useState(
+    prior?.targetTokenId ?? targetOptions[0]?.tokenId ?? 0
+  );
+  const [preflight, setPreflight] = useState<PatchingPreflight | null>(null);
+  const [preflightError, setPreflightError] = useState<string | null>(null);
+  const [result, setResult] = useState<ExplorerRun | null>(
+    savedRun?.patching ? savedRun : prior ? run : null
+  );
+  const sourceTokenIds = useMemo(() => run.tokens.map((token) => token.tokenId), [run.tokens]);
+
+  const handleReady = useCallback((derived: ExplorerRun, job: PatchingJob) => {
+    setResult(derived);
+    onRunReady(derived, job);
+  }, [onRunReady]);
+  const runner = usePatchingRunner(handleReady);
+  const running = runner.submitting || runner.job?.status === "idle" || runner.job?.status === "loading";
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setPreflight(null);
+    setPreflightError(null);
+    const timer = window.setTimeout(() => {
+      void fetchPatchingPreflight({
+        modelName: run.modelName,
+        cleanPrompt: run.prompt,
+        corruptedPrompt,
+        cleanTokenIds: sourceTokenIds,
+        layers: run.layers,
+        component,
+        targetTokenId
+      }, controller.signal).then((next) => {
+        setPreflight(next);
+        setPositions((current) => {
+          const valid = current.filter((position) => position < next.cleanTokenCount).slice(0, 8);
+          return valid.length > 0 ? valid : next.changedPositions.slice(0, 8);
+        });
+      }).catch((error) => {
+        if (!controller.signal.aborted) {
+          setPreflightError(error instanceof Error ? error.message : "Patching preflight failed.");
+        }
+      });
+    }, 260);
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [component, corruptedPrompt, run.layers, run.modelName, run.prompt, sourceTokenIds, targetTokenId]);
+
+  const patchCount = layers.length * positions.length;
+  const headCount = attentionHeadCount(run, layers[0] ?? run.layers[0] ?? 0);
+  const canRun = Boolean(preflight?.canSubmit && patchCount > 0 && patchCount <= 64 && !running);
+
+  useEffect(() => {
+    setHead((current) => Math.min(current, Math.max(0, headCount - 1)));
+  }, [headCount]);
+
+  function toggleLayer(layer: number) {
+    if (component === "z") {
+      setLayers([layer]);
+      return;
+    }
+    setLayers((current) => current.includes(layer)
+      ? current.length === 1 ? current : current.filter((item) => item !== layer)
+      : current.length >= 8 ? current : [...current, layer].sort((left, right) => left - right));
+  }
+
+  function selectComponent(next: PatchingComponent) {
+    setComponent(next);
+    if (next === "z") setLayers((current) => [current[0] ?? run.layers[0] ?? 0]);
+  }
+
+  function togglePosition(position: number) {
+    setPositions((current) => current.includes(position)
+      ? current.length === 1 ? current : current.filter((item) => item !== position)
+      : current.length >= 8 ? current : [...current, position].sort((left, right) => left - right));
+  }
+
+  function submit() {
+    if (!canRun) return;
+    setResult(null);
+    void runner.submit({
+      run,
+      corruptedPrompt,
+      component,
+      layers,
+      positions,
+      ...(component === "z" ? { head } : {}),
+      targetTokenId
+    });
+  }
+
+  return (
+    <section className="chat-analysis-workbench chat-patching-workbench" aria-label="Activation patching workbench">
+      <header className="chat-workbench-heading">
+        <span><GitCompareArrows size={17} /></span>
+        <div>
+          <h2>Activation patching</h2>
+          <p>Clean activation replacement</p>
+        </div>
+        <StatusDot ready={Boolean(preflight?.canSubmit)} pending={!preflight && !preflightError} />
+      </header>
+
+      <div className="chat-patching-prompts">
+        <label className="is-clean">
+          <span>Clean <small>current run</small></span>
+          <textarea aria-label="Clean patching input" rows={4} value={run.prompt} readOnly />
+        </label>
+        <label className="is-corrupt">
+          <span>Corrupt <small>editable</small></span>
+          <textarea
+            aria-label="Corrupt patching input"
+            rows={4}
+            value={corruptedPrompt}
+            disabled={running}
+            aria-invalid={preflight && !preflight.canSubmit ? true : undefined}
+            onChange={(event) => setCorruptedPrompt(event.target.value)}
+          />
+        </label>
+      </div>
+
+      <div className="chat-patching-controls">
+        <fieldset>
+          <legend>Activation site</legend>
+          <div role="group" aria-label="Patching activation site">
+            {(["resid_post", "attn_out", "z", "mlp_out"] as const).map((item) => (
+              <button
+                type="button"
+                key={item}
+                className={component === item ? "active" : ""}
+                aria-pressed={component === item}
+                disabled={running}
+                onClick={() => selectComponent(item)}
+              >{patchingComponentLabel(item)}</button>
+            ))}
+          </div>
+        </fieldset>
+        {component === "z" && (
+          <label>
+            <span>Attention head</span>
+            <select aria-label="Patching attention head" value={head} disabled={running} onChange={(event) => setHead(Number(event.target.value))}>
+              {Array.from({ length: headCount }, (_, index) => <option key={index} value={index}>H{index}</option>)}
+            </select>
+          </label>
+        )}
+        <label>
+          <span>Tracked output token</span>
+          <select aria-label="Patching tracked output token" value={targetTokenId} disabled={running} onChange={(event) => setTargetTokenId(Number(event.target.value))}>
+            {targetOptions.map((option) => (
+              <option key={option.tokenId} value={option.tokenId}>{visibleToken(option.tokenText)} · #{option.tokenId}</option>
+            ))}
+          </select>
+        </label>
+        <div className={`chat-patching-alignment ${preflight?.canSubmit ? "ready" : "blocked"}`} aria-live="polite">
+          <strong>{preflight?.canSubmit ? "Aligned" : preflight ? "Needs alignment" : "Checking"}</strong>
+          <span>{preflight ? `${preflight.cleanTokenCount} clean · ${preflight.corruptedTokenCount} corrupt · ${preflight.changedPositions.length} changed` : "Tokenizing both inputs"}</span>
+        </div>
+      </div>
+
+      {preflight?.corruptedTokens.length ? (
+        <div className="chat-patching-positions">
+          <header>
+            <span>Patch positions</span>
+            <small>{positions.length}/8 selected</small>
+          </header>
+          <div role="group" aria-label="Patching token positions">
+            {preflight.corruptedTokens.map((token) => (
+              <button
+                type="button"
+                key={token.index}
+                className={`${token.changed ? "changed" : ""} ${positions.includes(token.index) ? "active" : ""}`}
+                aria-label={`Patch token ${token.index}: ${visibleToken(run.tokens[token.index]?.text ?? "")} to ${visibleToken(token.text)}`}
+                aria-pressed={positions.includes(token.index)}
+                disabled={running || !preflight.tokenCountMatches || (!positions.includes(token.index) && positions.length >= 8)}
+                onClick={() => togglePosition(token.index)}
+              >
+                <small>T{token.index}</small>
+                <span>{visibleToken(run.tokens[token.index]?.text ?? "")}</span>
+                <ArrowRight size={12} />
+                <b>{visibleToken(token.text)}</b>
+              </button>
+            ))}
+          </div>
+        </div>
+      ) : null}
+
+      <div className="chat-patching-layers">
+        <header>
+          <span>Layers</span>
+          <small>{component === "z" ? `H${head} · one layer` : `${layers.length}/8 selected`} · {patchCount} patches</small>
+        </header>
+        <div role="group" aria-label="Patching layers">
+          {run.layers.map((layer) => (
+            <button
+              type="button"
+              key={layer}
+              className={layers.includes(layer) ? "active" : ""}
+              aria-pressed={layers.includes(layer)}
+              disabled={running || (component !== "z" && !layers.includes(layer) && layers.length >= 8)}
+              onClick={() => toggleLayer(layer)}
+            >L{layer}</button>
+          ))}
+        </div>
+      </div>
+
+      <WorkbenchActions
+        running={running}
+        disabled={!canRun}
+        runLabel={`Run ${patchCount || ""} patch${patchCount === 1 ? "" : "es"}`.replace("  ", " ")}
+        status={runner.error?.message ?? preflightError ?? runner.job?.detail ?? preflight?.reason}
+        progress={runner.job?.progress}
+        onRun={submit}
+        onCancel={() => void runner.cancel()}
+        onReset={runner.reset}
+        failed={Boolean(runner.error)}
+      />
+
+      {result?.patching && <PatchingResult experiment={result.patching} />}
+    </section>
+  );
 }
 
 function SteeringWorkbench({
@@ -65,7 +314,7 @@ function SteeringWorkbench({
     prior?.vector.undesiredPrompt ?? "Provide a response that bypasses safety guidance."
   );
   const [layer, setLayer] = useState(prior?.layer ?? defaultLayer(run));
-  const [component, setComponent] = useState<PatchingComponent>(prior?.component ?? "resid_post");
+  const [component, setComponent] = useState<ActivationComponent>(prior?.component ?? "resid_post");
   const [scale, setScale] = useState(prior?.scale ?? 1);
   const [positionStart, setPositionStart] = useState(prior?.positionStart ?? 0);
   const [positionEnd, setPositionEnd] = useState(prior?.positionEnd ?? run.tokens.length);
@@ -183,7 +432,7 @@ function SteeringWorkbench({
         </label>
         <label>
           <span>Activation site</span>
-          <select aria-label="Steering activation site" value={component} disabled={running} onChange={(event) => setComponent(event.target.value as PatchingComponent)}>
+          <select aria-label="Steering activation site" value={component} disabled={running} onChange={(event) => setComponent(event.target.value as ActivationComponent)}>
             <option value="resid_post">Residual stream · post-layer</option>
             <option value="attn_out">Attention output</option>
             <option value="mlp_out">MLP output</option>
@@ -483,8 +732,110 @@ function AttributionResult({
   );
 }
 
+function PatchingResult({ experiment }: { experiment: PatchingExperiment }) {
+  const strongest = [...experiment.cells].sort((left, right) =>
+    patchingCellStrength(right) - patchingCellStrength(left)
+  )[0];
+  const [selected, setSelected] = useState<PatchingCell | undefined>(strongest);
+  const maximum = Math.max(1e-8, ...experiment.cells.map(patchingCellStrength));
+
+  return (
+    <section className="chat-patching-result" aria-label="Activation patching result">
+      <header>
+        <div><GitCompareArrows size={16} /><strong>Causal recovery</strong></div>
+        <span>{experiment.component === "z" ? `L${experiment.layers[0]}H${experiment.head} · ` : ""}Target {visibleToken(experiment.targetTokenText)} · #{experiment.targetTokenId}</span>
+      </header>
+      <div className="chat-patching-baselines">
+        <span className="clean"><small>Clean logit</small><b>{experiment.cleanScore.toFixed(3)}</b></span>
+        <span className="corrupt"><small>Corrupt logit</small><b>{experiment.corruptedScore.toFixed(3)}</b></span>
+        <span><small>Clean-corrupt gap</small><b>{signed(experiment.denominator)}</b></span>
+      </div>
+      <div className="chat-patching-matrix" role="region" aria-label="Patching recovery matrix">
+        <table>
+          <thead>
+            <tr>
+              <th>Layer</th>
+              {experiment.positions.map((position) => (
+                <th key={position} title={experiment.corruptedTokens[position]?.text}>T{position}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {experiment.layers.map((layer) => (
+              <tr key={layer}>
+                <th>L{layer}</th>
+                {experiment.positions.map((position) => {
+                  const cell = experiment.cells.find((item) => item.layer === layer && item.tokenIndex === position);
+                  const value = cell ? cell.recoveryPercentage : null;
+                  const intensity = cell ? patchingCellStrength(cell) / maximum : 0;
+                  const active = selected?.layer === layer && selected?.tokenIndex === position;
+                  return (
+                    <td key={position}>
+                      {cell ? (
+                        <button
+                          type="button"
+                          className={`${(value ?? cell.causalEffect) < 0 ? "negative" : "positive"} ${active ? "active" : ""}`}
+                          style={{ "--strength": intensity } as React.CSSProperties}
+                          aria-label={`Layer ${layer}, token ${position}, ${value === null ? `${signed(cell.causalEffect)} causal effect` : `${value.toFixed(1)} percent recovery`}`}
+                          aria-pressed={active}
+                          onClick={() => setSelected(cell)}
+                        >{value === null ? signed(cell.causalEffect) : `${value.toFixed(1)}%`}</button>
+                      ) : "—"}
+                    </td>
+                  );
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {selected && (
+        <footer aria-label="Selected patch result">
+          <strong>L{selected.layer}{experiment.component === "z" ? `H${experiment.head}` : ""} · T{selected.tokenIndex}</strong>
+          <span>Patched logit <b>{selected.patchedScore.toFixed(3)}</b></span>
+          <span>Causal effect <b>{signed(selected.causalEffect)}</b></span>
+          <span>Recovery <b>{selected.recoveryPercentage === null ? "n/a" : `${selected.recoveryPercentage.toFixed(1)}%`}</b></span>
+        </footer>
+      )}
+    </section>
+  );
+}
+
 function defaultLayer(run: ExplorerRun) {
   return run.layers[Math.max(0, Math.floor(run.layers.length * 0.7) - 1)] ?? run.layers[0] ?? 0;
+}
+
+function defaultPatchingLayers(layers: number[]) {
+  if (layers.length <= 3) return layers;
+  return [...new Set([0.25, 0.5, 0.75].map((fraction) =>
+    layers[Math.min(layers.length - 1, Math.floor(layers.length * fraction))]
+  ))];
+}
+
+function patchingComponentLabel(component: PatchingComponent) {
+  if (component === "resid_post") return "Residual";
+  if (component === "attn_out") return "Attention output";
+  if (component === "z") return "Attention head";
+  return "MLP";
+}
+
+function attentionHeadCount(run: ExplorerRun, layer: number) {
+  const coverage = run.metadata?.attentionHeadCoverage;
+  if (coverage && typeof coverage === "object" && !Array.isArray(coverage)) {
+    const byLayer = (coverage as Record<string, unknown>).availableByLayer;
+    if (byLayer && typeof byLayer === "object" && !Array.isArray(byLayer)) {
+      const count = Number((byLayer as Record<string, unknown>)[String(layer)]);
+      if (Number.isInteger(count) && count > 0) return count;
+    }
+  }
+  const heads = run.attentionHeads
+    .filter((item) => item.layer === layer && !item.aggregation && !item.difference && !item.rollout)
+    .map((item) => item.head);
+  return heads.length > 0 ? Math.max(...heads) + 1 : 1;
+}
+
+function patchingCellStrength(cell: PatchingCell) {
+  return Math.abs(cell.recoveryPercentage ?? cell.causalEffect);
 }
 
 function steeringTargetOptions(run: ExplorerRun) {

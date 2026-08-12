@@ -100,6 +100,8 @@ def test_nla_profiles_and_top_level_exports() -> None:
     profiles = list_nla_profiles()
 
     assert profiles[0]["name"] == "qwen2.5-7b-l20"
+    assert profiles[0]["av_revision"] == "b88469162777ae6553bc14208eb0cb579336f8f4"
+    assert profiles[0]["ar_revision"] == "e2c9e57eac213d37a31612087f645ab6332c1bb6"
     assert get_nla_profile("qwen").av_repo == "kitft/nla-qwen2.5-7b-L20-av"
     assert SafeLens.NLAResult is NLAResult
     assert SafeLens.NLAClient.__name__ == "NLAClient"

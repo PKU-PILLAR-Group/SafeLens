@@ -27,6 +27,7 @@ DEFAULT_PROMPT = (
 DEFAULT_OUTPUT = ROOT / "apps/local_explorer/src/realRunData.ts"
 DEFAULT_ARTIFACT_OUTPUT = ROOT / "outputs/local-explorer/real-run.explorer.json"
 RISK_TERMS = ("jail", "break", "strategy", "trigger", "monitor", "policy")
+ATTENTION_HEAD_VALUE_BUDGET = 4_000_000
 
 
 def main() -> None:
@@ -234,6 +235,15 @@ def _build_run(
         final_next_token_id=top_token_id,
     )
 
+    attention_coverage = _attention_head_coverage(cache, layers, len(token_texts))
+    attention_heads = _attention_heads(
+        cache,
+        layers,
+        token_texts,
+        risk_indices,
+        coverage=attention_coverage,
+    )
+
     return {
         "runId": run_id,
         "modelName": wrapper.name,
@@ -261,7 +271,7 @@ def _build_run(
             final_norms=residual_norms_by_layer[layers[-1]],
         ),
         "nlaCompatibility": _nla_compatibility(wrapper, layers),
-        "attentionHeads": _attention_heads(cache, layers, token_texts, risk_indices),
+        "attentionHeads": attention_heads,
         "mlpNeurons": _mlp_neurons(cache, layers),
         "residualCells": [
             {
@@ -361,6 +371,15 @@ def _build_run(
             "riskDirectionTokenId": target_token_id,
             "riskDirectionToken": wrapper.to_single_str_token(target_token_id),
             "nlaProfiles": list_nla_profiles(),
+            "attentionHeadCoverage": {
+                **attention_coverage,
+                "storedHeadCount": len(attention_heads),
+                "selection": (
+                    "all"
+                    if attention_coverage["complete"]
+                    else "top_final_token_risk_mass_per_layer"
+                ),
+            },
             "generation": {
                 "seed": seed,
                 "maxNewTokens": max_new_tokens,
@@ -625,17 +644,35 @@ def _attention_heads(
     layers: list[int],
     token_texts: list[str],
     risk_indices: list[int],
+    *,
+    coverage: dict[str, Any] | None = None,
+    value_budget: int = ATTENTION_HEAD_VALUE_BUDGET,
 ) -> list[dict[str, Any]]:
-    candidates: list[dict[str, Any]] = []
+    resolved_coverage = coverage or _attention_head_coverage(
+        cache,
+        layers,
+        len(token_texts),
+        value_budget=value_budget,
+    )
+    retained_per_layer = int(resolved_coverage["retainedHeadsPerLayer"])
+    selected: list[dict[str, Any]] = []
     risk_positions = risk_indices or [len(token_texts) - 1]
     for layer in layers:
         pattern = cache[f"blocks.{layer}.attn.hook_pattern"][0].float()
+        summaries: list[tuple[float, int, float]] = []
         for head in range(int(pattern.shape[0])):
-            head_pattern = pattern[head]
-            final_row = head_pattern[-1]
+            final_row = pattern[head, -1]
             risk_mass = float(final_row[risk_positions].sum().detach().cpu().item())
             entropy = _entropy(final_row.detach().cpu().tolist())
-            candidates.append(
+            summaries.append((risk_mass, head, entropy))
+        if retained_per_layer < len(summaries):
+            summaries.sort(key=lambda item: (-item[0], item[1]))
+            summaries = summaries[:retained_per_layer]
+        else:
+            summaries.sort(key=lambda item: item[1])
+        for risk_mass, head, entropy in summaries:
+            head_pattern = pattern[head]
+            selected.append(
                 {
                     "id": f"L{layer}H{head}",
                     "layer": layer,
@@ -649,12 +686,36 @@ def _attention_heads(
                     ],
                 }
             )
-    selected: list[dict[str, Any]] = []
-    for layer in layers:
-        layer_candidates = [item for item in candidates if item["layer"] == layer]
-        layer_candidates.sort(key=lambda item: item["riskContribution"], reverse=True)
-        selected.extend(layer_candidates[:3])
     return selected
+
+
+def _attention_head_coverage(
+    cache: dict[str, Any],
+    layers: list[int],
+    token_count: int,
+    *,
+    value_budget: int = ATTENTION_HEAD_VALUE_BUDGET,
+) -> dict[str, Any]:
+    available_by_layer = {
+        str(layer): int(cache[f"blocks.{layer}.attn.hook_pattern"].shape[1])
+        for layer in layers
+    }
+    maximum_available = max(available_by_layer.values(), default=0)
+    values_per_head = max(1, token_count * token_count)
+    budgeted_per_layer = max(1, value_budget // max(1, len(layers) * values_per_head))
+    retained_per_layer = min(maximum_available, budgeted_per_layer)
+    stored_by_layer = {
+        layer: min(count, retained_per_layer)
+        for layer, count in available_by_layer.items()
+    }
+    return {
+        "complete": all(stored_by_layer[layer] == count for layer, count in available_by_layer.items()),
+        "availableHeadCount": sum(available_by_layer.values()),
+        "availableByLayer": available_by_layer,
+        "storedByLayer": stored_by_layer,
+        "retainedHeadsPerLayer": retained_per_layer,
+        "matrixValueBudget": value_budget,
+    }
 
 
 def _attention_cells(cache: dict[str, Any], layers: list[int]) -> list[dict[str, Any]]:

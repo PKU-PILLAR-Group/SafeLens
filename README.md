@@ -240,10 +240,14 @@ their model dependencies:
 python -m pip install -e ".[explorer,models,attribution,nla,jlens]"
 ```
 
-J-Lens uses a fitted, model-specific Jacobian checkpoint. Configure a local
-checkpoint under the Explorer artifact root or a Hugging Face repository in the
-Explanation panel, or set `SAFELENS_JLENS_SOURCE`, `SAFELENS_JLENS_FILENAME`,
-`SAFELENS_JLENS_REVISION`, and `SAFELENS_JLENS_MODEL` before launching Explorer.
+J-Lens uses a fitted, model-specific Jacobian checkpoint. Explorer registers the
+public Neuronpedia checkpoint for `Qwen/Qwen2.5-7B-Instruct` (layers 0-26) and
+defaults to layer 20 so its selection aligns with the public Qwen NLA profile.
+The first run downloads the pinned checkpoint to `.cache/safelens/jlens`.
+Configure another local checkpoint under the Explorer artifact root or a Hugging
+Face repository in the Explanation panel, or set `SAFELENS_JLENS_SOURCE`,
+`SAFELENS_JLENS_FILENAME`, `SAFELENS_JLENS_REVISION`, and
+`SAFELENS_JLENS_MODEL` before launching Explorer.
 
 For an isolated container instead:
 

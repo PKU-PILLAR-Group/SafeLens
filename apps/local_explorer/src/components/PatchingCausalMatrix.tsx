@@ -106,7 +106,7 @@ export function PatchingCausalMatrix({
       <div className="surface-header patching-matrix-header">
         <div>
           <h3>Activation patching causal grid</h3>
-          <p>{experiment.component} · target {visibleToken(experiment.targetTokenText)} ({experiment.targetTokenId})</p>
+          <p>{experiment.component === "z" ? `attention head · L${experiment.layers[0]}H${experiment.head}` : experiment.component} · target {visibleToken(experiment.targetTokenText)} ({experiment.targetTokenId})</p>
         </div>
         <span className="evidence-kind"><FlaskConical size={13} /> causal evidence</span>
       </div>

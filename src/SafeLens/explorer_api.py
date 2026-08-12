@@ -30,7 +30,8 @@ from SafeLens.explorer_chunks import MANIFEST_PROTOCOL
 
 DEFAULT_ARTIFACT_ROOT = Path("outputs/local-explorer")
 DEFAULT_MAX_FILE_BYTES = 128 * 1024 * 1024
-DEFAULT_PROMPT_MODEL = "sshleifer/tiny-gpt2"
+DEFAULT_PROMPT_MODEL = "Qwen/Qwen2.5-7B-Instruct"
+TINYGPT2_MODEL = "sshleifer/tiny-gpt2"
 DEFAULT_EXPLORER_HOST = "127.0.0.1"
 DEFAULT_EXPLORER_PORT = 7860
 LOCAL_EXPLORER_HOSTS = {"127.0.0.1", "localhost", "::1"}
@@ -40,7 +41,7 @@ TERMINAL_JOB_STATES = {"ready", "error", "cancelled"}
 def _default_allowed_models() -> tuple[str, ...]:
     from SafeLens.nla import list_nla_profiles
 
-    models = [DEFAULT_PROMPT_MODEL]
+    models = [DEFAULT_PROMPT_MODEL, TINYGPT2_MODEL]
     models.extend(str(profile["base_model"]) for profile in list_nla_profiles())
     return tuple(dict.fromkeys(models))
 
@@ -255,6 +256,7 @@ class JLensOptionsResponse(BaseModel):
     defaultSource: str
     defaultFilename: str
     defaultRevision: str
+    profiles: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class JLensPreflightRequest(BaseModel):
@@ -298,7 +300,7 @@ class PatchingPreflightRequest(BaseModel):
     corruptedPrompt: str = Field(min_length=1, max_length=8_000)
     cleanTokenIds: list[int] = Field(min_length=1, max_length=4_096)
     layers: list[int] = Field(min_length=1, max_length=128)
-    component: Literal["resid_post", "attn_out", "mlp_out"]
+    component: Literal["resid_post", "attn_out", "z", "mlp_out"]
     targetTokenId: int = Field(ge=0)
 
 
@@ -328,9 +330,10 @@ class PatchingPreflightResponse(BaseModel):
 class PatchingRunRequest(BaseModel):
     run: dict[str, Any]
     corruptedPrompt: str = Field(min_length=1, max_length=8_000)
-    component: Literal["resid_post", "attn_out", "mlp_out"]
+    component: Literal["resid_post", "attn_out", "z", "mlp_out"]
     layers: list[int] = Field(min_length=1, max_length=64)
     positions: list[int] = Field(min_length=1, max_length=128)
+    head: int | None = Field(default=None, ge=0)
     targetTokenId: int = Field(ge=0)
 
 
@@ -724,18 +727,49 @@ def create_app(
 
     @app.get("/api/jlens/options", response_model=JLensOptionsResponse)
     def jlens_options() -> JLensOptionsResponse:
+        from SafeLens.jlens_profiles import (
+            QWEN25_7B_INSTRUCT_JLENS,
+            list_jlens_profiles,
+        )
+
         bundled_lens = root / "jlens" / "sshleifer-tiny-gpt2" / "lens.pt"
         configured_source = os.environ.get("SAFELENS_JLENS_SOURCE", "")
-        default_source = configured_source or (str(bundled_lens) if bundled_lens.is_file() else "")
+        default_source = configured_source or QWEN25_7B_INSTRUCT_JLENS.source
+        default_model = os.environ.get(
+            "SAFELENS_JLENS_MODEL",
+            QWEN25_7B_INSTRUCT_JLENS.base_model,
+        )
+        default_filename = os.environ.get(
+            "SAFELENS_JLENS_FILENAME",
+            QWEN25_7B_INSTRUCT_JLENS.filename,
+        )
+        default_revision = os.environ.get(
+            "SAFELENS_JLENS_REVISION",
+            QWEN25_7B_INSTRUCT_JLENS.revision,
+        )
+        profiles = list_jlens_profiles()
+        if bundled_lens.is_file():
+            profiles.append(
+                {
+                    "name": "tiny-gpt2-bundled-smoke",
+                    "baseModel": TINYGPT2_MODEL,
+                    "source": str(bundled_lens),
+                    "filename": "lens.pt",
+                    "revision": "local",
+                    "dModel": 2,
+                    "sourceLayers": [0],
+                    "defaultLayer": 0,
+                    "nPrompts": 1,
+                    "description": "Bundled TinyGPT2 smoke-test checkpoint.",
+                }
+            )
         return JLensOptionsResponse(
             packageInstalled=jlens_package_installed,
-            defaultModel=os.environ.get(
-                "SAFELENS_JLENS_MODEL",
-                DEFAULT_PROMPT_MODEL if default_source and not configured_source else "",
-            ),
+            defaultModel=default_model,
             defaultSource=default_source,
-            defaultFilename=os.environ.get("SAFELENS_JLENS_FILENAME", "lens.pt"),
-            defaultRevision=os.environ.get("SAFELENS_JLENS_REVISION", "main"),
+            defaultFilename=default_filename,
+            defaultRevision=default_revision,
+            profiles=profiles,
         )
 
     @app.post("/api/jlens/preflight", response_model=JLensPreflightResponse)
@@ -1030,6 +1064,27 @@ def create_app(
                     "message": "Patch layers must be unique cached layers.",
                 },
             )
+        if payload.component == "z":
+            if len(payload.layers) != 1:
+                raise HTTPException(
+                    status_code=422,
+                    detail={
+                        "code": "invalid_head_patch_layer",
+                        "message": "Attention-head patching requires exactly one layer.",
+                    },
+                )
+            head_count = _artifact_attention_head_count(payload.run, payload.layers[0])
+            if payload.head is None or (head_count is not None and payload.head >= head_count):
+                detail = (
+                    f"Head must be between 0 and {head_count - 1} for layer "
+                    f"{payload.layers[0]}."
+                    if head_count is not None
+                    else "Attention-head patching requires a non-negative head index."
+                )
+                raise HTTPException(
+                    status_code=422,
+                    detail={"code": "invalid_attention_head", "message": detail},
+                )
         if len(set(payload.positions)) != len(payload.positions) or any(
             position < 0 or position >= preflight.cleanTokenCount for position in payload.positions
         ):
@@ -1056,7 +1111,7 @@ def create_app(
         return patching_manager.submit(
             job_payload,
             public_request={
-                **payload.model_dump(exclude={"run"}),
+                **payload.model_dump(exclude={"run"}, exclude_none=True),
                 "sourceRun": {
                     "runId": payload.run["runId"],
                     "sampleId": payload.run["sampleId"],
@@ -1676,6 +1731,8 @@ def _jlens_preflight(
     allowed_models: tuple[str, ...],
     artifact_root: Path,
 ) -> JLensPreflightResponse:
+    from SafeLens.jlens_profiles import find_jlens_profile
+
     model_allowed = payload.modelName in allowed_models
     layer_available = payload.layer in payload.availableLayers
     position_valid = payload.position < payload.tokenCount
@@ -1707,6 +1764,20 @@ def _jlens_preflight(
     elif not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*", source):
         source_valid = False
         artifact_error = "Use a Hugging Face repository ID or a path inside the artifact root."
+    registered_profile = find_jlens_profile(source, payload.filename)
+    if registered_profile is not None:
+        fitted_layers = list(registered_profile.source_layers)
+        lens_d_model = registered_profile.d_model
+        if payload.revision != registered_profile.revision:
+            artifact_error = (
+                "The registered J-Lens must use its pinned checkpoint revision "
+                f"{registered_profile.revision}."
+            )
+        elif payload.modelName != registered_profile.base_model:
+            artifact_error = (
+                f"This registered lens fits {registered_profile.base_model}, not "
+                f"{payload.modelName}."
+            )
     lens_configured = source_valid and filename_valid
     if local_candidate is not None and local_candidate.is_file():
         artifact_checked = True
@@ -1729,7 +1800,8 @@ def _jlens_preflight(
         "Configure a lens artifact and a relative checkpoint filename.": lens_configured,
         artifact_error or "The local lens artifact is readable.": artifact_error is None,
         f"Layer L{payload.layer} is not fitted in this local lens.": (
-            not artifact_checked or payload.layer in fitted_layers
+            (not artifact_checked and registered_profile is None)
+            or payload.layer in fitted_layers
         ),
         "The local lens width does not match the source model.": (
             lens_d_model is None or payload.dModel is None or lens_d_model == payload.dModel
@@ -1757,10 +1829,16 @@ def _jlens_preflight(
 @lru_cache(maxsize=4)
 def _default_patching_tokenizer_loader(model_name: str) -> Any:
     from transformers import AutoTokenizer
+    from SafeLens.explorer_model import (
+        DEFAULT_EXPLORER_MODEL_CACHE,
+        complete_hf_snapshot,
+    )
 
+    snapshot = complete_hf_snapshot(model_name, DEFAULT_EXPLORER_MODEL_CACHE)
     return AutoTokenizer.from_pretrained(
-        model_name,
-        cache_dir=".cache/safelens/local-explorer-real-flow",
+        str(snapshot) if snapshot is not None else model_name,
+        cache_dir=DEFAULT_EXPLORER_MODEL_CACHE,
+        local_files_only=snapshot is not None,
         trust_remote_code=False,
     )
 
@@ -1784,7 +1862,7 @@ def _patching_preflight(
         if clean_id != corrupted_id
     ]
     model_allowed = payload.modelName in allowed_models
-    component_supported = payload.component in {"resid_post", "attn_out", "mlp_out"}
+    component_supported = payload.component in {"resid_post", "attn_out", "z", "mlp_out"}
     try:
         vocab_size = int(len(tokenizer))
     except (TypeError, AttributeError):
@@ -1835,6 +1913,30 @@ def _patching_preflight(
         canSubmit=can_submit,
         reason=reason,
     )
+
+
+def _artifact_attention_head_count(run: dict[str, Any], layer: int) -> int | None:
+    metadata = run.get("metadata")
+    if isinstance(metadata, dict):
+        coverage = metadata.get("attentionHeadCoverage")
+        if isinstance(coverage, dict):
+            available_by_layer = coverage.get("availableByLayer")
+            if isinstance(available_by_layer, dict):
+                value = available_by_layer.get(str(layer), available_by_layer.get(layer))
+                if isinstance(value, int) and value > 0:
+                    return value
+    heads = run.get("attentionHeads")
+    if not isinstance(heads, list):
+        return None
+    indices = [
+        item.get("head")
+        for item in heads
+        if isinstance(item, dict)
+        and item.get("layer") == layer
+        and isinstance(item.get("head"), int)
+        and item["head"] >= 0
+    ]
+    return max(indices) + 1 if indices else None
 
 
 def _intervention_preflight(
@@ -2070,7 +2172,7 @@ def _subprocess_patching_runner(*, root: Path) -> JobRunner:
             json.dumps(
                 {
                     "run": payload.run,
-                    "request": payload.model_dump(exclude={"run"}),
+                    "request": payload.model_dump(exclude={"run"}, exclude_none=True),
                 }
             ),
             encoding="utf-8",

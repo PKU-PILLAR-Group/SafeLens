@@ -266,6 +266,12 @@ NLA explanation. The reconstructor path loads the official AR checkpoint,
 applies the trained `value_head.safetensors`, and returns normalized MSE plus
 cosine similarity.
 
+The Qwen profile pins AV revision
+`b88469162777ae6553bc14208eb0cb579336f8f4` and AR revision
+`e2c9e57eac213d37a31612087f645ab6332c1bb6` independently. This matters because
+the two public checkpoints live in separate repositories and do not share one
+commit identifier.
+
 Cache integration:
 
 ```python

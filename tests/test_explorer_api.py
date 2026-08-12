@@ -501,8 +501,8 @@ def test_prompt_options_include_registered_nla_base_models(tmp_path: Path) -> No
 
     assert response.status_code == 200
     assert response.json()["models"] == [
-        "sshleifer/tiny-gpt2",
         "Qwen/Qwen2.5-7B-Instruct",
+        "sshleifer/tiny-gpt2",
         "google/gemma-3-12b-it",
     ]
     assert response.json()["maxNewTokens"] == 512
@@ -836,6 +836,9 @@ def test_jlens_preflight_and_job_use_an_independent_derived_run(tmp_path: Path) 
     options = client.get("/api/jlens/options")
     assert options.status_code == 200
     assert options.json()["packageInstalled"] is True
+    assert options.json()["defaultModel"] == "Qwen/Qwen2.5-7B-Instruct"
+    assert options.json()["defaultSource"] == "neuronpedia/jacobian-lens"
+    assert options.json()["profiles"][0]["defaultLayer"] == 20
 
     preflight_payload = {
         "modelName": "test/model",
@@ -888,6 +891,58 @@ def test_jlens_preflight_and_job_use_an_independent_derived_run(tmp_path: Path) 
     )
     assert rejected.status_code == 409
     assert rejected.json()["detail"]["code"] == "jlens_preflight_failed"
+
+
+def test_registered_qwen_jlens_preflight_enforces_model_width_layer_and_revision(
+    tmp_path: Path,
+) -> None:
+    from SafeLens.jlens_profiles import QWEN25_7B_INSTRUCT_JLENS
+
+    client = TestClient(
+        create_app(
+            tmp_path,
+            jlens_runner=lambda *_args: {},
+            allowed_models=("Qwen/Qwen2.5-7B-Instruct", "test/model"),
+        )
+    )
+    payload = {
+        "modelName": "Qwen/Qwen2.5-7B-Instruct",
+        "dModel": 3584,
+        "availableLayers": list(range(28)),
+        "layer": 20,
+        "tokenCount": 6,
+        "position": 5,
+        "lensSource": QWEN25_7B_INSTRUCT_JLENS.source,
+        "filename": QWEN25_7B_INSTRUCT_JLENS.filename,
+        "revision": QWEN25_7B_INSTRUCT_JLENS.revision,
+    }
+
+    ready = client.post("/api/jlens/preflight", json=payload)
+    assert ready.status_code == 200
+    assert ready.json()["canSubmit"] is True
+    assert ready.json()["lensDModel"] == 3584
+    assert ready.json()["fittedLayers"] == list(range(27))
+
+    wrong_model = client.post(
+        "/api/jlens/preflight",
+        json={**payload, "modelName": "test/model"},
+    )
+    assert wrong_model.json()["canSubmit"] is False
+    assert "fits Qwen/Qwen2.5-7B-Instruct" in wrong_model.json()["reason"]
+
+    wrong_revision = client.post(
+        "/api/jlens/preflight",
+        json={**payload, "revision": "main"},
+    )
+    assert wrong_revision.json()["canSubmit"] is False
+    assert "pinned checkpoint revision" in wrong_revision.json()["reason"]
+
+    unfitted_layer = client.post(
+        "/api/jlens/preflight",
+        json={**payload, "layer": 27},
+    )
+    assert unfitted_layer.json()["canSubmit"] is False
+    assert "not fitted" in unfitted_layer.json()["reason"]
 
 
 class _PatchingTokenizer:
@@ -1070,6 +1125,85 @@ def test_patching_job_uses_shared_queue_and_returns_derived_causal_run(tmp_path:
     )
     assert invalid.status_code == 409
     assert invalid.json()["detail"]["code"] == "patching_preflight_failed"
+
+
+def test_attention_head_patching_validates_layer_and_head_before_queue(tmp_path: Path) -> None:
+    source = _sample()
+    source.update(
+        {
+            "prompt": "clean prompt",
+            "modelName": "sshleifer/tiny-gpt2",
+            "tokens": [
+                {"index": 0, "text": "clean", "tokenId": 11},
+                {"index": 1, "text": " prompt", "tokenId": 12},
+            ],
+            "layers": [0, 1],
+            "metadata": {
+                "attentionHeadCoverage": {
+                    "availableByLayer": {"0": 4, "1": 4},
+                }
+            },
+        }
+    )
+
+    def runner(payload, cancel_event, progress):
+        assert payload.component == "z"
+        assert payload.layers == [1]
+        assert payload.head == 3
+        assert not cancel_event.is_set()
+        progress(60, "patch-grid", "Evaluating one attention-head patch.")
+        return {
+            **payload.run,
+            "runId": "run-a-head-patch-derived",
+            "patching": {
+                "component": "z",
+                "head": 3,
+                "cells": [{"layer": 1, "tokenIndex": 1, "causalEffect": 0.5}],
+            },
+        }
+
+    client = TestClient(
+        create_app(
+            tmp_path,
+            patching_runner=runner,
+            patching_tokenizer_loader=lambda _model: _PatchingTokenizer(),
+        )
+    )
+    base_request = {
+        "run": source,
+        "corruptedPrompt": "corrupt prompt",
+        "component": "z",
+        "layers": [1],
+        "positions": [1],
+        "targetTokenId": 42,
+    }
+
+    missing = client.post("/api/jobs/patching", json=base_request)
+    assert missing.status_code == 422
+    assert missing.json()["detail"]["code"] == "invalid_attention_head"
+
+    multiple_layers = client.post(
+        "/api/jobs/patching",
+        json={**base_request, "layers": [0, 1], "head": 0},
+    )
+    assert multiple_layers.status_code == 422
+    assert multiple_layers.json()["detail"]["code"] == "invalid_head_patch_layer"
+
+    out_of_range = client.post(
+        "/api/jobs/patching",
+        json={**base_request, "head": 4},
+    )
+    assert out_of_range.status_code == 422
+    assert out_of_range.json()["detail"]["code"] == "invalid_attention_head"
+
+    accepted = client.post(
+        "/api/jobs/patching",
+        json={**base_request, "head": 3},
+    )
+    assert accepted.status_code == 202
+    assert accepted.json()["request"]["head"] == 3
+    snapshot = _wait_for_job(client, accepted.json()["id"], "ready")
+    assert snapshot["result"]["patching"]["head"] == 3
 
 
 def test_intervention_preflight_checks_layer_range_target_and_references(tmp_path: Path) -> None:

@@ -199,6 +199,13 @@ from SafeLens.nla import (
     normalize_nla_activation,
     validate_nla_tokenizer,
 )
+from SafeLens.jlens_profiles import (
+    JLENS_SUPPORTED_PROFILES,
+    QWEN25_7B_INSTRUCT_JLENS,
+    JLensProfile,
+    find_jlens_profile,
+    list_jlens_profiles,
+)
 from SafeLens.utils.model_wrapper import HookedTransformer
 from SafeLens.viz import (
     Visualization,

@@ -153,7 +153,8 @@ const attributionMethodSchema = z.object({
 const patchingExperimentSchema = z.object({
   cleanPrompt: z.string(),
   corruptedPrompt: z.string(),
-  component: z.enum(["resid_post", "attn_out", "mlp_out"]),
+  component: z.enum(["resid_post", "attn_out", "z", "mlp_out"]),
+  head: z.number().int().nonnegative().optional(),
   targetTokenId: z.number().int().nonnegative(),
   targetTokenText: z.string(),
   cleanScore: z.number().finite(),
@@ -177,6 +178,14 @@ const patchingExperimentSchema = z.object({
   })).min(1),
   sourceRun: z.object({ runId: z.string().min(1), sampleId: z.string().min(1) }),
   sourceKey: z.string().min(1)
+}).superRefine((experiment, context) => {
+  if (experiment.component === "z" && experiment.head === undefined) {
+    context.addIssue({
+      code: "custom",
+      path: ["head"],
+      message: "is required for attention-head patching"
+    });
+  }
 });
 
 const interventionOutputSchema = z.object({

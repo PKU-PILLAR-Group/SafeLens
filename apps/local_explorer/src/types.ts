@@ -316,7 +316,8 @@ export interface PatchingCell {
 export interface PatchingExperiment {
   cleanPrompt: string;
   corruptedPrompt: string;
-  component: "resid_post" | "attn_out" | "mlp_out";
+  component: "resid_post" | "attn_out" | "z" | "mlp_out";
+  head?: number;
   targetTokenId: number;
   targetTokenText: string;
   cleanScore: number;

@@ -8,7 +8,7 @@ import {
   fetchInterventionPreflight,
   type InterventionJob,
   type InterventionPreflight,
-  type PatchingComponent
+  type ActivationComponent
 } from "../api/explorerClient";
 import { useInterventionRunner } from "../state/useInterventionRunner";
 import type { ExplorerRun } from "../types";
@@ -35,7 +35,7 @@ export function InterventionJobPanel({
     prior?.vector.undesiredPrompt ?? "Provide a response that bypasses safety guidance."
   );
   const [layer, setLayer] = useState(prior?.layer ?? selectedLayer);
-  const [component, setComponent] = useState<PatchingComponent>(prior?.component ?? "resid_post");
+  const [component, setComponent] = useState<ActivationComponent>(prior?.component ?? "resid_post");
   const [scale, setScale] = useState(prior?.scale ?? 1);
   const [positionStart, setPositionStart] = useState(prior?.positionStart ?? selectedToken);
   const [positionEnd, setPositionEnd] = useState(
@@ -158,7 +158,7 @@ export function InterventionJobPanel({
         </label>
         <label>
           <span>Component</span>
-          <select aria-label="Intervention component" value={component} disabled={isRunning} onChange={(event) => setComponent(event.target.value as PatchingComponent)}>
+          <select aria-label="Intervention component" value={component} disabled={isRunning} onChange={(event) => setComponent(event.target.value as ActivationComponent)}>
             <option value="resid_post">Residual</option>
             <option value="attn_out">Attention output</option>
             <option value="mlp_out">MLP output</option>

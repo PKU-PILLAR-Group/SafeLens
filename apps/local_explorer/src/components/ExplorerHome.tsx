@@ -24,7 +24,7 @@ import { TurnList } from "./TurnList";
 import type { TurnView } from "../state/useTurnManager";
 import type { AnalysisId } from "./TurnCard";
 
-const DEFAULT_MODEL = "sshleifer/tiny-gpt2";
+const DEFAULT_MODEL = "Qwen/Qwen2.5-7B-Instruct";
 const DEFAULT_MAX_NEW_TOKENS = 128;
 const MAX_NEW_TOKENS_LIMIT = 512;
 const HIDDEN_RUN_STORAGE_KEY = "safelens.localExplorer.hiddenWork.v1";
@@ -34,7 +34,7 @@ interface ExplorerHomeProps {
   activeRecord: RunRecord & { run: ExplorerRun };
   remoteState: RemoteRunState;
   onSelectConversation: (key: string) => void;
-  onRunReady: (run: ExplorerRun, job: { id: string; kind: "prompt-run" | "attribution" | "intervention" | "nla" | "jlens" }) => void;
+  onRunReady: (run: ExplorerRun, job: { id: string; kind: "prompt-run" | "attribution" | "intervention" | "patching" | "nla" | "jlens" }) => void;
   onRemoveRuns: (keys: string[]) => void;
 }
 
@@ -231,7 +231,7 @@ export function ExplorerHome({
   }
 
   return (
-    <div className={`chat-home ${turnManager.turns.length > 0 ? "has-conversation" : "is-empty"}`}>
+    <div className={`chat-home ${turnManager.turns.length > 0 ? "has-conversation" : "is-empty"} ${analysisOpen ? "has-analysis" : ""}`}>
       <header className="chat-home-header">
         <a className="chat-home-brand" href="/" aria-label="SafeLens home">
           <span><BrainCircuit size={22} /></span>
@@ -266,6 +266,7 @@ export function ExplorerHome({
           ) : (
             <TurnList
               turns={turnManager.turns}
+              records={visibleRecords}
               analysisRuns={visibleRecords.flatMap((record) => record.run ? [record.run] : [])}
               activeTurnId={turnManager.activeTurnId}
               analysisOpen={analysisOpen}

@@ -43,6 +43,9 @@ def main() -> None:
             raise ValueError("Clean and corrupted prompts must have the same token count.")
 
         component = str(request["component"])
+        head = int(request["head"]) if request.get("head") is not None else None
+        if component == "z" and head is None:
+            raise ValueError("Attention-head patching requires a head index.")
         layers = [int(layer) for layer in request["layers"]]
         positions = [int(position) for position in request["positions"]]
         target_token_id = int(request["targetTokenId"])
@@ -75,8 +78,8 @@ def main() -> None:
                     PatchSpec(
                         layer=activation_name,
                         activation_name=activation_name,
-                        target_index=(slice(None), position, slice(None)),
-                        source_index=(slice(None), position, slice(None)),
+                        target_index=_patch_index(component, position, head),
+                        source_index=_patch_index(component, position, head),
                     ),
                     target_logit,
                 )
@@ -94,7 +97,7 @@ def main() -> None:
                         "patchedScore": round(patched_score, 10),
                         "causalEffect": round(causal_effect, 10),
                         "recoveryPercentage": (None if recovery is None else round(recovery, 8)),
-                        "sourceKey": activation_name,
+                        "sourceKey": _patch_source_key(activation_name, head),
                     }
                 )
 
@@ -114,6 +117,7 @@ def main() -> None:
             run_id=args.run_id,
             corrupted_prompt=str(request["corruptedPrompt"]),
             component=component,
+            head=head,
             target_token_id=target_token_id,
             target_token_text=target_text,
             layers=layers,
@@ -127,22 +131,39 @@ def main() -> None:
         wrapper.remove_hooks()
         del wrapper
         gc.collect()
+        _empty_cuda_cache()
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(derived, indent=2), encoding="utf-8")
 
 
 def _load_wrapper(model_id: str) -> HuggingFaceModelWrapper:
+    device = os.environ.get("SAFELENS_EXPLORER_JOB_DEVICE", "cpu")
+    cache_dir = os.environ.get(
+        "SAFELENS_EXPLORER_MODEL_CACHE",
+        ".cache/safelens/local-explorer-real-flow",
+    )
+    local_snapshot = _complete_hf_snapshot(model_id, cache_dir)
+    load_kwargs: dict[str, Any] = {"low_cpu_mem_usage": device != "cpu"}
+    tokenizer_kwargs: dict[str, Any] = {}
+    if local_snapshot is not None:
+        load_kwargs["local_files_only"] = True
+        tokenizer_kwargs["local_files_only"] = True
     config = PipelineConfig.model_validate(
         {
             "model": {
-                "source": "huggingface",
+                "source": "local" if local_snapshot is not None else "huggingface",
                 "name": model_id,
-                "device": os.environ.get("SAFELENS_EXPLORER_JOB_DEVICE", "cpu"),
-                "dtype": "float32",
-                "cache_dir": ".cache/safelens/local-explorer-real-flow",
+                "local_dir": str(local_snapshot) if local_snapshot is not None else None,
+                "device": device,
+                "dtype": os.environ.get(
+                    "SAFELENS_EXPLORER_JOB_DTYPE",
+                    "float32" if device == "cpu" else "bfloat16",
+                ),
+                "cache_dir": cache_dir,
                 "trust_remote_code": False,
-                "load_kwargs": {"low_cpu_mem_usage": False},
+                "load_kwargs": load_kwargs,
+                "tokenizer_kwargs": tokenizer_kwargs,
             }
         }
     )
@@ -151,6 +172,44 @@ def _load_wrapper(model_id: str) -> HuggingFaceModelWrapper:
         raise TypeError(f"expected HuggingFaceModelWrapper, got {type(wrapper).__name__}")
     wrapper.load_model()
     return wrapper
+
+
+def _complete_hf_snapshot(model_id: str, cache_dir: str) -> Path | None:
+    repository = Path(cache_dir) / f"models--{model_id.replace('/', '--')}"
+    reference = repository / "refs" / "main"
+    if not reference.is_file():
+        return None
+    revision = reference.read_text(encoding="utf-8").strip()
+    snapshot = repository / "snapshots" / revision
+    if not (snapshot / "config.json").is_file() or not (snapshot / "tokenizer_config.json").is_file():
+        return None
+    weight_files: list[Path] = []
+    for index_name in ("model.safetensors.index.json", "pytorch_model.bin.index.json"):
+        index_path = snapshot / index_name
+        if not index_path.is_file():
+            continue
+        try:
+            index = json.loads(index_path.read_text(encoding="utf-8"))
+            filenames = set(index["weight_map"].values())
+        except (json.JSONDecodeError, KeyError, TypeError, AttributeError):
+            return None
+        if not filenames or not all(isinstance(name, str) and name for name in filenames):
+            return None
+        weight_files.extend(snapshot / name for name in sorted(filenames))
+    if not weight_files:
+        weight_files = list(snapshot.glob("*.safetensors")) + list(snapshot.glob("pytorch_model*.bin"))
+    if not weight_files or not all(path.is_file() and path.stat().st_size > 0 for path in weight_files):
+        return None
+    return snapshot
+
+
+def _empty_cuda_cache() -> None:
+    try:
+        import torch
+    except ImportError:
+        return
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
 
 def _target_logit(logits: Any, target_token_id: int) -> float:
@@ -171,12 +230,25 @@ def _flat_token_ids(tokens: Any) -> list[int]:
     return [int(token_id) for token_id in value]
 
 
+def _patch_index(component: str, position: int, head: int | None) -> tuple[Any, ...]:
+    if component == "z":
+        if head is None:
+            raise ValueError("Attention-head patching requires a head index.")
+        return (slice(None), position, head, slice(None))
+    return (slice(None), position, slice(None))
+
+
+def _patch_source_key(activation_name: str, head: int | None) -> str:
+    return f"{activation_name}[head={head}]" if head is not None else activation_name
+
+
 def _merge_patching_result(
     run: dict[str, Any],
     *,
     run_id: str,
     corrupted_prompt: str,
     component: str,
+    head: int | None,
     target_token_id: int,
     target_token_text: str,
     layers: list[int],
@@ -188,11 +260,13 @@ def _merge_patching_result(
 ) -> dict[str, Any]:
     source_run = {"runId": run["runId"], "sampleId": run["sampleId"]}
     denominator = clean_score - corrupted_score
-    source_key = f"activation_patching.{component}[target={target_token_id}]"
+    head_selector = f",head={head}" if head is not None else ""
+    source_key = f"activation_patching.{component}[target={target_token_id}{head_selector}]"
     run["patching"] = {
         "cleanPrompt": run["prompt"],
         "corruptedPrompt": corrupted_prompt,
         "component": component,
+        **({"head": head} if head is not None else {}),
         "targetTokenId": target_token_id,
         "targetTokenText": target_token_text,
         "cleanScore": round(float(clean_score), 10),
@@ -237,6 +311,7 @@ def _merge_patching_result(
             "jobVersion": "1.0",
             "method": "activation_replacement",
             "component": component,
+            **({"head": head} if head is not None else {}),
             "layers": layers,
             "positions": positions,
             "targetTokenId": target_token_id,

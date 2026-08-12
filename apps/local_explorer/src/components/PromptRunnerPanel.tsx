@@ -9,8 +9,6 @@ import type { JobFailure } from "../jobFailure";
 import type { ExplorerRun } from "../types";
 import type { PromptJob, PromptRunInput } from "../api/explorerClient";
 
-const DEFAULT_MODEL = "sshleifer/tiny-gpt2";
-
 interface PromptRunnerPanelProps {
   run: ExplorerRun;
   onRunReady: (run: ExplorerRun, job: PromptJob) => void;
@@ -33,7 +31,7 @@ export function PromptRunnerPanel({ run, onRunReady }: PromptRunnerPanelProps) {
     void runner.submit({
       prompt: cleaned,
       template,
-      model: DEFAULT_MODEL,
+      model: run.modelName,
       seed,
       maxNewTokens,
       temperature,
@@ -122,7 +120,7 @@ export function PromptRunnerPanel({ run, onRunReady }: PromptRunnerPanelProps) {
       <div className="prompt-runner-model">
         <SlidersHorizontal size={13} />
         <span>Local model</span>
-        <strong>{DEFAULT_MODEL}</strong>
+        <strong>{run.modelName}</strong>
       </div>
 
       <div className="prompt-runner-actions">

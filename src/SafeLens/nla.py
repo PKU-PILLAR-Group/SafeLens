@@ -34,6 +34,8 @@ class NLAProfile:
     d_model: int
     av_repo: str
     ar_repo: str | None
+    av_revision: str | None = None
+    ar_revision: str | None = None
     gated: bool = False
     description: str = ""
 
@@ -112,6 +114,8 @@ NLA_SUPPORTED_PROFILES: tuple[NLAProfile, ...] = (
         d_model=3584,
         av_repo="kitft/nla-qwen2.5-7b-L20-av",
         ar_repo="kitft/nla-qwen2.5-7b-L20-ar",
+        av_revision="b88469162777ae6553bc14208eb0cb579336f8f4",
+        ar_revision="e2c9e57eac213d37a31612087f645ab6332c1bb6",
         description="Public Qwen2.5-7B-Instruct NLA pair trained on layer 20 residuals.",
     ),
     NLAProfile(
@@ -682,6 +686,7 @@ class NLAClient:
         local_files_only: bool = False,
         token: str | bool | None = None,
         revision: str | None = None,
+        reconstructor_revision: str | None = None,
         device: str | None = None,
         dtype: str | Any | None = None,
         trust_remote_code: bool = True,
@@ -709,7 +714,11 @@ class NLAClient:
                 cache_dir=cache_dir,
                 local_files_only=local_files_only,
                 token=token,
-                revision=revision,
+                revision=(
+                    reconstructor_revision
+                    if reconstructor_revision is not None
+                    else revision
+                ),
                 device=device,
                 dtype=dtype,
                 trust_remote_code=trust_remote_code,

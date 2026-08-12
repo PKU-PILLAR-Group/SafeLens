@@ -1,31 +1,99 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Activity, ArrowDown, ArrowRight, Network } from "lucide-react";
 
+import {
+  fetchRemoteRunChunk,
+  type RemoteRunSummary
+} from "../api/explorerClient";
+import { mergeRunChunk } from "../state/remoteHydration";
 import type { AttentionHead, ExplorerRun, TokenInfo } from "../types";
 
 interface ChatAttentionWorkbenchProps {
   run: ExplorerRun;
+  remoteSummary?: RemoteRunSummary;
 }
 
 const MAX_CHAT_ATTENTION_TOKENS = 160;
 
-export function ChatAttentionWorkbench({ run }: ChatAttentionWorkbenchProps) {
+export function ChatAttentionWorkbench({ run, remoteSummary }: ChatAttentionWorkbenchProps) {
+  const [hydratedHeads, setHydratedHeads] = useState(run.attentionHeads);
+  const [loadingHeads, setLoadingHeads] = useState(false);
+  const [headLoadError, setHeadLoadError] = useState<string | null>(null);
+  const loadedScopesRef = useRef(new Set<string>());
   const rawHeads = useMemo(
-    () => run.attentionHeads.filter((head) => !head.aggregation && !head.difference && !head.rollout),
-    [run.attentionHeads]
+    () => hydratedHeads.filter((head) =>
+      head.id !== "__chunk_pending__" && !head.aggregation && !head.difference && !head.rollout
+    ),
+    [hydratedHeads]
   );
   const availableLayers = useMemo(
-    () => [...new Set(rawHeads.map((head) => head.layer))].sort((left, right) => left - right),
-    [rawHeads]
+    () => [...run.layers].sort((left, right) => left - right),
+    [run.layers]
   );
   const initialLayer = availableLayers[availableLayers.length - 1] ?? run.layers[run.layers.length - 1] ?? 0;
   const [selectedLayer, setSelectedLayer] = useState(initialLayer);
-  const layerHeads = rawHeads.filter((head) => head.layer === selectedLayer);
+  const layerHeads = useMemo(
+    () => rawHeads.filter((head) => head.layer === selectedLayer),
+    [rawHeads, selectedLayer]
+  );
   const [selectedHeadId, setSelectedHeadId] = useState(layerHeads[0]?.id ?? rawHeads[0]?.id ?? "");
-  const selectedHead = layerHeads.find((head) => head.id === selectedHeadId) ?? layerHeads[0] ?? rawHeads[0];
+  const selectedHead = layerHeads.find((head) => head.id === selectedHeadId) ?? layerHeads[0];
+  const coverage = attentionHeadCoverage(run, selectedLayer, layerHeads.length, rawHeads.length);
   const tokens = run.tokens;
   const [selectedDestination, setSelectedDestination] = useState(tokens[tokens.length - 1]?.index ?? 0);
   const [selectedSource, setSelectedSource] = useState(0);
+
+  useEffect(() => {
+    setHydratedHeads(run.attentionHeads);
+    setHeadLoadError(null);
+    loadedScopesRef.current.clear();
+  }, [run.attentionHeads, run.runId, run.sampleId]);
+
+  useEffect(() => {
+    if (!remoteSummary || tokens.length === 0) return;
+    const expected = availableHeadsAtLayer(run, selectedLayer, layerHeads.length);
+    const selectedRangeLoaded = layerHeads.length > 0 && layerHeads.every((head) =>
+      head.distributionByToken[selectedDestination]?.[selectedSource] !== undefined
+    );
+    if (layerHeads.length >= expected && selectedRangeLoaded) return;
+
+    const controller = new AbortController();
+    const destinationRange = tokenBlock(selectedDestination, tokens.length);
+    const sourceRange = tokenBlock(selectedSource, tokens.length);
+    const scope = `${selectedLayer}:${destinationRange.start}:${sourceRange.start}`;
+    if (loadedScopesRef.current.has(scope)) return;
+    setLoadingHeads(true);
+    setHeadLoadError(null);
+    void fetchRemoteRunChunk(remoteSummary, {
+      component: "attentionHeads",
+      layer: selectedLayer,
+      tokenStart: destinationRange.start,
+      tokenEnd: destinationRange.end,
+      sourceStart: sourceRange.start,
+      sourceEnd: sourceRange.end
+    }, controller.signal).then((chunk) => {
+      loadedScopesRef.current.add(scope);
+      setHydratedHeads((current) => mergeRunChunk({
+        ...run,
+        attentionHeads: current
+      }, chunk).attentionHeads);
+    }).catch((error) => {
+      if (!controller.signal.aborted) {
+        setHeadLoadError(error instanceof Error ? error.message : "Attention heads could not be loaded.");
+      }
+    }).finally(() => {
+      if (!controller.signal.aborted) setLoadingHeads(false);
+    });
+    return () => controller.abort();
+  }, [
+    layerHeads,
+    remoteSummary,
+    run,
+    selectedDestination,
+    selectedLayer,
+    selectedSource,
+    tokens.length
+  ]);
 
   useEffect(() => {
     const nextHead = rawHeads.find((head) => head.layer === selectedLayer);
@@ -43,7 +111,11 @@ export function ChatAttentionWorkbench({ run }: ChatAttentionWorkbenchProps) {
     return (
       <section className="chat-analysis-workbench chat-attention-workbench" aria-label="Attention heads workbench">
         <header className="chat-workbench-heading">
-          <span><Network size={17} /></span><div><h2>Attention heads</h2><p>No attention-head matrix is cached for this run.</p></div>
+          <span><Network size={17} /></span>
+          <div>
+            <h2>Attention heads</h2>
+            <p>{loadingHeads ? `Loading all heads at layer ${selectedLayer}...` : headLoadError ?? "No attention-head matrix is cached for this run."}</p>
+          </div>
         </header>
       </section>
     );
@@ -78,7 +150,9 @@ export function ChatAttentionWorkbench({ run }: ChatAttentionWorkbenchProps) {
       <header className="chat-workbench-heading">
         <span><Network size={17} /></span>
         <div><h2>Attention heads</h2><p>Compare raw head patterns and inspect one destination token</p></div>
-        <span className="chat-workbench-status ready"><i />{rawHeads.length} heads</span>
+        <span className={`chat-workbench-status ${loadingHeads ? "pending" : "ready"}`}>
+          <i />{loadingHeads ? "loading" : `${coverage.storedAtLayer} cached`}
+        </span>
       </header>
 
       <div className="chat-attention-controls">
@@ -102,7 +176,12 @@ export function ChatAttentionWorkbench({ run }: ChatAttentionWorkbenchProps) {
       </div>
 
       <section className="chat-head-overview" aria-label="Attention head overview">
-        <header><div><strong>Heads at layer {selectedLayer}</strong><small>Select a head to compare its pattern</small></div><span>{layerHeads.length} raw distributions</span></header>
+        <header>
+          <div><strong>Heads at layer {selectedLayer}</strong><small>Select a head to compare its pattern</small></div>
+          <span className={coverage.complete ? "complete" : "partial"}>
+            {coverage.storedAtLayer} / {coverage.availableAtLayer} heads · {loadingHeads ? "loading" : coverage.complete ? "complete" : "ranked subset"}
+          </span>
+        </header>
         <div role="radiogroup" aria-label="Attention head choices">
           {layerHeads.map((head) => (
             <button
@@ -315,6 +394,39 @@ function peakSource(head: AttentionHead, destination: number) {
 function samplePositions(length: number, count: number) {
   if (length <= count) return Array.from({ length }, (_, index) => index);
   return Array.from({ length: count }, (_, index) => Math.round(index * (length - 1) / (count - 1)));
+}
+
+function attentionHeadCoverage(
+  run: ExplorerRun,
+  layer: number,
+  storedAtLayer: number,
+  storedTotal: number
+) {
+  const raw = run.metadata?.attentionHeadCoverage;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return { storedAtLayer, availableAtLayer: storedAtLayer, storedTotal, complete: false };
+  }
+  const coverage = raw as Record<string, unknown>;
+  const availableByLayer = coverage.availableByLayer;
+  const available = availableByLayer && typeof availableByLayer === "object" && !Array.isArray(availableByLayer)
+    ? Number((availableByLayer as Record<string, unknown>)[String(layer)])
+    : storedAtLayer;
+  const availableAtLayer = Number.isFinite(available) && available >= storedAtLayer ? available : storedAtLayer;
+  return {
+    storedAtLayer,
+    availableAtLayer,
+    storedTotal,
+    complete: coverage.complete === true && storedAtLayer >= availableAtLayer
+  };
+}
+
+function availableHeadsAtLayer(run: ExplorerRun, layer: number, fallback: number) {
+  return attentionHeadCoverage(run, layer, fallback, 0).availableAtLayer;
+}
+
+function tokenBlock(tokenIndex: number, tokenCount: number) {
+  const start = Math.floor(Math.max(0, tokenIndex) / 512) * 512;
+  return { start, end: Math.min(tokenCount, start + 512) };
 }
 
 function visibleToken(value: string) {

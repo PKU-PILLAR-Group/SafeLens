@@ -30,6 +30,7 @@ export function PatchingJobPanel({
   const [corruptedPrompt, setCorruptedPrompt] = useState(run.patching?.corruptedPrompt ?? run.prompt);
   const [component, setComponent] = useState<PatchingComponent>(run.patching?.component ?? "resid_post");
   const [layers, setLayers] = useState<number[]>([selectedLayer]);
+  const [head, setHead] = useState(run.patching?.head ?? 0);
   const [positions, setPositions] = useState<number[]>([selectedToken]);
   const defaultTarget = run.patching?.targetTokenId ??
     run.logitLens.find((row) => row.layer === selectedLayer && row.tokenIndex === selectedToken)?.targetTokenId ??
@@ -43,6 +44,11 @@ export function PatchingJobPanel({
   const canSubmit = Boolean(preflight?.canSubmit && layers.length && positions.length && !isRunning);
   const sourceTokenIds = useMemo(() => run.tokens.map((token) => token.tokenId), [run.tokens]);
   const status = jobStatus(runner.job, runner.error, runner.submitting);
+  const headCount = attentionHeadCount(run, layers[0] ?? selectedLayer);
+
+  useEffect(() => {
+    setHead((current) => Math.min(current, Math.max(0, headCount - 1)));
+  }, [headCount]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -79,9 +85,18 @@ export function PatchingJobPanel({
   }, [component, corruptedPrompt, run.layers, run.modelName, run.prompt, sourceTokenIds, targetTokenId]);
 
   function toggleLayer(layer: number) {
+    if (component === "z") {
+      setLayers([layer]);
+      return;
+    }
     setLayers((current) => current.includes(layer)
       ? current.length === 1 ? current : current.filter((item) => item !== layer)
       : [...current, layer].sort((a, b) => a - b));
+  }
+
+  function selectComponent(next: PatchingComponent) {
+    setComponent(next);
+    if (next === "z") setLayers((current) => [current[0] ?? selectedLayer]);
   }
 
   function togglePosition(position: number) {
@@ -92,7 +107,15 @@ export function PatchingJobPanel({
 
   function submit() {
     if (!canSubmit) return;
-    void runner.submit({ run, corruptedPrompt, component, layers, positions, targetTokenId });
+    void runner.submit({
+      run,
+      corruptedPrompt,
+      component,
+      layers,
+      positions,
+      ...(component === "z" ? { head } : {}),
+      targetTokenId
+    });
   }
 
   return (
@@ -130,17 +153,25 @@ export function PatchingJobPanel({
         <div>
           <span className="control-label">Component</span>
           <div className="patching-segmented" role="group" aria-label="Patching component">
-            {(["resid_post", "attn_out", "mlp_out"] as const).map((item) => (
+            {(["resid_post", "attn_out", "z", "mlp_out"] as const).map((item) => (
               <button
                 key={item}
                 className={component === item ? "active" : ""}
                 aria-pressed={component === item}
                 disabled={isRunning}
-                onClick={() => setComponent(item)}
+                onClick={() => selectComponent(item)}
               >{componentLabel(item)}</button>
             ))}
           </div>
         </div>
+        {component === "z" && (
+          <label>
+            <span>Attention head</span>
+            <select aria-label="Patching attention head" value={head} disabled={isRunning} onChange={(event) => setHead(Number(event.target.value))}>
+              {Array.from({ length: headCount }, (_, index) => <option key={index} value={index}>H{index}</option>)}
+            </select>
+          </label>
+        )}
         <label>
           <span>Target token ID</span>
           <input
@@ -202,7 +233,7 @@ export function PatchingJobPanel({
       )}
 
       <div className="patching-layer-picker">
-        <div className="inline-heading"><h4>Patch grid layers</h4><span>{layers.length} selected</span></div>
+        <div className="inline-heading"><h4>Patch grid layers</h4><span>{component === "z" ? `H${head} · one layer` : `${layers.length} selected`}</span></div>
         <div role="group" aria-label="Patching layers">
           {run.layers.map((layer) => (
             <button
@@ -267,7 +298,23 @@ function CheckItem({ label, passed }: { label: string; passed: boolean }) {
 function componentLabel(component: PatchingComponent) {
   if (component === "resid_post") return "Residual";
   if (component === "attn_out") return "Attention output";
+  if (component === "z") return "Attention head";
   return "MLP output";
+}
+
+function attentionHeadCount(run: ExplorerRun, layer: number) {
+  const coverage = run.metadata?.attentionHeadCoverage;
+  if (coverage && typeof coverage === "object" && !Array.isArray(coverage)) {
+    const byLayer = (coverage as Record<string, unknown>).availableByLayer;
+    if (byLayer && typeof byLayer === "object" && !Array.isArray(byLayer)) {
+      const count = Number((byLayer as Record<string, unknown>)[String(layer)]);
+      if (Number.isInteger(count) && count > 0) return count;
+    }
+  }
+  const heads = run.attentionHeads
+    .filter((item) => item.layer === layer && !item.aggregation && !item.difference && !item.rollout)
+    .map((item) => item.head);
+  return heads.length > 0 ? Math.max(...heads) + 1 : 1;
 }
 
 function jobStatus(job: PatchingJob | null, error: JobFailure | null, submitting: boolean): AsyncStatus {

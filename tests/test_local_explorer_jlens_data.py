@@ -62,3 +62,42 @@ def test_jlens_worker_detects_a_complete_huggingface_snapshot(tmp_path: Path) ->
     (snapshot / "model.safetensors").write_bytes(b"weights")
 
     assert MODULE._complete_hf_snapshot("test/model", str(tmp_path)) == snapshot
+
+
+def test_jlens_worker_rejects_a_partial_sharded_snapshot(tmp_path: Path) -> None:
+    snapshot = tmp_path / "models--test--model" / "snapshots" / "revision-1"
+    snapshot.mkdir(parents=True)
+    reference = tmp_path / "models--test--model" / "refs" / "main"
+    reference.parent.mkdir(parents=True)
+    reference.write_text("revision-1", encoding="utf-8")
+    (snapshot / "config.json").write_text("{}", encoding="utf-8")
+    (snapshot / "tokenizer_config.json").write_text("{}", encoding="utf-8")
+    (snapshot / "model.safetensors.index.json").write_text(
+        '{"weight_map":{"a":"model-00001-of-00002.safetensors",'
+        '"b":"model-00002-of-00002.safetensors"}}',
+        encoding="utf-8",
+    )
+    (snapshot / "model-00001-of-00002.safetensors").write_bytes(b"weights")
+
+    assert MODULE._complete_hf_snapshot("test/model", str(tmp_path)) is None
+
+
+def test_jlens_worker_finds_a_pinned_cached_checkpoint(tmp_path: Path) -> None:
+    revision = "abc123"
+    filename = "model/lens.pt"
+    checkpoint = (
+        tmp_path
+        / "models--research--lens"
+        / "snapshots"
+        / revision
+        / filename
+    )
+    checkpoint.parent.mkdir(parents=True)
+    checkpoint.write_bytes(b"weights")
+
+    assert MODULE._cached_lens_checkpoint(
+        "research/lens",
+        filename=filename,
+        revision=revision,
+        cache_dir=str(tmp_path),
+    ) == checkpoint

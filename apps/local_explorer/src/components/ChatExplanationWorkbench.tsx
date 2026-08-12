@@ -112,11 +112,11 @@ export function ChatExplanationWorkbench({
   useEffect(() => {
     const controller = new AbortController();
     void fetchJLensOptions(controller.signal).then((options) => {
-      setJLensSource((current) => current || (
-        !options.defaultModel || options.defaultModel === run.modelName ? options.defaultSource : ""
-      ));
-      setJLensFilename(options.defaultFilename);
-      setJLensRevision(options.defaultRevision);
+      const profile = options.profiles.find((candidate) => candidate.baseModel === run.modelName);
+      const matchesDefault = !options.defaultModel || options.defaultModel === run.modelName;
+      setJLensSource(matchesDefault ? options.defaultSource : profile?.source ?? "");
+      setJLensFilename(matchesDefault ? options.defaultFilename : profile?.filename ?? options.defaultFilename);
+      setJLensRevision(matchesDefault ? options.defaultRevision : profile?.revision ?? options.defaultRevision);
       setJLensPreflightError(null);
     }).catch((error) => {
       if (!controller.signal.aborted) {
@@ -567,7 +567,9 @@ function preferredNlaLayer(run: ExplorerRun) {
 }
 
 function preferredLensLayer(run: ExplorerRun) {
-  return run.jLens[run.jLens.length - 1]?.layer ?? run.layers[0] ?? 0;
+  const nlaLayer = preferredNlaLayer(run);
+  return run.jLens[run.jLens.length - 1]?.layer ??
+    (run.layers.includes(nlaLayer) ? nlaLayer : run.layers[0] ?? 0);
 }
 
 function preferredToken(run: ExplorerRun, layer: number) {

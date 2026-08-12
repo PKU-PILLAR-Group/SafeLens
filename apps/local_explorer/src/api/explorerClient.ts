@@ -552,6 +552,8 @@ const nlaProfileSchema = z.object({
   d_model: z.number().int().positive(),
   av_repo: z.string(),
   ar_repo: z.string().nullable(),
+  av_revision: z.string().nullable().default(null),
+  ar_revision: z.string().nullable().default(null),
   gated: z.boolean(),
   description: z.string()
 });
@@ -615,7 +617,19 @@ export const jLensOptionsSchema = z.object({
   defaultModel: z.string(),
   defaultSource: z.string(),
   defaultFilename: z.string().min(1),
-  defaultRevision: z.string().min(1)
+  defaultRevision: z.string().min(1),
+  profiles: z.array(z.object({
+    name: z.string().min(1),
+    baseModel: z.string().min(1),
+    source: z.string().min(1),
+    filename: z.string().min(1),
+    revision: z.string().min(1),
+    dModel: z.number().int().positive(),
+    sourceLayers: z.array(z.number().int().nonnegative()).min(1),
+    defaultLayer: z.number().int().nonnegative(),
+    nPrompts: z.number().int().positive(),
+    description: z.string().min(1)
+  })).default([])
 });
 
 export const jLensPreflightSchema = z.object({
@@ -688,7 +702,8 @@ export const patchingPreflightSchema = z.object({
   reason: z.string()
 });
 
-export type PatchingComponent = "resid_post" | "attn_out" | "mlp_out";
+export type ActivationComponent = "resid_post" | "attn_out" | "mlp_out";
+export type PatchingComponent = ActivationComponent | "z";
 export type PatchingPreflight = z.infer<typeof patchingPreflightSchema>;
 export interface PatchingPreflightInput {
   modelName: string;
@@ -711,9 +726,10 @@ export const patchingJobSchema = z.object({
   updatedAt: z.string(),
   request: z.object({
     corruptedPrompt: z.string(),
-    component: z.enum(["resid_post", "attn_out", "mlp_out"]),
+    component: z.enum(["resid_post", "attn_out", "z", "mlp_out"]),
     layers: z.array(z.number().int()).min(1),
     positions: z.array(z.number().int()).min(1),
+    head: z.number().int().nonnegative().optional(),
     targetTokenId: z.number().int().nonnegative(),
     sourceRun: z.object({ runId: z.string(), sampleId: z.string(), modelName: z.string() }),
     preflight: patchingPreflightSchema
@@ -729,6 +745,7 @@ export interface PatchingRunInput {
   component: PatchingComponent;
   layers: number[];
   positions: number[];
+  head?: number;
   targetTokenId: number;
 }
 
@@ -753,7 +770,7 @@ export interface InterventionPreflightInput {
   promptTokenCount: number;
   availableLayers: number[];
   layer: number;
-  component: PatchingComponent;
+  component: ActivationComponent;
   positionStart: number;
   positionEnd: number;
   targetTokenId: number;
@@ -795,7 +812,7 @@ export interface InterventionRunInput {
   desiredPrompt: string;
   undesiredPrompt: string;
   layer: number;
-  component: PatchingComponent;
+  component: ActivationComponent;
   scale: number;
   positionStart: number;
   positionEnd: number;

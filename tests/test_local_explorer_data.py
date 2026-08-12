@@ -13,6 +13,8 @@ assert SPEC is not None and SPEC.loader is not None
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
 _attention_cells = MODULE._attention_cells
+_attention_head_coverage = MODULE._attention_head_coverage
+_attention_heads = MODULE._attention_heads
 _attribution_methods = MODULE._attribution_methods
 _logit_lens_rows = MODULE._logit_lens_rows
 _mlp_neurons = MODULE._mlp_neurons
@@ -99,6 +101,45 @@ def test_attention_cells_are_derived_from_matching_layer_patterns() -> None:
     assert all(cell["layer"] == 0 for cell in cells)
     assert all(cell["sourceKey"] == "blocks.0.attn.hook_pattern" for cell in cells)
     assert all(cell["metric"] == "mean_head_max_source_attention" for cell in cells)
+
+
+def test_attention_heads_keep_every_head_when_matrix_budget_allows() -> None:
+    pattern = torch.tensor(
+        [[
+            [[1.0, 0.0], [0.8, 0.2]],
+            [[1.0, 0.0], [0.3, 0.7]],
+            [[1.0, 0.0], [0.5, 0.5]],
+            [[1.0, 0.0], [0.1, 0.9]],
+        ]]
+    )
+    cache = {"blocks.0.attn.hook_pattern": pattern}
+
+    coverage = _attention_head_coverage(cache, [0], 2, value_budget=16)
+    heads = _attention_heads(cache, [0], ["a", "b"], [1], coverage=coverage)
+
+    assert coverage["complete"] is True
+    assert coverage["availableByLayer"] == {"0": 4}
+    assert [head["id"] for head in heads] == ["L0H0", "L0H1", "L0H2", "L0H3"]
+
+
+def test_attention_heads_report_and_rank_budgeted_subset() -> None:
+    pattern = torch.tensor(
+        [[
+            [[1.0, 0.0], [0.8, 0.2]],
+            [[1.0, 0.0], [0.3, 0.7]],
+            [[1.0, 0.0], [0.5, 0.5]],
+            [[1.0, 0.0], [0.1, 0.9]],
+        ]]
+    )
+    cache = {"blocks.0.attn.hook_pattern": pattern}
+
+    coverage = _attention_head_coverage(cache, [0], 2, value_budget=8)
+    heads = _attention_heads(cache, [0], ["a", "b"], [1], coverage=coverage)
+
+    assert coverage["complete"] is False
+    assert coverage["retainedHeadsPerLayer"] == 2
+    assert coverage["storedByLayer"] == {"0": 2}
+    assert [head["id"] for head in heads] == ["L0H3", "L0H1"]
 
 
 def test_mlp_cells_preserve_raw_values_and_normalize_for_display() -> None:
