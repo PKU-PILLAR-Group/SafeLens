@@ -3130,6 +3130,7 @@ export const realRun = {
       "semanticDensity": 0.006
     }
   ],
+  "jLens": [],
   "logitLens": [
     {
       "layer": 0,

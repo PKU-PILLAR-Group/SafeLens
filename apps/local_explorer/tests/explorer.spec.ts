@@ -7707,6 +7707,7 @@ test("keeps primary visualization controls at mobile touch size", async ({ page 
   }
 
   async function expectTouchHeight(locator: ReturnType<typeof page.locator>) {
+    await expect(locator.first()).toBeVisible();
     const boxes = await locator.evaluateAll((elements) => elements.map((element) => {
       const rect = element.getBoundingClientRect();
       return { width: rect.width, height: rect.height };
@@ -7716,6 +7717,7 @@ test("keeps primary visualization controls at mobile touch size", async ({ page 
   }
 
   async function expectSquareTouchTargets(locator: ReturnType<typeof page.locator>) {
+    await expect(locator.first()).toBeVisible();
     const boxes = await locator.evaluateAll((elements) => elements.map((element) => {
       const rect = element.getBoundingClientRect();
       return { width: rect.width, height: rect.height };

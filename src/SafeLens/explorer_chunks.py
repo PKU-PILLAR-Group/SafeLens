@@ -14,6 +14,7 @@ MANIFEST_PROTOCOL = "safelens-physical-chunks-v1"
 CHUNK_COMPONENTS = (
     "residualCells",
     "logitLens",
+    "jLens",
     "attentionHeads",
     "attentionCells",
     "mlpNeurons",
@@ -107,6 +108,7 @@ def build_explorer_sidecar(artifact_path: Path, *, block_size: int = 512) -> Pat
                     "attributionTracks",
                     "attributionMethods",
                     "nla",
+                    "jLens",
                 },
                 "blocks": blocks,
             }
@@ -196,7 +198,7 @@ def _slice_component(
             ],
             "chunk": {"tokenStart": token_start, "tokenEnd": token_end},
         }
-    if component in {"residualCells", "logitLens", "attentionCells", "mlpCells", "nla"}:
+    if component in {"residualCells", "logitLens", "jLens", "attentionCells", "mlpCells", "nla"}:
         return _position_rows(value, token_start, token_end)
     if component == "attentionHeads":
         return [

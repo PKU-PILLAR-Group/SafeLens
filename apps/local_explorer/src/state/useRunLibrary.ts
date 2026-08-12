@@ -320,7 +320,7 @@ export function useRunLibrary(builtInRun: ExplorerRun, syncLocation = true) {
     signal: AbortSignal,
     context: { view: WorkspaceView; layer?: number; tokenIndex?: number; sourceTokenIndex?: number }
   ): Promise<Pick<RunRecord, "run" | "hydration">> {
-    if (summary.chunkProtocol !== "safelens-chunks-v1") {
+    if (summary.parentRun || summary.chunkProtocol !== "safelens-chunks-v1") {
       return { run: await fetchRemoteRun(summary, signal), hydration: { mode: "full" } };
     }
     const metadata = await fetchRemoteRunMetadata(summary, signal);
@@ -728,10 +728,10 @@ export function useRunLibrary(builtInRun: ExplorerRun, syncLocation = true) {
       metric: string;
       tokenIndex?: number;
       layer?: number;
-      kind: "attribution" | "nla" | "patching" | "intervention";
+      kind: "attribution" | "nla" | "jlens" | "patching" | "intervention";
     },
     options?: {
-      kind?: "prompt" | "attribution" | "nla" | "patching" | "intervention";
+      kind?: "prompt" | "attribution" | "nla" | "jlens" | "patching" | "intervention";
       updateLocation?: boolean;
       conversationId?: string;
       turnIndex?: number;
@@ -782,7 +782,7 @@ export function useRunLibrary(builtInRun: ExplorerRun, syncLocation = true) {
     setActiveKey(record.key);
     setMessage({
       tone: "success",
-      title: `${kind === "nla" ? "NLA" : kind === "attribution" ? "Attribution" : kind === "patching" ? "Activation patching" : kind === "intervention" ? "Intervention comparison" : "Prompt analysis"} added to the Run Library`,
+      title: `${kind === "nla" ? "NLA" : kind === "jlens" ? "J-Lens" : kind === "attribution" ? "Attribution" : kind === "patching" ? "Activation patching" : kind === "intervention" ? "Intervention comparison" : "Prompt analysis"} added to the Run Library`,
       details: [`${run.runId} / ${run.sampleId} · job ${jobId.slice(0, 8)}`]
     });
   }
@@ -857,7 +857,7 @@ function writeGeneratedRunLocation(
     metric: string;
     tokenIndex?: number;
     layer?: number;
-    kind: "attribution" | "nla" | "patching" | "intervention";
+    kind: "attribution" | "nla" | "jlens" | "patching" | "intervention";
   } | undefined,
   historyMode: Exclude<RunHistoryMode, "none">
 ) {
@@ -992,53 +992,115 @@ export interface ConversationSummary {
   turnCount: number;
   firstRecord: RunRecord;
   records: RunRecord[];
+  turnRecords: RunRecord[];
 }
 
 export function listConversations(records: RunRecord[]): ConversationSummary[] {
+  const recordsByKey = new Map(records.map((record) => [record.key, record]));
   const groups = new Map<string, RunRecord[]>();
   for (const record of records) {
-    if (!isConversationRecord(record)) continue;
-    const conversationId = conversationIdOf(record);
+    if (!isConversationRecord(record, recordsByKey)) continue;
+    const conversationId = conversationIdOf(record, recordsByKey);
     const group = groups.get(conversationId);
     if (group) group.push(record);
     else groups.set(conversationId, [record]);
   }
   return [...groups.entries()]
     .map(([conversationId, group]) => {
-      const sorted = group.slice().sort(compareTurns);
-      const last = sorted[sorted.length - 1];
+      const sorted = group.slice().sort((left, right) => compareTurns(left, right, recordsByKey));
+      const preferredByTurn = new Map<number, RunRecord>();
+      for (const record of sorted) {
+        const turnIndex = turnIndexOf(record, recordsByKey);
+        const current = preferredByTurn.get(turnIndex);
+        if (!current || preferConversationTurn(record, current)) {
+          preferredByTurn.set(turnIndex, record);
+        }
+      }
+      const turnRecords = [...preferredByTurn.values()].sort(
+        (left, right) => compareTurns(left, right, recordsByKey)
+      );
+      const lastUsedAt = group
+        .map((record) => record.lastUsedAt ?? record.importedAt)
+        .sort((left, right) => right.localeCompare(left))[0];
       return {
         conversationId,
-        title: conversationTitle(sorted[0]),
-        lastUsedAt: last.lastUsedAt ?? last.importedAt,
-        turnCount: sorted.length,
-        firstRecord: sorted[0],
-        records: sorted
+        title: conversationTitle(turnRecords[0]),
+        lastUsedAt,
+        turnCount: turnRecords.length,
+        firstRecord: turnRecords[0],
+        records: sorted,
+        turnRecords
       } satisfies ConversationSummary;
     })
     .sort((left, right) => right.lastUsedAt.localeCompare(left.lastUsedAt));
 }
 
-function conversationIdOf(record: RunRecord): string {
-  const candidate = record.run?.metadata?.conversationId;
-  return typeof candidate === "string" ? candidate : `legacy:${record.key}`;
+function conversationIdOf(
+  record: RunRecord,
+  recordsByKey: Map<string, RunRecord>,
+  seen = new Set<string>()
+): string {
+  const candidate = record.run?.metadata?.conversationId ?? record.remoteSummary?.conversationId;
+  if (typeof candidate === "string") return candidate;
+  if (seen.has(record.key)) return `legacy:${record.key}`;
+  seen.add(record.key);
+  const parent = parentConversationRecord(record, recordsByKey);
+  return parent ? conversationIdOf(parent, recordsByKey, seen) : `legacy:${record.key}`;
 }
 
-function turnIndexOf(record: RunRecord): number {
-  const candidate = record.run?.metadata?.turnIndex;
-  return typeof candidate === "number" && Number.isInteger(candidate) ? candidate : 0;
+function turnIndexOf(
+  record: RunRecord,
+  recordsByKey: Map<string, RunRecord>,
+  seen = new Set<string>()
+): number {
+  const candidate = record.run?.metadata?.turnIndex ?? record.remoteSummary?.turnIndex;
+  if (typeof candidate === "number" && Number.isInteger(candidate)) return candidate;
+  if (seen.has(record.key)) return 0;
+  seen.add(record.key);
+  const parent = parentConversationRecord(record, recordsByKey);
+  return parent ? turnIndexOf(parent, recordsByKey, seen) : 0;
 }
 
-function compareTurns(left: RunRecord, right: RunRecord) {
-  const turnDelta = turnIndexOf(left) - turnIndexOf(right);
+function compareTurns(
+  left: RunRecord,
+  right: RunRecord,
+  recordsByKey: Map<string, RunRecord>
+) {
+  const turnDelta = turnIndexOf(left, recordsByKey) - turnIndexOf(right, recordsByKey);
   if (turnDelta !== 0) return turnDelta;
   return left.importedAt.localeCompare(right.importedAt);
 }
 
-function isConversationRecord(record: RunRecord) {
+function isConversationRecord(
+  record: RunRecord,
+  recordsByKey: Map<string, RunRecord>,
+  seen = new Set<string>()
+): boolean {
   if (record.builtIn) return true;
-  if (record.sourceType === "remote") return /(^|\/)generated\/prompt-[^/]+\.explorer\.json$/i.test(record.sourceName);
-  return record.sourceName.startsWith("prompt job ");
+  if (
+    record.sourceType === "remote" &&
+    /(^|\/)generated\/prompt-[^/]+\.explorer\.json$/i.test(record.sourceName)
+  ) return true;
+  if (record.sourceName.startsWith("prompt job ")) return true;
+  if (seen.has(record.key)) return false;
+  seen.add(record.key);
+  const parent = parentConversationRecord(record, recordsByKey);
+  return parent ? isConversationRecord(parent, recordsByKey, seen) : false;
+}
+
+function parentConversationRecord(record: RunRecord, recordsByKey: Map<string, RunRecord>) {
+  const parent = record.run?.metadata?.parentRun ?? record.remoteSummary?.parentRun;
+  if (!parent || typeof parent !== "object" || Array.isArray(parent)) return undefined;
+  const source = parent as Record<string, unknown>;
+  if (typeof source.runId !== "string" || typeof source.sampleId !== "string") return undefined;
+  return recordsByKey.get(`${source.runId}::${source.sampleId}`);
+}
+
+function preferConversationTurn(candidate: RunRecord, current: RunRecord) {
+  const candidateDerived = Boolean(candidate.run?.metadata?.parentRun ?? candidate.remoteSummary?.parentRun);
+  const currentDerived = Boolean(current.run?.metadata?.parentRun ?? current.remoteSummary?.parentRun);
+  if (candidateDerived !== currentDerived) return candidateDerived;
+  return candidate.importedAt.localeCompare(current.importedAt) >= 0;
 }
 
 function conversationTitle(record: RunRecord) {

@@ -8,6 +8,7 @@ import {
   type RunMetadata
 } from "../api/explorerClient";
 import { explorerRunCoreSchema } from "../schemas/explorerArtifact";
+import { jLensRowSchema } from "../schemas/explorerArtifact";
 import type { ExplorerRun, WorkspaceView } from "../types";
 
 const TOKEN_BLOCK_SIZE = 512;
@@ -53,6 +54,7 @@ export function buildPartialExplorerRun(metadata: RunMetadata): ExplorerRun {
     mlpNeurons: [],
     residualCells: [],
     logitLens: [],
+    jLens: [],
     attentionCells: [],
     mlpCells: [],
     attributionTracks: [],
@@ -202,6 +204,9 @@ export function mergeRunChunk(run: ExplorerRun, chunk: RunChunk): ExplorerRun {
   }
   if (chunk.component === "logitLens") {
     return { ...run, logitLens: mergePositionRows(run.logitLens, logitLensSchema.parse(chunk.data)) };
+  }
+  if (chunk.component === "jLens") {
+    return { ...run, jLens: mergePositionRows(run.jLens, z.array(jLensRowSchema).parse(chunk.data)) };
   }
   if (chunk.component === "attentionCells") {
     return { ...run, attentionCells: mergePositionRows(run.attentionCells, componentCellsSchema.parse(chunk.data)) };

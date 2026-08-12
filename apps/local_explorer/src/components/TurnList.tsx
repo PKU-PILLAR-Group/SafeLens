@@ -12,7 +12,7 @@ interface TurnListProps {
   onRetry: (turnId: string) => void;
   onCancel: (turnId: string) => void;
   onToggleAnalysis: (turnId: string, mode: AnalysisId) => void;
-  onRunReady: (run: ExplorerRun, job: { id: string; kind: "prompt-run" | "attribution" | "intervention" }) => void;
+  onRunReady: (run: ExplorerRun, job: { id: string; kind: "prompt-run" | "attribution" | "intervention" | "nla" | "jlens" }) => void;
 }
 
 export function TurnList({

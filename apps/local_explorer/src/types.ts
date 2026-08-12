@@ -129,6 +129,14 @@ export interface LogitLensRow {
   sourceKey: string;
 }
 
+export interface JLensRow extends LogitLensRow {
+  modelTopPredictions: LogitLensPrediction[];
+  lensSource: string;
+  filename: string;
+  revision: string;
+  nPrompts: number;
+}
+
 export interface ComponentCell {
   layer: number;
   tokenIndex: number;
@@ -385,6 +393,7 @@ export interface ExplorerRun {
   mlpNeurons: MLPNeuron[];
   residualCells: ResidualCell[];
   logitLens: LogitLensRow[];
+  jLens: JLensRow[];
   attentionCells: ComponentCell[];
   mlpCells: ComponentCell[];
   attributionTracks: AttributionTrack[];

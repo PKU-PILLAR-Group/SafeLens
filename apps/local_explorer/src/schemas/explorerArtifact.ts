@@ -100,6 +100,14 @@ const logitLensSchema = z.object({
   sourceKey: z.string().min(1)
 });
 
+export const jLensRowSchema = logitLensSchema.extend({
+  modelTopPredictions: z.array(logitPredictionSchema).min(1),
+  lensSource: z.string().min(1),
+  filename: z.string().min(1),
+  revision: z.string().min(1),
+  nPrompts: z.number().int().positive()
+});
+
 const componentCellSchema = z.object({
   layer: z.number().int().nonnegative(),
   tokenIndex: z.number().int().nonnegative(),
@@ -264,6 +272,7 @@ export const explorerRunSchema = z.object({
   mlpNeurons: z.array(mlpNeuronSchema).min(1),
   residualCells: z.array(residualCellSchema).min(1),
   logitLens: z.array(logitLensSchema).min(1),
+  jLens: z.array(jLensRowSchema).default([]),
   attentionCells: z.array(componentCellSchema).min(1),
   mlpCells: z.array(componentCellSchema).min(1),
   attributionTracks: z.array(z.object({

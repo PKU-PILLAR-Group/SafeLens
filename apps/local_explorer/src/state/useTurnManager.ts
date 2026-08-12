@@ -9,6 +9,7 @@ export type { TurnView };
 
 interface UseTurnManagerOptions {
   model: string;
+  maxNewTokens: number;
   conversationId: string | null;
   onConversationStart: (id: string) => void;
   onRunReady: (run: ExplorerRun, job: PromptJob, turnId: string) => void;
@@ -16,6 +17,7 @@ interface UseTurnManagerOptions {
 
 export function useTurnManager({
   model,
+  maxNewTokens,
   conversationId,
   onConversationStart,
   onRunReady
@@ -111,11 +113,11 @@ export function useTurnManager({
       template: "chat",
       model,
       seed: 0,
-      maxNewTokens: 8,
+      maxNewTokens,
       temperature: 0,
       messages
     });
-  }, [conversationId, model, onConversationStart, runner, turns]);
+  }, [conversationId, maxNewTokens, model, onConversationStart, runner, turns]);
 
   const cancel = useCallback((turnId: string) => {
     if (activeTurnIdRef.current !== turnId) return;
@@ -139,11 +141,11 @@ export function useTurnManager({
       template: "chat",
       model,
       seed: 0,
-      maxNewTokens: 8,
+      maxNewTokens,
       temperature: 0,
       messages: contextMessages(turns.slice(0, Math.max(0, turnIndex)), turnId)
     });
-  }, [model, runner, turns]);
+  }, [maxNewTokens, model, runner, turns]);
 
   const reset = useCallback(() => {
     runner.reset();

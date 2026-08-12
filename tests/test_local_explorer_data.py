@@ -166,6 +166,43 @@ def test_logit_lens_uses_final_norm_and_real_unembedding() -> None:
     assert rows[1]["sourceKey"] == "layer_0.resid_post -> ln_final -> unembed"
 
 
+def test_logit_lens_aligns_residual_with_bfloat16_final_norm() -> None:
+    class BFloatNorm(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.ones(2, dtype=torch.bfloat16))
+
+        def forward(self, value: torch.Tensor) -> torch.Tensor:
+            return value * self.weight
+
+    class FakeWrapper:
+        W_U = torch.tensor([[1.0, 0.0], [0.0, 1.0]])
+        b_U = torch.zeros(2)
+
+        def __init__(self) -> None:
+            self.model = type(
+                "Model",
+                (),
+                {"transformer": type("Transformer", (), {"ln_f": BFloatNorm()})()},
+            )()
+
+        def to_single_str_token(self, token_id: int) -> str:
+            return ["zero", "one"][token_id]
+
+    rows = _logit_lens_rows(
+        FakeWrapper(),
+        {"layer_0.resid_post": torch.tensor([[[1.0, 0.0]]])},
+        [0],
+        [0],
+        final_next_token_id=1,
+        top_k=2,
+    )
+
+    assert rows[0]["targetTokenId"] == 1
+    assert rows[0]["targetLogit"] == pytest.approx(0.0)
+    assert rows[0]["topPredictions"][0]["tokenId"] == 0
+
+
 def test_mlp_neurons_preserve_signed_token_profiles() -> None:
     cache = {"layer_0.post": torch.tensor([[[-2.0, 0.5], [1.0, -3.0], [4.0, 2.0]]])}
 

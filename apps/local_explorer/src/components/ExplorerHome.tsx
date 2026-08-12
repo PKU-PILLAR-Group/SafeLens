@@ -1,14 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   BrainCircuit,
-  GitCompareArrows,
   MessageSquareText,
   PanelLeftOpen,
   Paperclip,
   Play,
   LoaderCircle,
-  ScanSearch,
-  ShieldCheck,
   SquarePen,
   Trash2,
   X
@@ -28,6 +25,8 @@ import type { TurnView } from "../state/useTurnManager";
 import type { AnalysisId } from "./TurnCard";
 
 const DEFAULT_MODEL = "sshleifer/tiny-gpt2";
+const DEFAULT_MAX_NEW_TOKENS = 128;
+const MAX_NEW_TOKENS_LIMIT = 512;
 const HIDDEN_RUN_STORAGE_KEY = "safelens.localExplorer.hiddenWork.v1";
 
 interface ExplorerHomeProps {
@@ -35,7 +34,7 @@ interface ExplorerHomeProps {
   activeRecord: RunRecord & { run: ExplorerRun };
   remoteState: RemoteRunState;
   onSelectConversation: (key: string) => void;
-  onRunReady: (run: ExplorerRun, job: { id: string; kind: "prompt-run" | "attribution" | "intervention" }) => void;
+  onRunReady: (run: ExplorerRun, job: { id: string; kind: "prompt-run" | "attribution" | "intervention" | "nla" | "jlens" }) => void;
   onRemoveRuns: (keys: string[]) => void;
 }
 
@@ -51,6 +50,8 @@ export function ExplorerHome({
   const [sourceKey, setSourceKey] = useState(activeRecord.key);
   const [models, setModels] = useState([DEFAULT_MODEL]);
   const [model, setModel] = useState(DEFAULT_MODEL);
+  const [maxNewTokens, setMaxNewTokens] = useState(DEFAULT_MAX_NEW_TOKENS);
+  const [maxNewTokensLimit, setMaxNewTokensLimit] = useState(MAX_NEW_TOKENS_LIMIT);
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [analysisOpen, setAnalysisOpen] = useState<{ turnId: string; mode: AnalysisId } | null>(null);
   const [hiddenRunKeys, setHiddenRunKeys] = useState<Set<string>>(loadHiddenRunKeys);
@@ -69,6 +70,7 @@ export function ExplorerHome({
   const turnsRef = useRef<TurnView[]>([]);
   const turnManager = useTurnManager({
     model,
+    maxNewTokens,
     conversationId,
     onConversationStart: setConversationId,
     onRunReady: (run, job, turnId) => {
@@ -91,6 +93,8 @@ export function ExplorerHome({
     void fetchPromptOptions(controller.signal).then((options) => {
       setModels(options.models);
       setModel((current) => options.models.includes(current) ? current : options.models[0]);
+      setMaxNewTokensLimit(options.maxNewTokens);
+      setMaxNewTokens((current) => Math.min(current, options.maxNewTokens));
     }).catch(() => undefined);
     return () => controller.abort();
   }, []);
@@ -108,7 +112,7 @@ export function ExplorerHome({
   }, [activeRecord, pendingConversationKey]);
 
   function turnsForConversation(conversation: ConversationSummary): TurnView[] {
-    return conversation.records
+    return conversation.turnRecords
       .filter((record): record is RunRecord & { run: ExplorerRun } => record.run !== null)
       .map((record) => ({
         id: record.key,
@@ -136,8 +140,15 @@ export function ExplorerHome({
     setSourceKey(record.key);
     setPrompt("");
     setAnalysisOpen(null);
-    const previousModel = conversationModel(record.run);
+    const conversationRuns = conversation?.turnRecords
+      .flatMap((candidate) => candidate.run ? [candidate.run] : []) ?? [];
+    const configurationRun = conversationRuns[conversationRuns.length - 1] ?? record.run;
+    const previousModel = conversationModel(configurationRun);
     if (previousModel) setModel(previousModel);
+    const previousMaxNewTokens = conversationMaxNewTokens(configurationRun);
+    if (previousMaxNewTokens) {
+      setMaxNewTokens(Math.min(previousMaxNewTokens, maxNewTokensLimit));
+    }
     setHistoryOpen(false);
   }
 
@@ -250,20 +261,6 @@ export function ExplorerHome({
               <div>
                 <span><MessageSquareText size={19} /></span>
                 <h1 id="chat-home-title">What would you like to inspect?</h1>
-                <div className="chat-starter-grid" aria-label="Suggested analyses">
-                  <button type="button" onClick={() => setPrompt("Which input tokens most influenced this response?")}>
-                    <ScanSearch size={19} />
-                    <strong>Trace input influence</strong>
-                  </button>
-                  <button type="button" onClick={() => setPrompt("Steer this answer toward safer, more helpful behavior.")}>
-                    <ShieldCheck size={19} />
-                    <strong>Steer toward safety</strong>
-                  </button>
-                  <button type="button" onClick={() => setPrompt("Compare how the model responds to benign and risky requests.")}>
-                    <GitCompareArrows size={19} />
-                    <strong>Compare behaviors</strong>
-                  </button>
-                </div>
               </div>
             </section>
           ) : (
@@ -283,9 +280,12 @@ export function ExplorerHome({
           prompt={prompt}
           model={model}
           models={models}
+          maxNewTokens={maxNewTokens}
+          maxNewTokensLimit={maxNewTokensLimit}
           running={running}
           onPromptChange={setPrompt}
           onModelChange={setModel}
+          onMaxNewTokensChange={setMaxNewTokens}
           onUseSourcePrompt={() => {
             const sourcePrompt = selectedSource.run?.prompt;
             if (sourcePrompt) setPrompt(sourcePrompt);
@@ -322,18 +322,24 @@ function PromptComposer({
   prompt,
   model,
   models,
+  maxNewTokens,
+  maxNewTokensLimit,
   running,
   onPromptChange,
   onModelChange,
+  onMaxNewTokensChange,
   onUseSourcePrompt,
   onSubmit
 }: {
   prompt: string;
   model: string;
   models: string[];
+  maxNewTokens: number;
+  maxNewTokensLimit: number;
   running: boolean;
   onPromptChange: (value: string) => void;
   onModelChange: (value: string) => void;
+  onMaxNewTokensChange: (value: number) => void;
   onUseSourcePrompt: () => void;
   onSubmit: () => void;
 }) {
@@ -358,6 +364,22 @@ function PromptComposer({
           <select aria-label="Analysis model" value={model} onChange={(event) => onModelChange(event.target.value)}>
             {models.map((item) => <option key={item} value={item}>{shortModelName(item)}</option>)}
           </select>
+        </label>
+        <label className="chat-token-budget">
+          <span>Max</span>
+          <input
+            aria-label="Maximum new tokens"
+            type="number"
+            min={1}
+            max={maxNewTokensLimit}
+            step={1}
+            value={maxNewTokens}
+            disabled={running}
+            title="Maximum new tokens"
+            onChange={(event) => onMaxNewTokensChange(
+              clampInteger(event.target.value, 1, maxNewTokensLimit)
+            )}
+          />
         </label>
         <button className="chat-run" aria-label="Run analysis" title="Run analysis" disabled={!prompt.trim() || running} onClick={onSubmit}>
           {running ? <LoaderCircle size={18} /> : <Play size={18} fill="currentColor" />}
@@ -462,6 +484,20 @@ function conversationModel(run: ExplorerRun) {
   if (!promptRunner || typeof promptRunner !== "object") return null;
   const value = (promptRunner as Record<string, unknown>).model;
   return typeof value === "string" ? value : null;
+}
+
+function conversationMaxNewTokens(run: ExplorerRun) {
+  const promptRunner = run.metadata?.promptRunner;
+  if (!promptRunner || typeof promptRunner !== "object") return null;
+  const value = (promptRunner as Record<string, unknown>).maxNewTokens;
+  return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : null;
+}
+
+function clampInteger(value: string, minimum: number, maximum: number) {
+  const parsed = Number(value);
+  return Number.isInteger(parsed)
+    ? Math.max(minimum, Math.min(maximum, parsed))
+    : minimum;
 }
 
 function userPromptForRun(run: ExplorerRun) {

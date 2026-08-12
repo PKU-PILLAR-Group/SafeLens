@@ -17,6 +17,9 @@ const remoteSummarySchema = z.object({
   modifiedAt: z.string().min(1),
   sizeBytes: z.number().int().nonnegative(),
   promptPreview: z.string().max(160).nullable().optional(),
+  parentRun: z.object({ runId: z.string().min(1), sampleId: z.string().min(1) }).nullable().optional(),
+  conversationId: z.string().min(1).nullable().optional(),
+  turnIndex: z.number().int().nonnegative().nullable().optional(),
   chunkProtocol: z.literal("safelens-chunks-v1").optional()
 });
 
@@ -37,6 +40,7 @@ export type RemoteRunSummary = z.infer<typeof remoteSummarySchema>;
 const chunkComponentSchema = z.enum([
   "residualCells",
   "logitLens",
+  "jLens",
   "attentionHeads",
   "attentionCells",
   "mlpNeurons",
@@ -606,6 +610,63 @@ export interface NLARunInput {
   confirmGatedAccess: boolean;
 }
 
+export const jLensOptionsSchema = z.object({
+  packageInstalled: z.boolean(),
+  defaultModel: z.string(),
+  defaultSource: z.string(),
+  defaultFilename: z.string().min(1),
+  defaultRevision: z.string().min(1)
+});
+
+export const jLensPreflightSchema = z.object({
+  packageInstalled: z.boolean(),
+  modelAllowed: z.boolean(),
+  layerAvailable: z.boolean(),
+  positionValid: z.boolean(),
+  lensConfigured: z.boolean(),
+  artifactChecked: z.boolean(),
+  fittedLayers: z.array(z.number().int().nonnegative()),
+  lensDModel: z.number().int().positive().nullable(),
+  canSubmit: z.boolean(),
+  reason: z.string().min(1)
+});
+
+export const jLensJobSchema = z.object({
+  id: z.string().min(1),
+  kind: z.literal("jlens"),
+  status: z.enum(["idle", "loading", "ready", "error", "cancelled"]),
+  stage: z.string(),
+  progress: z.number().int().min(0).max(100),
+  detail: z.string(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+  request: z.object({
+    layer: z.number().int().nonnegative(),
+    position: z.number().int().nonnegative(),
+    lensSource: z.string().min(1),
+    filename: z.string().min(1),
+    revision: z.string().min(1),
+    topK: z.number().int().min(3).max(50),
+    sourceRun: z.object({ runId: z.string(), sampleId: z.string(), modelName: z.string() }),
+    preflight: jLensPreflightSchema
+  }),
+  result: explorerRunSchema.nullable(),
+  error: z.string().nullable()
+});
+
+export type JLensOptions = z.infer<typeof jLensOptionsSchema>;
+export type JLensPreflight = z.infer<typeof jLensPreflightSchema>;
+export type JLensJob = z.infer<typeof jLensJobSchema>;
+export interface JLensRunInput {
+  run: ExplorerRun;
+  layer: number;
+  position: number;
+  lensSource: string;
+  filename: string;
+  revision: string;
+  topK: number;
+}
+
 export const patchingPreflightSchema = z.object({
   modelAllowed: z.boolean(),
   promptsDiffer: z.boolean(),
@@ -881,6 +942,58 @@ export async function cancelNlaJob(jobId: string): Promise<NLAJob> {
   return parseNlaJob(await response.json());
 }
 
+export async function fetchJLensOptions(signal?: AbortSignal): Promise<JLensOptions> {
+  const response = await fetch(`${API_BASE}/jlens/options`, {
+    signal,
+    headers: { Accept: "application/json" },
+    cache: "no-store"
+  });
+  if (!response.ok) throw new ExplorerApiError("jlens_options_error", await responseDetail(response));
+  const parsed = jLensOptionsSchema.safeParse(await response.json());
+  if (!parsed.success) throw new ExplorerApiError("invalid_jlens_options", parsed.error.message);
+  return parsed.data;
+}
+
+export async function fetchJLensPreflight(
+  input: Omit<JLensRunInput, "run" | "topK"> & {
+    modelName: string;
+    dModel: number;
+    availableLayers: number[];
+    tokenCount: number;
+  },
+  signal?: AbortSignal
+): Promise<JLensPreflight> {
+  const response = await fetch(`${API_BASE}/jlens/preflight`, {
+    method: "POST",
+    signal,
+    headers: { Accept: "application/json", "Content-Type": "application/json" },
+    body: JSON.stringify(input)
+  });
+  if (!response.ok) throw new ExplorerApiError("jlens_preflight_error", await responseDetail(response));
+  const parsed = jLensPreflightSchema.safeParse(await response.json());
+  if (!parsed.success) throw new ExplorerApiError("invalid_jlens_preflight", parsed.error.message);
+  return parsed.data;
+}
+
+export async function submitJLensJob(input: JLensRunInput): Promise<JLensJob> {
+  const response = await fetch(`${API_BASE}/jobs/jlens`, {
+    method: "POST",
+    headers: { Accept: "application/json", "Content-Type": "application/json" },
+    body: JSON.stringify(input)
+  });
+  if (!response.ok) throw await jobResponseError(response, "jlens_submit_error");
+  return parseJLensJob(await response.json());
+}
+
+export async function cancelJLensJob(jobId: string): Promise<JLensJob> {
+  const response = await fetch(`${API_BASE}/jobs/${encodeURIComponent(jobId)}`, {
+    method: "DELETE",
+    headers: { Accept: "application/json" }
+  });
+  if (!response.ok) throw await jobResponseError(response, "jlens_cancel_error");
+  return parseJLensJob(await response.json());
+}
+
 export async function fetchPatchingPreflight(
   input: PatchingPreflightInput,
   signal?: AbortSignal
@@ -977,6 +1090,17 @@ function parseNlaJob(input: unknown): NLAJob {
   const parsed = nlaJobSchema.safeParse(input);
   if (!parsed.success) {
     throw new ExplorerApiError("invalid_nla_job", `NLA job response failed validation: ${parsed.error.message}`);
+  }
+  return parsed.data;
+}
+
+function parseJLensJob(input: unknown): JLensJob {
+  const parsed = jLensJobSchema.safeParse(input);
+  if (!parsed.success) {
+    throw new ExplorerApiError(
+      "invalid_jlens_job",
+      `J-Lens job response failed validation: ${parsed.error.message}`
+    );
   }
   return parsed.data;
 }

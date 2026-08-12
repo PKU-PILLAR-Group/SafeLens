@@ -6,6 +6,7 @@ import gc
 import json
 import os
 import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -46,10 +47,13 @@ def main() -> None:
         _empty_cuda_cache()
 
     token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+    nla_cache_dir = ".cache/safelens/nla"
+    runtime_profile, local_files_only = _localize_nla_profile(profile, nla_cache_dir)
     client = NLAClient.from_profile(
-        profile,
+        runtime_profile,
         load_reconstructor=True,
-        cache_dir=".cache/safelens/nla",
+        cache_dir=nla_cache_dir,
+        local_files_only=local_files_only,
         token=token,
         revision=request["revision"],
         device=os.environ.get("SAFELENS_EXPLORER_JOB_DEVICE", "cpu"),
@@ -84,14 +88,27 @@ def main() -> None:
 
 
 def _load_base_model(model_id: str) -> HuggingFaceModelWrapper:
+    cache_dir = os.environ.get(
+        "SAFELENS_EXPLORER_MODEL_CACHE",
+        ".cache/safelens/local-explorer-real-flow",
+    )
+    local_snapshot = _complete_hf_snapshot(model_id, cache_dir)
+    load_kwargs: dict[str, Any] = {}
+    tokenizer_kwargs: dict[str, Any] = {}
+    if local_snapshot is not None:
+        load_kwargs["local_files_only"] = True
+        tokenizer_kwargs["local_files_only"] = True
     config = PipelineConfig.model_validate(
         {
             "model": {
-                "source": "huggingface",
+                "source": "local" if local_snapshot is not None else "huggingface",
                 "name": model_id,
+                "local_dir": str(local_snapshot) if local_snapshot is not None else None,
                 "device": os.environ.get("SAFELENS_EXPLORER_JOB_DEVICE", "cpu"),
                 "dtype": "auto",
-                "cache_dir": ".cache/safelens/nla-base",
+                "cache_dir": cache_dir,
+                "load_kwargs": load_kwargs,
+                "tokenizer_kwargs": tokenizer_kwargs,
                 "trust_remote_code": False,
             }
         }
@@ -101,6 +118,64 @@ def _load_base_model(model_id: str) -> HuggingFaceModelWrapper:
         raise TypeError(f"expected HuggingFaceModelWrapper, got {type(wrapper).__name__}")
     wrapper.load_model()
     return wrapper
+
+
+def _complete_hf_snapshot(model_id: str, cache_dir: str) -> Path | None:
+    repository = Path(cache_dir) / f"models--{model_id.replace('/', '--')}"
+    reference = repository / "refs" / "main"
+    if not reference.is_file():
+        return None
+    revision = reference.read_text(encoding="utf-8").strip()
+    snapshot = repository / "snapshots" / revision
+    if (
+        not (snapshot / "config.json").is_file()
+        or not (snapshot / "tokenizer_config.json").is_file()
+    ):
+        return None
+    weight_files: list[Path] = []
+    for index_name in ("model.safetensors.index.json", "pytorch_model.bin.index.json"):
+        index_path = snapshot / index_name
+        if not index_path.is_file():
+            continue
+        try:
+            index = json.loads(index_path.read_text(encoding="utf-8"))
+            filenames = set(index["weight_map"].values())
+        except (json.JSONDecodeError, KeyError, TypeError, AttributeError):
+            return None
+        if not filenames or not all(isinstance(name, str) and name for name in filenames):
+            return None
+        weight_files.extend(snapshot / name for name in sorted(filenames))
+    if not weight_files:
+        weight_files = list(snapshot.glob("*.safetensors")) + list(
+            snapshot.glob("pytorch_model*.bin")
+        )
+    if not weight_files or not all(
+        path.is_file() and path.stat().st_size > 0 for path in weight_files
+    ):
+        return None
+    return snapshot
+
+
+def _localize_nla_profile(profile: Any, cache_dir: str) -> tuple[Any, bool]:
+    av_snapshot = _complete_hf_snapshot(profile.av_repo, cache_dir)
+    ar_snapshot = (
+        _complete_hf_snapshot(profile.ar_repo, cache_dir)
+        if profile.ar_repo is not None
+        else None
+    )
+    localized = replace(
+        profile,
+        av_repo=str(av_snapshot) if av_snapshot is not None else profile.av_repo,
+        ar_repo=(
+            str(ar_snapshot)
+            if ar_snapshot is not None
+            else profile.ar_repo
+        ),
+    )
+    complete = av_snapshot is not None and (
+        profile.ar_repo is None or ar_snapshot is not None
+    )
+    return localized, complete
 
 
 def _capture_vectors(

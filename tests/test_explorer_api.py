@@ -68,6 +68,7 @@ def test_explorer_api_indexes_and_serves_exact_samples(tmp_path: Path) -> None:
         "promptJobsEnabled": True,
         "attributionJobsEnabled": True,
         "nlaJobsEnabled": True,
+        "jLensJobsEnabled": True,
         "patchingJobsEnabled": True,
         "interventionJobsEnabled": True,
         "rootExists": True,
@@ -504,6 +505,7 @@ def test_prompt_options_include_registered_nla_base_models(tmp_path: Path) -> No
         "Qwen/Qwen2.5-7B-Instruct",
         "google/gemma-3-12b-it",
     ]
+    assert response.json()["maxNewTokens"] == 512
 
 
 def test_prompt_job_can_cancel_a_running_worker(tmp_path: Path) -> None:
@@ -747,6 +749,145 @@ def test_nla_job_queues_only_after_compatible_preflight(tmp_path: Path) -> None:
     )
     assert rejected.status_code == 409
     assert rejected.json()["detail"]["code"] == "incompatible"
+
+
+def test_nla_job_hydrates_chunked_workspace_run_before_worker(tmp_path: Path) -> None:
+    source = _sample()
+    source.update(
+        {
+            "prompt": "source prompt",
+            "modelName": "Qwen/Qwen2.5-7B-Instruct",
+            "nlaCompatibility": {"dModel": 3584, "availableLayers": [20], "profiles": []},
+            "payloadMarker": "complete-workspace-run",
+            "attentionHeads": [{"id": "L0H0"}],
+            "mlpNeurons": [{"id": "L0N0"}],
+            "residualCells": [{"layer": 0}],
+            "logitLens": [{"layer": 0}],
+            "attentionCells": [{"layer": 0}],
+            "mlpCells": [{"layer": 0}],
+            "attributionMethods": [{"id": "method"}],
+        }
+    )
+    _write_artifact(tmp_path, "workspace.explorer.json", [source])
+    chunked = {
+        **source,
+        "payloadMarker": "partial-run",
+        "attentionHeads": [{"id": "__chunk_pending__"}],
+        "mlpNeurons": [],
+        "attentionCells": [],
+        "mlpCells": [],
+        "attributionMethods": [{"id": "__chunk_pending__"}],
+    }
+
+    def runner(payload, _cancel_event, _progress):
+        assert payload.run["payloadMarker"] == "complete-workspace-run"
+        assert payload.run["attentionHeads"] == [{"id": "L0H0"}]
+        return {**payload.run, "runId": "run-a-nla-derived"}
+
+    client = TestClient(create_app(tmp_path, nla_runner=runner))
+    response = client.post(
+        "/api/jobs/nla",
+        json={
+            "run": chunked,
+            "profile": "qwen2.5-7b-l20",
+            "positions": [0],
+            "loadReconstructor": True,
+        },
+    )
+
+    assert response.status_code == 202
+    snapshot = _wait_for_job(client, response.json()["id"], "ready")
+    assert snapshot["result"]["payloadMarker"] == "complete-workspace-run"
+
+
+def test_jlens_preflight_and_job_use_an_independent_derived_run(tmp_path: Path) -> None:
+    source = _sample()
+    source.update(
+        {
+            "tokens": [{"index": 0, "tokenId": 7, "text": "test"}],
+            "jLens": [],
+        }
+    )
+
+    def runner(payload, cancel_event, progress):
+        assert payload.layer == 0
+        assert payload.position == 0
+        assert payload.lensSource == "research/lens"
+        assert payload.filename == "test-model/lens.pt"
+        assert not cancel_event.is_set()
+        progress(65, "jlens", "Applying the fitted average Jacobian.")
+        return {
+            **payload.run,
+            "runId": "run-a-jlens-derived",
+            "jLens": [{"layer": 0, "tokenIndex": 0}],
+            "metadata": {
+                "parentRun": {"runId": "run-a", "sampleId": "sample-a"},
+                "jLensJobs": [{"layer": payload.layer, "position": payload.position}],
+            },
+        }
+
+    client = TestClient(
+        create_app(
+            tmp_path,
+            jlens_runner=runner,
+            allowed_models=("test/model",),
+        )
+    )
+    options = client.get("/api/jlens/options")
+    assert options.status_code == 200
+    assert options.json()["packageInstalled"] is True
+
+    preflight_payload = {
+        "modelName": "test/model",
+        "availableLayers": [0],
+        "layer": 0,
+        "tokenCount": 1,
+        "position": 0,
+        "lensSource": "research/lens",
+        "filename": "test-model/lens.pt",
+        "revision": "revision-1",
+    }
+    preflight = client.post("/api/jlens/preflight", json=preflight_payload)
+    assert preflight.status_code == 200
+    assert preflight.json()["canSubmit"] is True
+
+    outside = client.post(
+        "/api/jlens/preflight",
+        json={**preflight_payload, "lensSource": str(tmp_path.parent / "outside-lens.pt")},
+    )
+    assert outside.status_code == 200
+    assert outside.json()["canSubmit"] is False
+    assert "artifact root" in outside.json()["reason"]
+
+    response = client.post(
+        "/api/jobs/jlens",
+        json={
+            "run": source,
+            "layer": 0,
+            "position": 0,
+            "lensSource": "research/lens",
+            "filename": "test-model/lens.pt",
+            "revision": "revision-1",
+            "topK": 8,
+        },
+    )
+    assert response.status_code == 202
+    assert response.json()["kind"] == "jlens"
+    assert "run" not in response.json()["request"]
+    snapshot = _wait_for_job(client, response.json()["id"], "ready")
+    assert snapshot["result"]["runId"] == "run-a-jlens-derived"
+
+    rejected = client.post(
+        "/api/jobs/jlens",
+        json={
+            "run": source,
+            "layer": 1,
+            "position": 0,
+            "lensSource": "research/lens",
+        },
+    )
+    assert rejected.status_code == 409
+    assert rejected.json()["detail"]["code"] == "jlens_preflight_failed"
 
 
 class _PatchingTokenizer:

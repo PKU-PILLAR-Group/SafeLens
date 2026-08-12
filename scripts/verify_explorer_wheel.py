@@ -9,6 +9,7 @@ WORKERS = (
     "build_local_explorer_real_run.py",
     "run_local_explorer_attribution.py",
     "run_local_explorer_nla.py",
+    "run_local_explorer_jlens.py",
     "run_local_explorer_patching.py",
     "run_local_explorer_intervention.py",
 )

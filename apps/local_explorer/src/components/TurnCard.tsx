@@ -3,15 +3,17 @@ import {
   CheckCircle2,
   CircleStop,
   LoaderCircle,
+  Network,
   RefreshCw,
   ScanSearch,
-  SlidersHorizontal
+  SlidersHorizontal,
+  Sparkles
 } from "lucide-react";
 
 import type { ExplorerRun } from "../types";
 import { ChatAnalysisWorkbench } from "./ChatAnalysisWorkbench";
 
-export type AnalysisId = "steering" | "attribution";
+export type AnalysisId = "steering" | "attribution" | "explanation" | "attention";
 
 export interface TurnView {
   id: string;
@@ -31,7 +33,7 @@ interface TurnCardProps {
   onRetry: () => void;
   onCancel: () => void;
   onToggleAnalysis: (mode: AnalysisId) => void;
-  onRunReady: (run: ExplorerRun, job: { id: string; kind: "prompt-run" | "attribution" | "intervention" }) => void;
+  onRunReady: (run: ExplorerRun, job: { id: string; kind: "prompt-run" | "attribution" | "intervention" | "nla" | "jlens" }) => void;
 }
 
 export function TurnCard({
@@ -51,11 +53,14 @@ export function TurnCard({
         const source = parent as Record<string, unknown>;
         const belongsToTurn = source.runId === turn.run?.runId && source.sampleId === turn.run?.sampleId;
         if (!belongsToTurn) return false;
-        return analysisOpen === "steering"
-          ? Boolean(candidate.intervention)
-          : candidate.attributionMethods.some(
+        if (analysisOpen === "steering") return Boolean(candidate.intervention);
+        if (analysisOpen === "attribution") return candidate.attributionMethods.some(
               (method) => method.id === "integrated_gradients" && method.available
             );
+        if (analysisOpen === "explanation") {
+          return candidate.nla.some((row) => row.status === "available") || candidate.jLens.length > 0;
+        }
+        return false;
       })
     : undefined;
   return (
@@ -107,6 +112,22 @@ export function TurnCard({
               onClick={() => onToggleAnalysis("attribution")}
             >
               <ScanSearch size={16} /> Attribute
+            </button>
+            <button
+              type="button"
+              className={analysisOpen === "explanation" ? "active" : ""}
+              aria-pressed={analysisOpen === "explanation"}
+              onClick={() => onToggleAnalysis("explanation")}
+            >
+              <Sparkles size={16} /> Explain
+            </button>
+            <button
+              type="button"
+              className={analysisOpen === "attention" ? "active" : ""}
+              aria-pressed={analysisOpen === "attention"}
+              onClick={() => onToggleAnalysis("attention")}
+            >
+              <Network size={16} /> Attention
             </button>
           </div>
           {analysisOpen && (

@@ -20,7 +20,7 @@ export function PromptRunnerPanel({ run, onRunReady }: PromptRunnerPanelProps) {
   const [prompt, setPrompt] = useState(run.prompt);
   const [template, setTemplate] = useState<PromptRunInput["template"]>("plain");
   const [seed, setSeed] = useState(0);
-  const [maxNewTokens, setMaxNewTokens] = useState(8);
+  const [maxNewTokens, setMaxNewTokens] = useState(128);
   const [temperature, setTemperature] = useState(0);
   const runner = usePromptRunner(onRunReady);
   const isRunning = runner.submitting || runner.job?.status === "idle" || runner.job?.status === "loading";
@@ -98,10 +98,10 @@ export function PromptRunnerPanel({ run, onRunReady }: PromptRunnerPanelProps) {
             aria-label="Maximum new tokens"
             type="number"
             min={1}
-            max={64}
+            max={512}
             value={maxNewTokens}
             disabled={isRunning}
-            onChange={(event) => setMaxNewTokens(clampNumber(event.target.value, 1, 64))}
+            onChange={(event) => setMaxNewTokens(clampNumber(event.target.value, 1, 512))}
           />
         </label>
         <label>

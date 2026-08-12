@@ -1,6 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 
 import { realRun } from "../src/realRunData";
+import type { ExplorerRun } from "../src/types";
 
 const generatedRun = {
   ...realRun,
@@ -102,6 +103,86 @@ const steeringRun = {
   }
 };
 
+const nlaSourceRun: ExplorerRun = {
+  ...generatedRun,
+  runId: "chat-nla-source",
+  modelName: "Qwen/Qwen2.5-7B-Instruct",
+  layers: [0, 1, 20],
+  nla: [{
+    tokenIndex: 2,
+    layer: 20,
+    component: "resid_post",
+    explanation: "No exact explanation has been generated yet.",
+    cosine: 0,
+    mse: 0,
+    activationNorm: 2.4,
+    status: "unavailable",
+    profile: "qwen2.5-7b-l20",
+    source: "activation_cache",
+    token: generatedRun.tokens[2].text
+  }],
+  nlaCompatibility: {
+    modelName: "Qwen/Qwen2.5-7B-Instruct",
+    dModel: 3584,
+    availableLayers: [0, 1, 20],
+    profiles: [{
+      name: "qwen2.5-7b-l20",
+      baseModel: "Qwen/Qwen2.5-7B-Instruct",
+      layer: 20,
+      component: "resid_post",
+      dModel: 3584,
+      modelMatches: true,
+      layerAvailable: true,
+      dModelMatches: true,
+      status: "artifact_missing",
+      reason: "Compatible activation cache; generate an exact NLA explanation."
+    }]
+  }
+};
+
+const nlaDerivedRun: ExplorerRun = {
+  ...nlaSourceRun,
+  runId: "chat-nla-derived",
+  metadata: {
+    ...nlaSourceRun.metadata,
+    parentRun: { runId: nlaSourceRun.runId, sampleId: nlaSourceRun.sampleId }
+  },
+  nla: [{
+    ...nlaSourceRun.nla[0],
+    explanation: "This activation tracks the contrast between benign safety language and jailbreak framing.",
+    cosine: 0.91,
+    mse: 0.04,
+    fve: 0.84,
+    status: "available"
+  }]
+};
+
+const jLensBaseRow = generatedRun.logitLens.find((row) => row.layer === 0 && row.tokenIndex === 2)!;
+const jLensDerivedRun: ExplorerRun = {
+  ...generatedRun,
+  runId: "chat-jlens-derived",
+  metadata: {
+    ...generatedRun.metadata,
+    parentRun: { runId: generatedRun.runId, sampleId: generatedRun.sampleId }
+  },
+  jLens: [{
+    ...jLensBaseRow,
+    targetRank: 7,
+    targetLogit: 3.125,
+    targetProbability: 0.072,
+    topPredictions: jLensBaseRow.topPredictions.map((prediction, index) => ({
+      ...prediction,
+      logit: prediction.logit + 0.75 - index * 0.04
+    })),
+    modelTopPredictions: jLensBaseRow.topPredictions,
+    lensSource: "research/test-jlens",
+    filename: "tiny-gpt2/lens.pt",
+    revision: "test-revision",
+    nPrompts: 128,
+    sourceKey: "jlens:research/test-jlens:tiny-gpt2/lens.pt@test-revision"
+  }]
+};
+
 async function prepareHome(page: Page) {
   await page.route(/\/api\/runs(?:\?.*)?$/, async (route) => {
     await route.fulfill({
@@ -119,7 +200,7 @@ async function prepareHome(page: Page) {
       json: {
         models: ["sshleifer/tiny-gpt2", "Qwen/Qwen2.5-7B-Instruct"],
         templates: ["plain", "chat"],
-        maxNewTokens: 64
+        maxNewTokens: 512
       }
     });
   });
@@ -132,6 +213,36 @@ async function prepareHome(page: Page) {
         text: request.text,
         tokens: pieces.map((text, index) => ({ index, tokenId: 1_000 + index, text })),
         truncated: false
+      }
+    });
+  });
+  await page.route("**/api/nla/profiles", async (route) => {
+    await route.fulfill({ json: [] });
+  });
+  await page.route("**/api/jlens/options", async (route) => {
+    await route.fulfill({
+      json: {
+        packageInstalled: true,
+        defaultModel: "sshleifer/tiny-gpt2",
+        defaultSource: "research/test-jlens",
+        defaultFilename: "tiny-gpt2/lens.pt",
+        defaultRevision: "test-revision"
+      }
+    });
+  });
+  await page.route("**/api/jlens/preflight", async (route) => {
+    await route.fulfill({
+      json: {
+        packageInstalled: true,
+        modelAllowed: true,
+        layerAvailable: true,
+        positionValid: true,
+        lensConfigured: true,
+        artifactChecked: false,
+        fittedLayers: [],
+        lensDModel: null,
+        canSubmit: true,
+        reason: "Jacobian Lens package, artifact, model, layer, and token are ready."
       }
     });
   });
@@ -156,7 +267,7 @@ async function prepareHome(page: Page) {
   });
 }
 
-async function mockReadyPromptJob(page: Page) {
+async function mockReadyPromptJob(page: Page, result: ExplorerRun = generatedRun) {
   const request = {
     prompt: generatedRun.prompt,
     template: "chat" as const,
@@ -189,7 +300,7 @@ async function mockReadyPromptJob(page: Page) {
       status: 200,
       contentType: "text/event-stream",
       headers: { "Cache-Control": "no-cache" },
-      body: `event: job\ndata: ${JSON.stringify({ ...base, status: "ready", result: generatedRun })}\n\n`
+      body: `event: job\ndata: ${JSON.stringify({ ...base, status: "ready", result })}\n\n`
     });
   });
   return () => submitted;
@@ -270,8 +381,8 @@ function promptJob(
   };
 }
 
-async function runReadyAnalysis(page: Page) {
-  await page.getByLabel("Analysis prompt").fill(generatedRun.prompt);
+async function runReadyAnalysis(page: Page, prompt = generatedRun.prompt) {
+  await page.getByLabel("Analysis prompt").fill(prompt);
   await page.getByLabel("Run analysis").click();
   await expect(page.getByText("Activation cache ready")).toBeVisible();
 }
@@ -371,9 +482,128 @@ async function mockReadySteeringJob(page: Page) {
   return () => submitted;
 }
 
+async function mockReadyNlaJob(page: Page) {
+  const preflight = {
+    profile: "qwen2.5-7b-l20",
+    baseModel: "Qwen/Qwen2.5-7B-Instruct",
+    layer: 20,
+    component: "resid_post",
+    dModel: 3584,
+    avRepo: "safelens/qwen2.5-7b-nla-av",
+    arRepo: "safelens/qwen2.5-7b-nla-ar",
+    gated: false,
+    tokenConfigured: false,
+    modelMatches: true,
+    layerAvailable: true,
+    dModelMatches: true,
+    status: "compatible",
+    canSubmit: true,
+    reason: "NLA profile and activation cache are compatible."
+  } as const;
+  await page.route("**/api/nla/profiles", async (route) => {
+    await route.fulfill({
+      json: [{
+        name: "qwen2.5-7b-l20",
+        base_model: "Qwen/Qwen2.5-7B-Instruct",
+        layer: 20,
+        component: "resid_post",
+        d_model: 3584,
+        av_repo: preflight.avRepo,
+        ar_repo: preflight.arRepo,
+        gated: false,
+        description: "Qwen NLA profile"
+      }]
+    });
+  });
+  await page.route("**/api/nla/preflight", async (route) => {
+    await route.fulfill({ json: preflight });
+  });
+  let submitted: Record<string, unknown> | undefined;
+  await page.route("**/api/jobs/nla", async (route) => {
+    submitted = route.request().postDataJSON();
+    const request = {
+      profile: submitted?.profile,
+      positions: submitted?.positions,
+      revision: submitted?.revision,
+      maxNewTokens: submitted?.maxNewTokens,
+      loadReconstructor: true,
+      confirmGatedAccess: false,
+      sourceRun: { runId: nlaSourceRun.runId, sampleId: nlaSourceRun.sampleId, modelName: nlaSourceRun.modelName },
+      preflight
+    };
+    await route.fulfill({ status: 202, json: derivedJob("nla-home-job", "nla", request, null, "idle") });
+  });
+  await page.route("**/api/jobs/nla-home-job/events", async (route) => {
+    const request = {
+      profile: "qwen2.5-7b-l20",
+      positions: [2],
+      revision: "main",
+      maxNewTokens: 96,
+      loadReconstructor: true,
+      confirmGatedAccess: false,
+      sourceRun: { runId: nlaSourceRun.runId, sampleId: nlaSourceRun.sampleId, modelName: nlaSourceRun.modelName },
+      preflight
+    };
+    await route.fulfill({
+      status: 200,
+      contentType: "text/event-stream",
+      body: `event: job\ndata: ${JSON.stringify(derivedJob("nla-home-job", "nla", request, nlaDerivedRun, "ready"))}\n\n`
+    });
+  });
+  return () => submitted;
+}
+
+async function mockReadyJLensJob(page: Page) {
+  const preflight = {
+    packageInstalled: true,
+    modelAllowed: true,
+    layerAvailable: true,
+    positionValid: true,
+    lensConfigured: true,
+    artifactChecked: false,
+    fittedLayers: [],
+    lensDModel: null,
+    canSubmit: true,
+    reason: "Jacobian Lens package, artifact, model, layer, and token are ready."
+  };
+  let submitted: Record<string, unknown> | undefined;
+  await page.route("**/api/jobs/jlens", async (route) => {
+    submitted = route.request().postDataJSON();
+    const request = {
+      layer: submitted?.layer,
+      position: submitted?.position,
+      lensSource: submitted?.lensSource,
+      filename: submitted?.filename,
+      revision: submitted?.revision,
+      topK: submitted?.topK,
+      sourceRun: { runId: generatedRun.runId, sampleId: generatedRun.sampleId, modelName: generatedRun.modelName },
+      preflight
+    };
+    await route.fulfill({ status: 202, json: derivedJob("jlens-home-job", "jlens", request, null, "idle") });
+  });
+  await page.route("**/api/jobs/jlens-home-job/events", async (route) => {
+    const request = {
+      layer: 0,
+      position: 2,
+      lensSource: "research/test-jlens",
+      filename: "tiny-gpt2/lens.pt",
+      revision: "test-revision",
+      topK: 10,
+      sourceRun: { runId: generatedRun.runId, sampleId: generatedRun.sampleId, modelName: generatedRun.modelName },
+      preflight
+    };
+    await route.fulfill({
+      status: 200,
+      contentType: "text/event-stream",
+      body: `event: job\ndata: ${JSON.stringify(derivedJob("jlens-home-job", "jlens", request, jLensDerivedRun, "ready"))}\n\n`
+    });
+  });
+  return () => submitted;
+}
+
 function derivedJob(
   id: string,
-  kind: "attribution" | "intervention",
+  kind: "attribution" | "intervention" | "nla" | "jlens",
   request: Record<string, unknown>,
   result: unknown,
   status: "idle" | "ready"
@@ -400,14 +630,13 @@ test("opens as the minimal Chat interface shown in the reference figures", async
   await expect(page.getByRole("heading", { name: "What would you like to inspect?" })).toBeVisible();
   await expect(page.getByLabel("Analysis prompt")).toBeVisible();
   await expect(page.getByLabel("Analysis model")).toHaveValue("sshleifer/tiny-gpt2");
+  await expect(page.getByLabel("Maximum new tokens")).toHaveValue("128");
   await expect(page.getByRole("complementary", { name: "Chat history" })).toBeVisible();
   await expect(page.getByLabel("Conversation history").locator(".chat-history-row")).toHaveCount(1);
   await expect(page.getByRole("button", { name: "New chat" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Work" })).toHaveCount(0);
   await expect(page.getByLabel("Preloaded dataset")).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Run analysis" })).toBeDisabled();
-  await page.getByRole("button", { name: "Trace input influence" }).click();
-  await expect(page.getByLabel("Analysis prompt")).toHaveValue(/input tokens most influenced/);
   await expect(page.locator(".home-stats, .home-viz-grid, .home-nla-panel")).toHaveCount(0);
 
   const layout = await page.evaluate(() => ({ viewport: innerWidth, document: document.documentElement.scrollWidth }));
@@ -418,13 +647,16 @@ test("runs the real prompt-job protocol and keeps the conversation above two foc
   await prepareHome(page);
   const submitted = await mockReadyPromptJob(page);
   await page.goto("/");
+  await page.getByLabel("Maximum new tokens").fill("192");
   await runReadyAnalysis(page);
 
   await expect(page.locator(".chat-user-message")).toHaveText(generatedRun.prompt);
   await expect(page.locator(".chat-assistant-message")).toContainText("strongest residual alignment");
-  await expect(page.locator(".chat-turn-explore-bar > button")).toHaveCount(2);
+  await expect(page.locator(".chat-turn-explore-bar > button")).toHaveCount(4);
   await expect(page.getByRole("button", { name: /Steer/ })).toBeVisible();
   await expect(page.getByRole("button", { name: /Attribute/ })).toBeVisible();
+  await expect(page.getByRole("button", { name: /Explain/ })).toBeVisible();
+  await expect(page.getByRole("button", { name: /Attention/ })).toBeVisible();
   await expect(page.getByLabel("Analysis prompt")).toBeVisible();
   await expect(page.getByLabel("Analysis prompt")).toHaveValue("");
   await expect(page).toHaveURL(/\/$/);
@@ -433,7 +665,7 @@ test("runs the real prompt-job protocol and keeps the conversation above two foc
     template: "chat",
     model: "sshleifer/tiny-gpt2",
     seed: 0,
-    maxNewTokens: 8,
+    maxNewTokens: 192,
     temperature: 0,
     messages: []
   });
@@ -480,6 +712,114 @@ test("switches between steering and input attribution inside the current chat", 
   await expect(page.getByLabel("Attribution integration steps")).toHaveValue("32");
   await expect(page.getByRole("button", { name: "Open Explorer" })).toHaveCount(0);
   expect(await page.evaluate(() => window.location.pathname)).toBe("/");
+});
+
+test("selects a layer and token for NLA and J-Lens explanations in Chat", async ({ page }) => {
+  await prepareHome(page);
+  await mockReadyPromptJob(page);
+  const submitted = await mockReadyJLensJob(page);
+  await page.goto("/");
+  await runReadyAnalysis(page);
+
+  await page.getByRole("button", { name: /Explain/ }).click();
+  await expect(page.getByRole("heading", { name: "Explanation" })).toBeVisible();
+  await expect(page.getByRole("tab", { name: /NLA/ })).toHaveAttribute("aria-selected", "true");
+  await expect(page.getByLabel("Explanation layer")).toBeVisible();
+  await expect(page.getByLabel("Explanation token position")).toBeVisible();
+  await expect(page.getByLabel("NLA output")).toContainText("No exact NLA explanation");
+
+  await page.getByRole("tab", { name: /J-Lens/ }).click();
+  await page.getByLabel("Explanation layer").selectOption("0");
+  await page.getByRole("radio", { name: "Token 2 Compare" }).click();
+  await expect(page.getByRole("button", { name: "Run J-Lens" })).toBeEnabled();
+  await page.getByRole("button", { name: "Run J-Lens" }).click();
+  const expected = jLensDerivedRun.jLens[0];
+  const output = page.getByLabel("J-Lens output");
+  await expect(output).toContainText(expected.targetTokenText.trim());
+  await expect(output).toContainText(`#${expected.targetRank.toLocaleString()}`);
+  await expect(output.getByLabel("J-Lens vocabulary predictions")).toContainText(
+    expected.topPredictions[0].tokenText.trim()
+  );
+  await expect(output).toContainText("fitted on 128 prompts");
+  expect(submitted()).toMatchObject({
+    layer: 0,
+    position: 2,
+    lensSource: "research/test-jlens",
+    filename: "tiny-gpt2/lens.pt",
+    revision: "test-revision",
+    topK: 10
+  });
+});
+
+test("runs exact NLA for the selected layer and token and renders the derived explanation", async ({ page }) => {
+  await prepareHome(page);
+  await mockReadyPromptJob(page, nlaSourceRun);
+  const submitted = await mockReadyNlaJob(page);
+  await page.goto("/");
+  await page.getByLabel("Analysis model").selectOption("Qwen/Qwen2.5-7B-Instruct");
+  await runReadyAnalysis(page, nlaSourceRun.prompt);
+
+  await page.getByRole("button", { name: /Explain/ }).click();
+  await expect(page.getByLabel("Explanation layer")).toHaveValue("20");
+  await expect(page.getByRole("radio", { name: "Token 2 Compare" })).toHaveAttribute("aria-checked", "true");
+  await expect(page.getByRole("button", { name: "Run NLA" })).toBeEnabled();
+  await page.getByRole("button", { name: "Run NLA" }).click();
+
+  const output = page.getByLabel("NLA output");
+  await expect(output).toContainText("contrast between benign safety language and jailbreak framing");
+  await expect(output).toContainText("0.9100");
+  expect(submitted()).toMatchObject({
+    profile: "qwen2.5-7b-l20",
+    positions: [2],
+    revision: "main",
+    maxNewTokens: 96,
+    loadReconstructor: true,
+    confirmGatedAccess: false
+  });
+});
+
+test("visualizes real attention heads and updates the selected layer, head, and token", async ({ page }) => {
+  await prepareHome(page);
+  await mockReadyPromptJob(page);
+  await page.goto("/");
+  await runReadyAnalysis(page);
+
+  await page.getByRole("button", { name: /Attention/ }).click();
+  await expect(page.getByRole("heading", { name: "Attention heads" })).toBeVisible();
+  await page.getByLabel("Attention heads layer").selectOption("0");
+  await page.getByLabel("Attention head", { exact: true }).selectOption("L0H1");
+  await page.getByRole("radio", { name: "Destination token 10 break" }).click();
+  await expect(page.getByLabel("Selected attention pair")).toContainText("T10 · break");
+  await expect(page.getByLabel("Attention head choices").getByRole("radio", { name: /L0H1/ }))
+    .toHaveAttribute("aria-checked", "true");
+  const canvas = page.getByRole("img", { name: /L0H1 attention heatmap/ });
+  await expect(canvas).toBeVisible();
+  expect(await canvas.evaluate((element) => {
+    const context = (element as HTMLCanvasElement).getContext("2d");
+    if (!context) return 0;
+    return context.getImageData(0, 0, 40, 40).data.filter((value, index) => index % 4 !== 3 && value !== 0).length;
+  })).toBeGreaterThan(0);
+});
+
+test("keeps Explanation and Attention usable on mobile", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await prepareHome(page);
+  await mockReadyPromptJob(page);
+  await page.goto("/");
+  await runReadyAnalysis(page);
+
+  await page.getByRole("button", { name: /Explain/ }).click();
+  await page.getByRole("tab", { name: /J-Lens/ }).click();
+  await expect(page.getByLabel("J-Lens output")).toBeVisible();
+  await expect(page.getByLabel("Explanation token position").getByRole("radio").first()).toHaveCSS("min-height", "44px");
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
+
+  await page.getByRole("button", { name: /Attention/ }).click();
+  await expect(page.getByRole("img", { name: /attention heatmap/ })).toBeVisible();
+  const box = await page.getByLabel("Attention head heatmap").boundingBox();
+  expect(box).not.toBeNull();
+  expect(box!.width).toBeLessThanOrEqual(390);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
 });
 
 test("runs input attribution from Chat and renders signed token contributions", async ({ page }) => {
@@ -552,6 +892,62 @@ test("restores a previous conversation and its analysis entry points", async ({ 
   await expect(page.locator(".chat-turn-card")).toBeVisible();
   await expect(page.getByText("Activation cache ready")).toBeVisible();
   expect(await page.evaluate(() => window.location.pathname)).toBe("/");
+});
+
+test("restores a workspace NLA artifact inside its parent chat turn", async ({ page }) => {
+  await prepareHome(page);
+  await page.route(/\/api\/runs(?:\?.*)?$/, async (route) => {
+    await route.fulfill({
+      json: {
+        schemaVersion: "1.0",
+        source: "local-workspace",
+        rootName: "test-workspace",
+        diagnostics: [],
+        runs: [
+          {
+            runId: nlaDerivedRun.runId,
+            sampleId: nlaDerivedRun.sampleId,
+            modelName: nlaDerivedRun.modelName,
+            modelSource: nlaDerivedRun.modelSource,
+            tokenCount: nlaDerivedRun.tokens.length,
+            layerCount: nlaDerivedRun.layers.length,
+            artifactId: "nla-artifact",
+            sourceName: "generated/nla-chat-nla-derived.explorer.json",
+            modifiedAt: "2026-08-11T12:00:01Z",
+            sizeBytes: 4_096,
+            promptPreview: nlaDerivedRun.prompt,
+            parentRun: { runId: nlaSourceRun.runId, sampleId: nlaSourceRun.sampleId }
+          },
+          {
+            runId: nlaSourceRun.runId,
+            sampleId: nlaSourceRun.sampleId,
+            modelName: nlaSourceRun.modelName,
+            modelSource: nlaSourceRun.modelSource,
+            tokenCount: nlaSourceRun.tokens.length,
+            layerCount: nlaSourceRun.layers.length,
+            artifactId: "prompt-artifact",
+            sourceName: "generated/prompt-chat-nla-source.explorer.json",
+            modifiedAt: "2026-08-11T12:00:00Z",
+            sizeBytes: 4_096,
+            promptPreview: nlaSourceRun.prompt
+          }
+        ]
+      }
+    });
+  });
+  await page.route("**/api/runs/chat-nla-derived/samples/seed-0", async (route) => {
+    await route.fulfill({ json: nlaDerivedRun });
+  });
+  await page.goto("/");
+
+  const conversation = page.locator(".chat-history-row").filter({ hasText: nlaSourceRun.prompt });
+  await expect(conversation).toHaveCount(1);
+  await conversation.locator(".chat-history-open").click();
+  await page.getByRole("button", { name: "Explain", exact: true }).click();
+  await page.getByRole("radio", { name: /Token 2/ }).click();
+  await expect(page.getByLabel("NLA output")).toContainText(
+    "contrast between benign safety language and jailbreak framing"
+  );
 });
 
 test("hides the bundled example conversation without deleting its artifact", async ({ page }) => {
@@ -652,7 +1048,7 @@ test("persists removal of a read-only workspace entry from Chat", async ({ page 
     });
   });
   await page.route("**/api/prompt/options", async (route) => {
-    await route.fulfill({ json: { models: ["sshleifer/tiny-gpt2"], templates: ["plain", "chat"], maxNewTokens: 64 } });
+    await route.fulfill({ json: { models: ["sshleifer/tiny-gpt2"], templates: ["plain", "chat"], maxNewTokens: 512 } });
   });
   await page.route("**/api/runs/workspace-history-run/samples/workspace-sample", async (route) => {
     await route.fulfill({ json: workspaceConversation });
@@ -687,6 +1083,7 @@ for (const viewport of [
 
     await expect(page.getByLabel("Analysis prompt")).toBeVisible();
     await expect(page.getByLabel("Analysis model")).toBeVisible();
+    await expect(page.getByLabel("Maximum new tokens")).toBeVisible();
     await expect(page.getByRole("button", { name: "Open chat history" })).toBeVisible();
     await page.getByRole("button", { name: "Open chat history" }).click();
     await expect(page.getByRole("complementary", { name: "Chat history" })).toHaveClass(/open/);

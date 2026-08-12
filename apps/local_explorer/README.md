@@ -18,12 +18,18 @@ packaged application. Use `safelens-explorer` as an equivalent standalone
 entry point, or add `--no-browser` for a headless machine.
 
 The lightweight install includes all visualization components, the artifact
-library, and job APIs. Executing real-model Prompt, Attribution, NLA, Patching,
-and Intervention jobs requires the corresponding ML dependencies:
+library, and job APIs. Executing real-model Prompt, Attribution, NLA, J-Lens,
+Patching, and Intervention jobs requires the corresponding ML dependencies:
 
 ```bash
-python -m pip install -e ".[explorer,models,attribution,nla]"
+python -m pip install -e ".[explorer,models,attribution,nla,jlens]"
 ```
+
+J-Lens checkpoints are specific to a model width and fitted source layers. Set
+`SAFELENS_JLENS_SOURCE` to a checkpoint under the Explorer artifact root, a
+directory under that root, or a Hugging Face repo,
+with optional `SAFELENS_JLENS_FILENAME`, `SAFELENS_JLENS_REVISION`, and
+`SAFELENS_JLENS_MODEL`, or edit the artifact fields inside the J-Lens panel.
 
 ## Docker
 

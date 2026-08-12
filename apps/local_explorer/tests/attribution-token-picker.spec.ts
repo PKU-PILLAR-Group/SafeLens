@@ -38,7 +38,7 @@ async function prepareHome(page: Page) {
       json: {
         models: ["sshleifer/tiny-gpt2"],
         templates: ["plain", "chat"],
-        maxNewTokens: 64
+        maxNewTokens: 512
       }
     });
   });

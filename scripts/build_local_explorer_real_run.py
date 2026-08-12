@@ -283,6 +283,7 @@ def _build_run(
             for token_index in range(len(token_texts))
         ],
         "logitLens": logit_lens,
+        "jLens": [],
         "attentionCells": _attention_cells(cache, layers),
         "mlpCells": _mlp_cells(cache, layers),
         "attributionTracks": [
@@ -406,10 +407,8 @@ def _logit_lens_rows(
 
     with torch.no_grad():
         for layer in layers:
-            residual = cache[f"layer_{layer}.resid_post"][0].float()
-            normalized = final_norm(residual) if final_norm is not None else residual
-            if isinstance(normalized, tuple):
-                normalized = normalized[0]
+            residual = cache[f"layer_{layer}.resid_post"][0]
+            normalized = _apply_final_norm(final_norm, residual)
             layer_unembed = unembed.to(device=normalized.device, dtype=normalized.dtype)
             layer_bias = bias.to(device=normalized.device, dtype=normalized.dtype)
             logits = normalized @ layer_unembed + layer_bias
@@ -462,6 +461,29 @@ def _logit_lens_rows(
                     }
                 )
     return rows
+
+
+def _apply_final_norm(final_norm: Any | None, residual: Any) -> Any:
+    """Run the model's final norm without mixing its parameter and input dtypes."""
+    torch = _require_torch()
+    if final_norm is None:
+        return residual.float()
+
+    reference = next(
+        (
+            tensor
+            for tensor in (*final_norm.parameters(), *final_norm.buffers())
+            if torch.is_floating_point(tensor)
+        ),
+        None,
+    )
+    if reference is not None:
+        residual = residual.to(device=reference.device, dtype=reference.dtype)
+    normalized = final_norm(residual)
+    if isinstance(normalized, tuple):
+        normalized = normalized[0]
+    # Keep the projection/softmax numerically stable after the model-specific norm.
+    return normalized.float()
 
 
 def _final_norm_module(wrapper: HuggingFaceModelWrapper) -> Any | None:

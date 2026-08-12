@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 import queue
+import re
 import subprocess
 import sys
 import threading
@@ -43,6 +45,11 @@ def _default_allowed_models() -> tuple[str, ...]:
     return tuple(dict.fromkeys(models))
 
 
+class RemoteParentRun(BaseModel):
+    runId: str
+    sampleId: str
+
+
 class RemoteRunSummary(BaseModel):
     runId: str
     sampleId: str
@@ -55,6 +62,9 @@ class RemoteRunSummary(BaseModel):
     modifiedAt: str
     sizeBytes: int = Field(ge=0)
     promptPreview: str | None = None
+    parentRun: RemoteParentRun | None = None
+    conversationId: str | None = None
+    turnIndex: int | None = Field(default=None, ge=0)
     chunkProtocol: Literal["safelens-chunks-v1"] = "safelens-chunks-v1"
 
 
@@ -75,6 +85,7 @@ class RunIndexResponse(BaseModel):
 CHUNK_COMPONENTS = (
     "residualCells",
     "logitLens",
+    "jLens",
     "attentionHeads",
     "attentionCells",
     "mlpNeurons",
@@ -88,6 +99,7 @@ CHUNK_COMPONENTS = (
 ChunkComponent = Literal[
     "residualCells",
     "logitLens",
+    "jLens",
     "attentionHeads",
     "attentionCells",
     "mlpNeurons",
@@ -140,6 +152,7 @@ class HealthResponse(BaseModel):
     promptJobsEnabled: bool = True
     attributionJobsEnabled: bool = True
     nlaJobsEnabled: bool = True
+    jLensJobsEnabled: bool = True
     patchingJobsEnabled: bool = True
     interventionJobsEnabled: bool = True
     rootExists: bool
@@ -156,7 +169,7 @@ class PromptRunRequest(BaseModel):
     template: Literal["plain", "chat"] = "plain"
     model: str = DEFAULT_PROMPT_MODEL
     seed: int = Field(default=0, ge=0, le=2_147_483_647)
-    maxNewTokens: int = Field(default=8, ge=1, le=64)
+    maxNewTokens: int = Field(default=128, ge=1, le=512)
     temperature: float = Field(default=0.0, ge=0.0, le=2.0)
     messages: list[PromptMessage] = Field(default_factory=list, max_length=24)
 
@@ -171,7 +184,7 @@ class PromptRunRequest(BaseModel):
 class PromptOptionsResponse(BaseModel):
     models: list[str]
     templates: list[str] = ["plain", "chat"]
-    maxNewTokens: int = 64
+    maxNewTokens: int = 512
 
 
 class TokenizeRequest(BaseModel):
@@ -234,6 +247,49 @@ class NLARunRequest(BaseModel):
     maxNewTokens: int = Field(default=96, ge=8, le=256)
     loadReconstructor: bool = True
     confirmGatedAccess: bool = False
+
+
+class JLensOptionsResponse(BaseModel):
+    packageInstalled: bool
+    defaultModel: str
+    defaultSource: str
+    defaultFilename: str
+    defaultRevision: str
+
+
+class JLensPreflightRequest(BaseModel):
+    modelName: str = Field(min_length=1)
+    dModel: int | None = Field(default=None, gt=0)
+    availableLayers: list[int] = Field(min_length=1, max_length=128)
+    layer: int = Field(ge=0)
+    tokenCount: int = Field(ge=1, le=4_096)
+    position: int = Field(ge=0)
+    lensSource: str = Field(min_length=1, max_length=1_024)
+    filename: str = Field(default="lens.pt", min_length=1, max_length=512)
+    revision: str = Field(default="main", min_length=1, max_length=128)
+
+
+class JLensPreflightResponse(BaseModel):
+    packageInstalled: bool
+    modelAllowed: bool
+    layerAvailable: bool
+    positionValid: bool
+    lensConfigured: bool
+    artifactChecked: bool
+    fittedLayers: list[int]
+    lensDModel: int | None
+    canSubmit: bool
+    reason: str
+
+
+class JLensRunRequest(BaseModel):
+    run: dict[str, Any]
+    layer: int = Field(ge=0)
+    position: int = Field(ge=0)
+    lensSource: str = Field(min_length=1, max_length=1_024)
+    filename: str = Field(default="lens.pt", min_length=1, max_length=512)
+    revision: str = Field(default="main", min_length=1, max_length=128)
+    topK: int = Field(default=10, ge=3, le=50)
 
 
 class PatchingPreflightRequest(BaseModel):
@@ -323,7 +379,7 @@ class InterventionRunRequest(BaseModel):
 
 class JobSnapshot(BaseModel):
     id: str
-    kind: Literal["prompt-run", "attribution", "nla", "patching", "intervention"]
+    kind: Literal["prompt-run", "attribution", "nla", "jlens", "patching", "intervention"]
     status: Literal["idle", "loading", "ready", "error", "cancelled"]
     stage: str
     progress: int = Field(ge=0, le=100)
@@ -371,7 +427,7 @@ class ExplorerJobManager:
         self,
         runner: JobRunner,
         *,
-        kind: Literal["prompt-run", "attribution", "nla", "patching", "intervention"],
+        kind: Literal["prompt-run", "attribution", "nla", "jlens", "patching", "intervention"],
         ready_detail: str,
         error_detail: str,
     ) -> None:
@@ -530,6 +586,7 @@ def create_app(
     prompt_runner: PromptRunner | None = None,
     attribution_runner: AttributionRunner | None = None,
     nla_runner: JobRunner | None = None,
+    jlens_runner: JobRunner | None = None,
     patching_runner: JobRunner | None = None,
     patching_tokenizer_loader: Callable[[str], Any] | None = None,
     intervention_runner: JobRunner | None = None,
@@ -575,6 +632,12 @@ def create_app(
         ready_detail="Exact NLA explanations and fidelity rows are ready in a derived run.",
         error_detail="NLA failed. Inspect profile compatibility, authorization, and diagnostics.",
     )
+    jlens_manager = ExplorerJobManager(
+        jlens_runner or _subprocess_jlens_runner(root=root),
+        kind="jlens",
+        ready_detail="Jacobian Lens vocabulary readout is ready in a derived run.",
+        error_detail="Jacobian Lens failed. Inspect the lens artifact and model compatibility.",
+    )
     patching_manager = ExplorerJobManager(
         patching_runner or _subprocess_patching_runner(root=root),
         kind="patching",
@@ -593,6 +656,7 @@ def create_app(
         prompt_manager,
         attribution_manager,
         nla_manager,
+        jlens_manager,
         patching_manager,
         intervention_manager,
     )
@@ -600,6 +664,9 @@ def create_app(
     load_response_tokenizer = patching_tokenizer_loader or _default_patching_tokenizer_loader
     load_intervention_tokenizer = (
         intervention_tokenizer_loader or _default_patching_tokenizer_loader
+    )
+    jlens_package_installed = (
+        jlens_runner is not None or importlib.util.find_spec("jlens") is not None
     )
 
     @app.get("/api/health", response_model=HealthResponse)
@@ -654,6 +721,31 @@ def create_app(
         from SafeLens.nla import list_nla_profiles
 
         return list_nla_profiles()
+
+    @app.get("/api/jlens/options", response_model=JLensOptionsResponse)
+    def jlens_options() -> JLensOptionsResponse:
+        bundled_lens = root / "jlens" / "sshleifer-tiny-gpt2" / "lens.pt"
+        configured_source = os.environ.get("SAFELENS_JLENS_SOURCE", "")
+        default_source = configured_source or (str(bundled_lens) if bundled_lens.is_file() else "")
+        return JLensOptionsResponse(
+            packageInstalled=jlens_package_installed,
+            defaultModel=os.environ.get(
+                "SAFELENS_JLENS_MODEL",
+                DEFAULT_PROMPT_MODEL if default_source and not configured_source else "",
+            ),
+            defaultSource=default_source,
+            defaultFilename=os.environ.get("SAFELENS_JLENS_FILENAME", "lens.pt"),
+            defaultRevision=os.environ.get("SAFELENS_JLENS_REVISION", "main"),
+        )
+
+    @app.post("/api/jlens/preflight", response_model=JLensPreflightResponse)
+    def jlens_preflight(payload: JLensPreflightRequest) -> JLensPreflightResponse:
+        return _jlens_preflight(
+            payload,
+            package_installed=jlens_package_installed,
+            allowed_models=allowed_models,
+            artifact_root=root,
+        )
 
     @app.post("/api/nla/preflight", response_model=NLAPreflightResponse)
     def nla_preflight(payload: NLAPreflightRequest) -> NLAPreflightResponse:
@@ -737,8 +829,13 @@ def create_app(
                     "message": "Run model is not enabled for jobs.",
                 },
             )
-        return attribution_manager.submit(
+        job_payload = _hydrate_workspace_job_payload(
             payload,
+            root=root,
+            max_file_bytes=max_file_bytes,
+        )
+        return attribution_manager.submit(
+            job_payload,
             public_request={
                 **payload.model_dump(exclude={"run"}),
                 "sourceRun": {
@@ -806,8 +903,68 @@ def create_app(
                     "message": "Positions must be unique token indices.",
                 },
             )
-        return nla_manager.submit(
+        job_payload = _hydrate_workspace_job_payload(
             payload,
+            root=root,
+            max_file_bytes=max_file_bytes,
+        )
+        return nla_manager.submit(
+            job_payload,
+            public_request={
+                **payload.model_dump(exclude={"run"}),
+                "sourceRun": {
+                    "runId": payload.run["runId"],
+                    "sampleId": payload.run["sampleId"],
+                    "modelName": payload.run["modelName"],
+                },
+                "preflight": preflight.model_dump(),
+            },
+        )
+
+    @app.post("/api/jobs/jlens", response_model=JobSnapshot, status_code=202)
+    def submit_jlens(payload: JLensRunRequest) -> JobSnapshot:
+        encoded_size = len(json.dumps(payload.run).encode("utf-8"))
+        if encoded_size > max_file_bytes:
+            raise HTTPException(
+                status_code=413,
+                detail={"code": "run_too_large", "message": "Run exceeds the compact job limit."},
+            )
+        try:
+            _require_sample_metadata(payload.run, index=0)
+            preflight = _jlens_preflight(
+                JLensPreflightRequest(
+                    modelName=payload.run["modelName"],
+                    dModel=payload.run.get("nlaCompatibility", {}).get("dModel"),
+                    availableLayers=[int(layer) for layer in payload.run["layers"]],
+                    layer=payload.layer,
+                    tokenCount=len(payload.run["tokens"]),
+                    position=payload.position,
+                    lensSource=payload.lensSource,
+                    filename=payload.filename,
+                    revision=payload.revision,
+                ),
+                package_installed=jlens_package_installed,
+                allowed_models=allowed_models,
+                artifact_root=root,
+            )
+        except (ArtifactReadError, KeyError, TypeError, ValueError) as exc:
+            code = exc.code if isinstance(exc, ArtifactReadError) else "invalid_jlens_request"
+            raise HTTPException(
+                status_code=422,
+                detail={"code": code, "message": str(exc)},
+            ) from exc
+        if not preflight.canSubmit:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "jlens_preflight_failed", "message": preflight.reason},
+            )
+        job_payload = _hydrate_workspace_job_payload(
+            payload,
+            root=root,
+            max_file_bytes=max_file_bytes,
+        )
+        return jlens_manager.submit(
+            job_payload,
             public_request={
                 **payload.model_dump(exclude={"run"}),
                 "sourceRun": {
@@ -891,8 +1048,13 @@ def create_app(
                     "message": "Patch grid exceeds 2048 cells.",
                 },
             )
-        return patching_manager.submit(
+        job_payload = _hydrate_workspace_job_payload(
             payload,
+            root=root,
+            max_file_bytes=max_file_bytes,
+        )
+        return patching_manager.submit(
+            job_payload,
             public_request={
                 **payload.model_dump(exclude={"run"}),
                 "sourceRun": {
@@ -955,8 +1117,13 @@ def create_app(
                 status_code=409,
                 detail={"code": "intervention_preflight_failed", "message": preflight.reason},
             )
-        return intervention_manager.submit(
+        job_payload = _hydrate_workspace_job_payload(
             payload,
+            root=root,
+            max_file_bytes=max_file_bytes,
+        )
+        return intervention_manager.submit(
+            job_payload,
             public_request={
                 **payload.model_dump(exclude={"run"}),
                 "sourceRun": {
@@ -1010,7 +1177,7 @@ def create_app(
         )
 
     @app.get("/api/runs", response_model=RunIndexResponse)
-    def list_runs(limit: int = Query(default=20, ge=1, le=100)) -> RunIndexResponse:
+    def list_runs(limit: int = Query(default=100, ge=1, le=100)) -> RunIndexResponse:
         samples, diagnostics = _scan_artifacts(root, max_file_bytes=max_file_bytes)
         deduplicated: dict[tuple[str, str], IndexedSample] = {}
         for sample in samples:
@@ -1502,6 +1669,91 @@ def _nla_preflight(payload: NLAPreflightRequest) -> NLAPreflightResponse:
     )
 
 
+def _jlens_preflight(
+    payload: JLensPreflightRequest,
+    *,
+    package_installed: bool,
+    allowed_models: tuple[str, ...],
+    artifact_root: Path,
+) -> JLensPreflightResponse:
+    model_allowed = payload.modelName in allowed_models
+    layer_available = payload.layer in payload.availableLayers
+    position_valid = payload.position < payload.tokenCount
+    source = payload.lensSource.strip()
+    filename = Path(payload.filename)
+    filename_valid = not filename.is_absolute() and ".." not in filename.parts
+    artifact_checked = False
+    fitted_layers: list[int] = []
+    lens_d_model: int | None = None
+    artifact_error: str | None = None
+    source_path = Path(source).expanduser()
+    local_requested = (
+        source_path.is_absolute() or source.startswith((".", "~")) or source_path.exists()
+    )
+    source_valid = bool(source)
+    local_candidate: Path | None = None
+    if local_requested:
+        try:
+            resolved_source = source_path.resolve(strict=True)
+            resolved_source.relative_to(artifact_root)
+            local_candidate = (
+                resolved_source / filename if resolved_source.is_dir() else resolved_source
+            )
+            local_candidate = local_candidate.resolve(strict=True)
+            local_candidate.relative_to(artifact_root)
+        except (OSError, ValueError):
+            source_valid = False
+            artifact_error = "Local lens artifacts must exist inside the Explorer artifact root."
+    elif not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*", source):
+        source_valid = False
+        artifact_error = "Use a Hugging Face repository ID or a path inside the artifact root."
+    lens_configured = source_valid and filename_valid
+    if local_candidate is not None and local_candidate.is_file():
+        artifact_checked = True
+        try:
+            import torch
+
+            checkpoint = torch.load(local_candidate, map_location="cpu", weights_only=True)
+            jacobians = checkpoint.get("J") if isinstance(checkpoint, dict) else None
+            if not isinstance(jacobians, dict) or not jacobians:
+                raise ValueError("checkpoint does not contain fitted Jacobian matrices")
+            fitted_layers = sorted(int(layer) for layer in jacobians)
+            lens_d_model = int(checkpoint["d_model"])
+        except (ImportError, KeyError, OSError, TypeError, ValueError) as exc:
+            artifact_error = f"The local lens artifact is invalid: {exc}."
+    checks = {
+        "Install the SafeLens J-Lens extra before running this analysis.": package_installed,
+        "The selected model is not enabled for local jobs.": model_allowed,
+        f"Layer L{payload.layer} is not available in the source Run.": layer_available,
+        "The selected token position is outside the source prompt.": position_valid,
+        "Configure a lens artifact and a relative checkpoint filename.": lens_configured,
+        artifact_error or "The local lens artifact is readable.": artifact_error is None,
+        f"Layer L{payload.layer} is not fitted in this local lens.": (
+            not artifact_checked or payload.layer in fitted_layers
+        ),
+        "The local lens width does not match the source model.": (
+            lens_d_model is None or payload.dModel is None or lens_d_model == payload.dModel
+        ),
+    }
+    failures = [message for message, passed in checks.items() if not passed]
+    return JLensPreflightResponse(
+        packageInstalled=package_installed,
+        modelAllowed=model_allowed,
+        layerAvailable=layer_available,
+        positionValid=position_valid,
+        lensConfigured=lens_configured,
+        artifactChecked=artifact_checked,
+        fittedLayers=fitted_layers,
+        lensDModel=lens_d_model,
+        canSubmit=not failures,
+        reason=(
+            "Jacobian Lens package, artifact, model, layer, and token are ready."
+            if not failures
+            else " ".join(failures)
+        ),
+    )
+
+
 @lru_cache(maxsize=4)
 def _default_patching_tokenizer_loader(model_name: str) -> Any:
     from transformers import AutoTokenizer
@@ -1711,6 +1963,81 @@ def _subprocess_nla_runner(*, root: Path) -> JobRunner:
                 "samples": [result],
                 "metrics": sorted(result.get("metricProvenance", {})),
                 "artifacts": {"embedded": True, "derived": "nla-av-ar"},
+            }
+            result_path.write_text(json.dumps(envelope, indent=2), encoding="utf-8")
+            _require_not_cancelled(cancel_event)
+            result_path.replace(final_artifact)
+            return result
+        finally:
+            input_path.unlink(missing_ok=True)
+            result_path.unlink(missing_ok=True)
+
+    return run
+
+
+def _subprocess_jlens_runner(*, root: Path) -> JobRunner:
+    script, working_directory = _explorer_worker("run_local_explorer_jlens.py")
+
+    def run(
+        payload: JLensRunRequest,
+        cancel_event: threading.Event,
+        progress: JobProgress,
+    ) -> dict[str, Any]:
+        job_suffix = uuid.uuid4().hex[:10]
+        derived_run_id = f"{payload.run['runId']}-jlens-{job_suffix}"
+        output_dir = root / ".jobs"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        input_path = output_dir / f"{job_suffix}.jlens-input.json"
+        result_path = output_dir / f"{job_suffix}.jlens-result.json"
+        final_artifact = root / "generated" / f"jlens-{job_suffix}.explorer.json"
+        final_artifact.parent.mkdir(parents=True, exist_ok=True)
+        input_path.write_text(
+            json.dumps({"run": payload.run, "request": payload.model_dump(exclude={"run"})}),
+            encoding="utf-8",
+        )
+        command = [
+            sys.executable,
+            str(script),
+            "--input",
+            str(input_path),
+            "--output",
+            str(result_path),
+            "--run-id",
+            derived_run_id,
+        ]
+        device = os.environ.get("SAFELENS_EXPLORER_JOB_DEVICE", "cpu")
+        progress(5, "base-model", f"Loading the source model on {device}.")
+        try:
+            process = subprocess.Popen(
+                command,
+                cwd=working_directory,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            progress(30, "jlens-artifact", f"Loading Jacobian lens {payload.filename}.")
+            stdout, stderr = _communicate_cancellable(process, cancel_event)
+            _require_not_cancelled(cancel_event)
+            if process.returncode != 0:
+                diagnostic = (stderr or stdout or "Jacobian Lens subprocess failed").strip()
+                raise RuntimeError(diagnostic[-2_000:])
+            progress(90, "artifact", "Validating Jacobian Lens rows and provenance.")
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+            _require_sample_metadata(result, index=0)
+            rows = result.get("jLens")
+            if not isinstance(rows, list) or not rows:
+                raise ValueError("Jacobian Lens worker did not return a result row.")
+            _require_not_cancelled(cancel_event)
+            envelope = {
+                "schema_version": "1.0",
+                "run": {
+                    "run_id": result["runId"],
+                    "model_name": result["modelName"],
+                    "model_source": result["modelSource"],
+                },
+                "samples": [result],
+                "metrics": sorted(result.get("metricProvenance", {})),
+                "artifacts": {"embedded": True, "derived": "jacobian-lens"},
             }
             result_path.write_text(json.dumps(envelope, indent=2), encoding="utf-8")
             _require_not_cancelled(cancel_event)
@@ -2177,6 +2504,17 @@ def _sample_summary(
 ) -> RemoteRunSummary:
     prompt = sample.get("prompt")
     prompt_preview = " ".join(prompt.split())[:160] if isinstance(prompt, str) else None
+    metadata = sample.get("metadata") if isinstance(sample.get("metadata"), dict) else {}
+    parent = metadata.get("parentRun")
+    parent_run = (
+        RemoteParentRun(runId=parent["runId"], sampleId=parent["sampleId"])
+        if isinstance(parent, dict)
+        and isinstance(parent.get("runId"), str)
+        and isinstance(parent.get("sampleId"), str)
+        else None
+    )
+    conversation_id = metadata.get("conversationId")
+    turn_index = metadata.get("turnIndex")
     return RemoteRunSummary(
         runId=sample["runId"],
         sampleId=sample["sampleId"],
@@ -2189,6 +2527,13 @@ def _sample_summary(
         modifiedAt=modified_at,
         sizeBytes=size_bytes,
         promptPreview=prompt_preview or None,
+        parentRun=parent_run,
+        conversationId=conversation_id if isinstance(conversation_id, str) else None,
+        turnIndex=(
+            turn_index
+            if isinstance(turn_index, int) and not isinstance(turn_index, bool) and turn_index >= 0
+            else None
+        ),
     )
 
 
@@ -2229,6 +2574,7 @@ def _chunk_descriptors(payload: dict[str, Any]) -> list[ChunkDescriptor]:
     range_axes: dict[str, Literal["token", "token-square", "token-values", "none"]] = {
         "residualCells": "token",
         "logitLens": "token",
+        "jLens": "token",
         "attentionHeads": "token-square",
         "attentionCells": "token",
         "mlpNeurons": "token-values",
@@ -2242,6 +2588,7 @@ def _chunk_descriptors(payload: dict[str, Any]) -> list[ChunkDescriptor]:
     layer_filters = {
         "residualCells",
         "logitLens",
+        "jLens",
         "attentionHeads",
         "attentionCells",
         "mlpNeurons",
@@ -2318,6 +2665,62 @@ def _full_sample_payload(sample: IndexedSample) -> dict[str, Any]:
         status_code=409,
         detail={"code": "physical_source_mismatch", "message": "Source sample is missing."},
     )
+
+
+_JOB_REQUIRED_COMPONENTS = (
+    "attentionHeads",
+    "mlpNeurons",
+    "residualCells",
+    "logitLens",
+    "attentionCells",
+    "mlpCells",
+    "attributionMethods",
+)
+_JOB_RUN_IDENTITY_FIELDS = (
+    "runId",
+    "sampleId",
+    "modelName",
+    "modelSource",
+    "prompt",
+    "tokens",
+    "layers",
+)
+
+
+def _hydrate_workspace_job_payload(
+    payload: BaseModel,
+    *,
+    root: Path,
+    max_file_bytes: int,
+) -> BaseModel:
+    run = getattr(payload, "run", None)
+    if not isinstance(run, dict) or not _job_run_needs_hydration(run):
+        return payload
+    try:
+        indexed = _find_indexed_sample(
+            root,
+            str(run.get("runId", "")),
+            str(run.get("sampleId", "")),
+            max_file_bytes=max_file_bytes,
+        )
+    except HTTPException as exc:
+        if exc.status_code == 404:
+            return payload
+        raise
+    full_run = _full_sample_payload(indexed)
+    if any(full_run.get(field) != run.get(field) for field in _JOB_RUN_IDENTITY_FIELDS):
+        return payload
+    return payload.model_copy(update={"run": full_run})
+
+
+def _job_run_needs_hydration(run: dict[str, Any]) -> bool:
+    for component in _JOB_REQUIRED_COMPONENTS:
+        rows = run.get(component)
+        if not isinstance(rows, list) or not rows:
+            return True
+        if any(isinstance(row, dict) and row.get("id") == "__chunk_pending__" for row in rows):
+            return True
+    return False
 
 
 @lru_cache(maxsize=32)
@@ -2502,7 +2905,7 @@ def _slice_physical_block(
             ],
             "chunk": {"tokenStart": token_start, "tokenEnd": token_end},
         }
-    if component in {"residualCells", "logitLens", "attentionCells", "mlpCells", "nla"}:
+    if component in {"residualCells", "logitLens", "jLens", "attentionCells", "mlpCells", "nla"}:
         rows = _filter_position_rows(data, token_start, token_end, layer=layer)
         if component == "nla" and selector is not None:
             rows = [row for row in rows if row.get("component") == selector]
@@ -2604,7 +3007,7 @@ def _slice_component(
         ]
         result["chunk"] = {"tokenStart": token_start, "tokenEnd": token_end}
         return result
-    if component in {"residualCells", "logitLens", "attentionCells", "mlpCells", "nla"}:
+    if component in {"residualCells", "logitLens", "jLens", "attentionCells", "mlpCells", "nla"}:
         rows = _filter_position_rows(value, token_start, token_end, layer=layer)
         if component == "nla" and selector is not None:
             rows = [row for row in rows if row.get("component") == selector]

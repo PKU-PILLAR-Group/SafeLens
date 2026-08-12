@@ -233,12 +233,17 @@ runtime. The bundled example is immediately available, and compact
 `*.explorer.json` files placed under the artifact root appear in the Run
 Library.
 
-Real-model Prompt, Attribution, NLA, Patching, and Intervention jobs also need
+Real-model Prompt, Attribution, NLA, J-Lens, Patching, and Intervention jobs also need
 their model dependencies:
 
 ```bash
-python -m pip install -e ".[explorer,models,attribution,nla]"
+python -m pip install -e ".[explorer,models,attribution,nla,jlens]"
 ```
+
+J-Lens uses a fitted, model-specific Jacobian checkpoint. Configure a local
+checkpoint under the Explorer artifact root or a Hugging Face repository in the
+Explanation panel, or set `SAFELENS_JLENS_SOURCE`, `SAFELENS_JLENS_FILENAME`,
+`SAFELENS_JLENS_REVISION`, and `SAFELENS_JLENS_MODEL` before launching Explorer.
 
 For an isolated container instead:
 
@@ -263,7 +268,7 @@ SafeLens is currently installed from source.
 | HuggingFace, local, Qwen3 Dense, TransformerLens-compatible wrappers | `python -m pip install -e ".[models]" --no-build-isolation` |
 | ModelScope wrapper | `python -m pip install -e ".[modelscope]" --no-build-isolation` |
 | Local Explorer | `python -m pip install -e ".[explorer]"` |
-| Explorer with real-model jobs | `python -m pip install -e ".[explorer,models,attribution,nla]"` |
+| Explorer with real-model jobs | `python -m pip install -e ".[explorer,models,attribution,nla,jlens]"` |
 
 Recommended isolated setup:
 

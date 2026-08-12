@@ -18,28 +18,37 @@ import {
   type AttributionRunInput,
   type InterventionJob,
   type InterventionPreflight,
+  type JLensJob,
+  type NLAJob,
   type PatchingComponent
 } from "../api/explorerClient";
 import { useAttributionRunner } from "../state/useAttributionRunner";
 import { useInterventionRunner } from "../state/useInterventionRunner";
 import type { AttributionMethod, ExplorerRun, InterventionExperiment } from "../types";
+import { ChatAttentionWorkbench } from "./ChatAttentionWorkbench";
+import { ChatExplanationWorkbench } from "./ChatExplanationWorkbench";
 import { PresetSuggestTextarea } from "./PresetSuggestTextarea";
 import { ResponseTokenPicker } from "./ResponseTokenPicker";
 
 interface ChatAnalysisWorkbenchProps {
-  mode: "steering" | "attribution";
+  mode: "steering" | "attribution" | "explanation" | "attention";
   run: ExplorerRun;
   savedRun?: ExplorerRun;
   suggestionQuery?: string;
-  onRunReady: (run: ExplorerRun, job: { id: string; kind: "attribution" | "intervention" }) => void;
+  onRunReady: (run: ExplorerRun, job: AttributionJob | InterventionJob | NLAJob | JLensJob) => void;
 }
 
 export function ChatAnalysisWorkbench({ mode, run, savedRun, suggestionQuery, onRunReady }: ChatAnalysisWorkbenchProps) {
-  return mode === "steering" ? (
-    <SteeringWorkbench run={run} savedRun={savedRun} suggestionQuery={suggestionQuery} onRunReady={onRunReady} />
-  ) : (
-    <AttributionWorkbench run={run} savedRun={savedRun} onRunReady={onRunReady} />
-  );
+  if (mode === "steering") {
+    return <SteeringWorkbench run={run} savedRun={savedRun} suggestionQuery={suggestionQuery} onRunReady={onRunReady} />;
+  }
+  if (mode === "attribution") {
+    return <AttributionWorkbench run={run} savedRun={savedRun} onRunReady={onRunReady} />;
+  }
+  if (mode === "explanation") {
+    return <ChatExplanationWorkbench run={run} savedRun={savedRun} onRunReady={onRunReady} />;
+  }
+  return <ChatAttentionWorkbench run={run} />;
 }
 
 function SteeringWorkbench({
