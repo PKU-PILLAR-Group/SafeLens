@@ -114,6 +114,7 @@ interface SharedRequest<T> {
   promise: Promise<T>;
   subscribers: number;
   settled: boolean;
+  abortTimer?: ReturnType<typeof setTimeout>;
 }
 
 function sharedRequest<T>(
@@ -141,6 +142,10 @@ function sharedRequest<T>(
       () => finishSharedRequest(key, entry!)
     );
   }
+  if (entry.abortTimer !== undefined) {
+    clearTimeout(entry.abortTimer);
+    entry.abortTimer = undefined;
+  }
   entry.subscribers += 1;
   return new Promise<T>((resolve, reject) => {
     let finished = false;
@@ -149,7 +154,11 @@ function sharedRequest<T>(
       finished = true;
       signal.removeEventListener("abort", onAbort);
       entry!.subscribers = Math.max(0, entry!.subscribers - 1);
-      if (cancelled && entry!.subscribers === 0 && !entry!.settled) entry!.controller.abort();
+      if (cancelled && entry!.subscribers === 0 && !entry!.settled) {
+        entry!.abortTimer = setTimeout(() => {
+          if (entry!.subscribers === 0 && !entry!.settled) entry!.controller.abort();
+        }, 0);
+      }
     };
     const onAbort = () => {
       release(true);
@@ -750,12 +759,14 @@ export interface PatchingRunInput {
 }
 
 export const interventionPreflightSchema = z.object({
+  mode: z.enum(["direction", "neuron"]).default("direction"),
   modelAllowed: z.boolean(),
   layerAvailable: z.boolean(),
   componentSupported: z.boolean(),
   positionRangeValid: z.boolean(),
   targetTokenValid: z.boolean(),
   referencesDiffer: z.boolean(),
+  featureAvailable: z.boolean().default(true),
   targetTokenId: z.number().int().nonnegative(),
   targetTokenText: z.string(),
   positionStart: z.number().int().nonnegative(),
@@ -766,6 +777,7 @@ export const interventionPreflightSchema = z.object({
 
 export type InterventionPreflight = z.infer<typeof interventionPreflightSchema>;
 export interface InterventionPreflightInput {
+  mode?: "direction" | "neuron";
   modelName: string;
   promptTokenCount: number;
   availableLayers: number[];
@@ -776,6 +788,8 @@ export interface InterventionPreflightInput {
   targetTokenId: number;
   desiredPrompt: string;
   undesiredPrompt: string;
+  neuron?: number;
+  availableNeurons?: number[];
 }
 
 export const interventionJobSchema = z.object({
@@ -788,6 +802,7 @@ export const interventionJobSchema = z.object({
   createdAt: z.string(),
   updatedAt: z.string(),
   request: z.object({
+    mode: z.enum(["direction", "neuron"]).default("direction"),
     desiredPrompt: z.string(),
     undesiredPrompt: z.string(),
     layer: z.number().int().nonnegative(),
@@ -799,6 +814,7 @@ export const interventionJobSchema = z.object({
     seed: z.number().int().nonnegative(),
     maxNewTokens: z.number().int().positive(),
     temperature: z.number().nonnegative(),
+    neuron: z.number().int().nonnegative().nullish().transform((value) => value ?? undefined),
     sourceRun: z.object({ runId: z.string(), sampleId: z.string(), modelName: z.string() }),
     preflight: interventionPreflightSchema
   }),
@@ -808,6 +824,7 @@ export const interventionJobSchema = z.object({
 
 export type InterventionJob = z.infer<typeof interventionJobSchema>;
 export interface InterventionRunInput {
+  mode?: "direction" | "neuron";
   run: ExplorerRun;
   desiredPrompt: string;
   undesiredPrompt: string;
@@ -820,6 +837,7 @@ export interface InterventionRunInput {
   seed: number;
   maxNewTokens: number;
   temperature: number;
+  neuron?: number;
 }
 
 export async function submitPromptJob(input: PromptRunInput): Promise<PromptJob> {

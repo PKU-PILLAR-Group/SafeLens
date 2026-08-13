@@ -1,4 +1,5 @@
 import {
+  Activity,
   BrainCircuit,
   CheckCircle2,
   CircleStop,
@@ -13,9 +14,10 @@ import {
 
 import type { RemoteRunSummary } from "../api/explorerClient";
 import type { ExplorerRun } from "../types";
+import { generatedResponseText } from "../generatedResponse";
 import { ChatAnalysisWorkbench } from "./ChatAnalysisWorkbench";
 
-export type AnalysisId = "steering" | "attribution" | "patching" | "explanation" | "attention";
+export type AnalysisId = "steering" | "attribution" | "patching" | "feature" | "explanation" | "attention";
 
 export interface TurnView {
   id: string;
@@ -32,6 +34,7 @@ interface TurnCardProps {
   remoteSummary?: RemoteRunSummary;
   analysisRuns: ExplorerRun[];
   active: boolean;
+  showAnalysisControls: boolean;
   analysisOpen: AnalysisId | null;
   onRetry: () => void;
   onCancel: () => void;
@@ -44,6 +47,7 @@ export function TurnCard({
   remoteSummary,
   analysisRuns,
   active,
+  showAnalysisControls,
   analysisOpen,
   onRetry,
   onCancel,
@@ -57,11 +61,12 @@ export function TurnCard({
         const source = parent as Record<string, unknown>;
         const belongsToTurn = source.runId === turn.run?.runId && source.sampleId === turn.run?.sampleId;
         if (!belongsToTurn) return false;
-        if (analysisOpen === "steering") return Boolean(candidate.intervention);
+        if (analysisOpen === "steering") return Boolean(candidate.intervention && candidate.intervention.mode !== "neuron");
+        if (analysisOpen === "patching") return Boolean(candidate.patching);
         if (analysisOpen === "attribution") return candidate.attributionMethods.some(
               (method) => method.id === "integrated_gradients" && method.available
             );
-        if (analysisOpen === "patching") return Boolean(candidate.patching);
+        if (analysisOpen === "feature") return candidate.intervention?.mode === "neuron";
         if (analysisOpen === "explanation") {
           return candidate.nla.some((row) => row.status === "available") || candidate.jLens.length > 0;
         }
@@ -76,7 +81,7 @@ export function TurnCard({
         <div>
           {turn.run ? (
             <>
-              <p>{generatedResponse(turn.run)}</p>
+              <p>{generatedResponseText(turn.run) || "The model run is complete and its internal activations are ready to inspect."}</p>
               <span className="chat-run-ready"><CheckCircle2 size={14} /> Activation cache ready</span>
             </>
           ) : turn.status === "error" ? (
@@ -99,9 +104,17 @@ export function TurnCard({
           )}
         </div>
       </div>
-      {turn.run && (
+      {turn.run && showAnalysisControls && (
         <>
           <div className="chat-turn-explore-bar" aria-label="Explore this run">
+            <button
+              type="button"
+              className={analysisOpen === "feature" ? "active" : ""}
+              aria-pressed={analysisOpen === "feature"}
+              onClick={() => onToggleAnalysis("feature")}
+            >
+              <Activity size={16} /> Neuron
+            </button>
             <button
               type="button"
               className={analysisOpen === "patching" ? "active" : ""}
@@ -160,21 +173,4 @@ export function TurnCard({
       )}
     </article>
   );
-}
-
-function generatedResponse(run: ExplorerRun) {
-  const generated = run.metadata?.generatedContinuation;
-  if (typeof generated !== "string" || !generated.trim()) {
-    return "The model run is complete and its internal activations are ready to inspect.";
-  }
-  const promptRunner = run.metadata?.promptRunner;
-  const userPrompt = promptRunner && typeof promptRunner === "object"
-    ? (promptRunner as Record<string, unknown>).userPrompt
-    : undefined;
-  const response = generated.startsWith(run.prompt)
-    ? generated.slice(run.prompt.length).trim()
-    : typeof userPrompt === "string" && generated.startsWith(userPrompt)
-      ? generated.slice(userPrompt.length).trim()
-      : generated.trim();
-  return response || "The model run is complete and its internal activations are ready to inspect.";
 }

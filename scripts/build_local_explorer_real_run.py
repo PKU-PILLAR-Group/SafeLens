@@ -36,6 +36,11 @@ def main() -> None:
     )
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--prompt", default=DEFAULT_PROMPT)
+    parser.add_argument(
+        "--prompt-input",
+        type=Path,
+        help="JSON request containing prompt, template, and prior chat messages.",
+    )
     parser.add_argument("--cache-dir", default=".cache/safelens/local-explorer-real-flow")
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--artifact-output", type=Path, default=DEFAULT_ARTIFACT_OUTPUT)
@@ -48,9 +53,14 @@ def main() -> None:
 
     wrapper = _load_wrapper(args.model, args.cache_dir)
     try:
+        prompt, prompt_format = _prepare_generation_prompt(
+            wrapper.tokenizer,
+            _load_prompt_input(args.prompt_input, fallback_prompt=args.prompt),
+        )
         run = _build_run(
             wrapper,
-            prompt=args.prompt,
+            prompt=prompt,
+            prompt_format=prompt_format,
             run_id=args.run_id,
             sample_id=args.sample_id,
             seed=args.seed,
@@ -112,6 +122,71 @@ def _display_path(path: Path) -> Path:
         return path.relative_to(ROOT)
     except ValueError:
         return path
+
+
+def _load_prompt_input(path: Path | None, *, fallback_prompt: str) -> dict[str, Any]:
+    if path is None:
+        return {"prompt": fallback_prompt, "template": "plain", "messages": []}
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(value, dict) or not isinstance(value.get("prompt"), str):
+        raise ValueError("prompt input must contain a string prompt.")
+    template = value.get("template", "plain")
+    if template not in {"plain", "chat"}:
+        raise ValueError("prompt input template must be 'plain' or 'chat'.")
+    messages = value.get("messages", [])
+    if not isinstance(messages, list):
+        raise ValueError("prompt input messages must be a list.")
+    normalized_messages: list[dict[str, str]] = []
+    for message in messages:
+        if not isinstance(message, dict) or message.get("role") not in {"user", "assistant"}:
+            raise ValueError("chat messages must have a user or assistant role.")
+        content = message.get("content")
+        if not isinstance(content, str):
+            raise ValueError("chat message content must be a string.")
+        normalized_messages.append({"role": str(message["role"]), "content": content.strip()})
+    return {
+        "prompt": str(value["prompt"]).strip(),
+        "template": template,
+        "messages": normalized_messages,
+    }
+
+
+def _prepare_generation_prompt(
+    tokenizer: Any,
+    request: dict[str, Any],
+) -> tuple[str, dict[str, Any]]:
+    prompt = str(request["prompt"]).strip()
+    template = str(request.get("template", "plain"))
+    messages = list(request.get("messages", []))
+    if template != "chat":
+        return prompt, {"template": "plain", "method": "plain"}
+
+    conversation = [*messages, {"role": "user", "content": prompt}]
+    apply_chat_template = getattr(tokenizer, "apply_chat_template", None)
+    if callable(apply_chat_template):
+        try:
+            rendered = apply_chat_template(
+                conversation,
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+        except (TypeError, ValueError):
+            rendered = None
+        if isinstance(rendered, str) and rendered:
+            return rendered, {
+                "template": "chat",
+                "method": "tokenizer.apply_chat_template",
+                "messageCount": len(conversation),
+            }
+    history = "\n".join(
+        f"{'User' if message['role'] == 'user' else 'Assistant'}: {message['content']}"
+        for message in conversation
+    )
+    return f"{history}\nAssistant:", {
+        "template": "chat",
+        "method": "role-prefix-fallback",
+        "messageCount": len(conversation),
+    }
 
 
 def _load_wrapper(model_id: str, cache_dir: str) -> HuggingFaceModelWrapper:
@@ -176,6 +251,7 @@ def _build_run(
     seed: int = 0,
     max_new_tokens: int = 3,
     temperature: float = 0.0,
+    prompt_format: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     torch = _require_torch()
     random.seed(seed)
@@ -221,10 +297,31 @@ def _build_run(
         "max_new_tokens": max_new_tokens,
         "do_sample": temperature > 0,
         "pad_token_id": wrapper.tokenizer.eos_token_id,
+        "prepend_bos": False,
+        "return_type": "tokens",
     }
+    stop_token_ids = _generation_stop_token_ids(wrapper, prompt_format=prompt_format)
+    if stop_token_ids:
+        generation_kwargs["eos_token_id"] = (
+            stop_token_ids[0] if len(stop_token_ids) == 1 else stop_token_ids
+        )
     if temperature > 0:
         generation_kwargs["temperature"] = temperature
-    generated = wrapper.generate(prompt, **generation_kwargs)
+    generated_tokens = wrapper.generate(prompt, **generation_kwargs)
+    generated_ids = _flat_token_ids(generated_tokens)
+    continuation_ids = generated_ids[len(token_ids):]
+    generated = str(
+        wrapper.tokenizer.decode(
+            continuation_ids,
+            skip_special_tokens=True,
+            clean_up_tokenization_spaces=False,
+        )
+    ).strip()
+    stop_reason = (
+        "eos_token"
+        if continuation_ids and continuation_ids[-1] in stop_token_ids
+        else "max_new_tokens"
+    )
     top_token_id = int(output.logits[0, -1].argmax().detach().cpu().item())
     top_token = wrapper.to_single_str_token(top_token_id)
     logit_lens = _logit_lens_rows(
@@ -385,6 +482,10 @@ def _build_run(
                 "maxNewTokens": max_new_tokens,
                 "temperature": temperature,
                 "doSample": temperature > 0,
+                "promptFormat": prompt_format or {"template": "plain", "method": "plain"},
+                "stopTokenIds": stop_token_ids,
+                "stopReason": stop_reason,
+                "generatedTokenCount": len(continuation_ids),
             },
         },
     }
@@ -535,6 +636,43 @@ def _target_token_id(wrapper: HuggingFaceModelWrapper) -> int:
         if getattr(ids, "numel", lambda: 0)() > 0:
             return int(ids[0, -1].detach().cpu().item())
     return int(wrapper.tokenizer.eos_token_id)
+
+
+def _flat_token_ids(tokens: Any) -> list[int]:
+    value = tokens.detach().cpu().tolist() if hasattr(tokens, "detach") else tokens
+    if value and isinstance(value[0], list):
+        if len(value) != 1:
+            raise ValueError("Explorer prompt jobs support one prompt at a time.")
+        value = value[0]
+    return [int(token_id) for token_id in value]
+
+
+def _generation_stop_token_ids(
+    wrapper: HuggingFaceModelWrapper,
+    *,
+    prompt_format: dict[str, Any] | None,
+) -> list[int]:
+    tokenizer = wrapper.tokenizer
+    candidates: list[Any] = [getattr(tokenizer, "eos_token_id", None)]
+    generation_config = getattr(getattr(wrapper, "model", None), "generation_config", None)
+    candidates.append(getattr(generation_config, "eos_token_id", None))
+    if (prompt_format or {}).get("template") == "chat":
+        convert = getattr(tokenizer, "convert_tokens_to_ids", None)
+        if callable(convert):
+            for token in ("<|im_end|>", "<|eot_id|>"):
+                token_id = convert(token)
+                if token_id is not None and token_id != getattr(tokenizer, "unk_token_id", None):
+                    candidates.append(token_id)
+    result: list[int] = []
+    for candidate in candidates:
+        values = candidate if isinstance(candidate, (list, tuple, set)) else [candidate]
+        for value in values:
+            if value is None:
+                continue
+            token_id = int(value)
+            if token_id >= 0 and token_id not in result:
+                result.append(token_id)
+    return result
 
 
 def _risk_indices(token_texts: list[str]) -> list[int]:

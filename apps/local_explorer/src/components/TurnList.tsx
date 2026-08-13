@@ -36,13 +36,14 @@ export function TurnList({
 
   return (
     <div className="chat-turn-list" aria-label="Conversation turns">
-      {turns.map((turn) => (
+      {turns.map((turn, index) => (
         <TurnCard
           key={turn.id}
           turn={turn}
           remoteSummary={records.find((record) => record.key === turn.id)?.remoteSummary}
           analysisRuns={analysisRuns}
           active={turn.id === activeTurnId}
+          showAnalysisControls={index === turns.length - 1}
           analysisOpen={analysisOpen?.turnId === turn.id ? analysisOpen.mode : null}
           onRetry={() => onRetry(turn.id)}
           onCancel={() => onCancel(turn.id)}

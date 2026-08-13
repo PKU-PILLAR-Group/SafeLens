@@ -1,4 +1,4 @@
-import { ArrowRight, GitCompareArrows, Pin } from "lucide-react";
+import { Activity, ArrowRight, GitCompareArrows, Pin } from "lucide-react";
 
 import type { InterventionExperiment } from "../types";
 
@@ -10,21 +10,22 @@ interface InterventionComparisonProps {
 export function InterventionComparison({ experiment, onPin }: InterventionComparisonProps) {
   const originalKinds = tokenKinds(experiment, "original");
   const steeredKinds = tokenKinds(experiment, "steered");
+  const isNeuron = experiment.mode === "neuron";
   return (
     <section className="surface intervention-comparison">
       <div className="surface-header intervention-comparison-header">
         <div>
           <h3>Original vs intervention</h3>
-          <p>L{experiment.layer} · {experiment.component} · scale {experiment.scale.toFixed(1)} · T{experiment.positionStart}–T{experiment.positionEnd - 1}</p>
+          <p>{isNeuron && experiment.feature ? `${experiment.feature.id} · ${experiment.feature.operation}` : `L${experiment.layer} · ${experiment.component}`} · factor {experiment.scale.toFixed(1)} · T{experiment.positionStart}–T{experiment.positionEnd - 1}</p>
         </div>
         <button className="icon-button" aria-label="Pin intervention comparison" title="Pin comparison" onClick={onPin}><Pin size={15} /></button>
       </div>
 
       <div className="intervention-delta-grid" aria-label="Intervention metric changes">
-        <Metric label="Target logit delta" value={signed(experiment.deltas.targetLogit)} kind="causal" />
+        <Metric label="Diagnostic logit delta" value={signed(experiment.deltas.targetLogit)} kind="causal" />
         <Metric label="Token edit distance" value={String(experiment.deltas.tokenEditDistance)} kind="causal" />
         <Metric label="Lexical risk delta" value={signed(experiment.deltas.lexicalRisk)} kind="derived proxy" />
-        <Metric label="Probe score" value={experiment.deltas.probeScore === null ? "not configured" : experiment.deltas.probeScore.toFixed(4)} kind="unavailable" />
+        <Metric label="Max vocabulary delta" value={experiment.deltas.maxAbsLogit === undefined ? "not recorded" : experiment.deltas.maxAbsLogit.toFixed(6)} kind={experiment.deltas.effectStatus === "changed" ? "causal" : "unchanged"} />
       </div>
 
       <div className="intervention-output-compare">
@@ -34,12 +35,18 @@ export function InterventionComparison({ experiment, onPin }: InterventionCompar
       </div>
 
       <div className="intervention-provenance-strip">
-        <GitCompareArrows size={15} />
-        <span><b>{experiment.vector.method}</b>{experiment.vector.dimension}d unit vector · raw norm {experiment.vector.rawNorm.toFixed(4)}</span>
+        {isNeuron ? <Activity size={15} /> : <GitCompareArrows size={15} />}
+        <span><b>{experiment.vector.method}</b>{isNeuron ? `peak activation ${experiment.vector.rawNorm.toFixed(4)}` : `${experiment.vector.dimension}d contrast vector · norm ${experiment.vector.rawNorm.toFixed(4)}`}</span>
         <span><b>Objective</b>{visible(experiment.targetTokenText)} ({experiment.targetTokenId})</span>
         <span><b>Generation</b>seed {experiment.seed} · {experiment.maxNewTokens} tokens · temperature {experiment.temperature}</span>
       </div>
-      <p className="intervention-probe-note">{experiment.deltas.probeReason}</p>
+      <p className="intervention-probe-note">
+        {experiment.deltas.generationChanged
+          ? `Generation first diverged at output token ${experiment.deltas.firstDivergenceIndex ?? 0}.`
+          : experiment.deltas.maxAbsLogit && experiment.deltas.maxAbsLogit > 0
+            ? "Logits changed, but greedy decoding stayed on the same tokens in this generation window."
+            : experiment.deltas.probeReason}
+      </p>
     </section>
   );
 }

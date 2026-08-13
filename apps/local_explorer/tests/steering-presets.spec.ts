@@ -110,11 +110,24 @@ test("shows built-in steering preset suggestions and inserts them on click", asy
   await page.getByRole("button", { name: /Steer/ }).click();
   const toward = page.getByLabel("Steering desired behavior");
   await toward.click();
-  await expect(page.getByRole("option", { name: /Refuse unsafe/ })).toBeVisible();
+  const suggestions = page.getByRole("listbox", { name: "Steer toward preset suggestions" });
+  await expect(suggestions.getByRole("option", { name: /Refuse unsafe/ })).toBeVisible();
   await toward.fill("concise");
-  await expect(page.getByRole("option", { name: /Be concise/ })).toBeVisible();
-  await page.getByRole("option", { name: /Be concise/ }).click();
+  await expect(suggestions.getByRole("option", { name: /Be concise/ })).toBeVisible();
+  await suggestions.getByRole("option", { name: /Be concise/ }).click();
   await expect(toward).toHaveValue("Answer briefly and directly without filler.");
+  await expect(page.getByLabel("Steering undesired behavior")).toHaveValue(
+    "Ramble with excessive detail and repetition."
+  );
+
+  await expect(page.getByRole("button", { name: "Style", pressed: true })).toHaveCount(2);
+  await page.getByLabel("Steer away from direction preset").selectOption("b-unstructured");
+  await expect(page.getByLabel("Steering undesired behavior")).toHaveValue(
+    "Answer as an unstructured stream without clear sections."
+  );
+  await expect(toward).toHaveValue(
+    "Organize the answer into clear, scannable steps."
+  );
 });
 
 test("saves a custom steering preset and reuses it", async ({ page }) => {
@@ -135,12 +148,12 @@ test("saves a custom steering preset and reuses it", async ({ page }) => {
 
   await toward.fill("");
   await toward.click();
-  await expect(page.getByRole("option", { name: /One word/ })).toBeVisible();
+  await expect(page.getByRole("listbox", { name: "Steer toward preset suggestions" }).getByRole("option", { name: /One word/ })).toBeVisible();
 
   await page.reload();
   await page.locator(".chat-history-open").first().click();
   await page.getByRole("button", { name: /Steer/ }).click();
   const towardAfterReload = page.getByLabel("Steering desired behavior");
   await towardAfterReload.fill("one");
-  await expect(page.getByRole("option", { name: /One word/ })).toBeVisible();
+  await expect(page.getByRole("listbox", { name: "Steer toward preset suggestions" }).getByRole("option", { name: /One word/ })).toBeVisible();
 });

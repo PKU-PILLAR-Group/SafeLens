@@ -338,6 +338,7 @@ class PatchingRunRequest(BaseModel):
 
 
 class InterventionPreflightRequest(BaseModel):
+    mode: Literal["direction", "neuron"] = "direction"
     modelName: str = Field(min_length=1)
     promptTokenCount: int = Field(ge=1, le=4_096)
     availableLayers: list[int] = Field(min_length=1, max_length=128)
@@ -348,15 +349,19 @@ class InterventionPreflightRequest(BaseModel):
     targetTokenId: int = Field(ge=0)
     desiredPrompt: str = Field(min_length=1, max_length=8_000)
     undesiredPrompt: str = Field(min_length=1, max_length=8_000)
+    neuron: int | None = Field(default=None, ge=0)
+    availableNeurons: list[int] = Field(default_factory=list, max_length=256)
 
 
 class InterventionPreflightResponse(BaseModel):
+    mode: Literal["direction", "neuron"]
     modelAllowed: bool
     layerAvailable: bool
     componentSupported: bool
     positionRangeValid: bool
     targetTokenValid: bool
     referencesDiffer: bool
+    featureAvailable: bool
     targetTokenId: int
     targetTokenText: str
     positionStart: int
@@ -367,6 +372,7 @@ class InterventionPreflightResponse(BaseModel):
 
 class InterventionRunRequest(BaseModel):
     run: dict[str, Any]
+    mode: Literal["direction", "neuron"] = "direction"
     desiredPrompt: str = Field(min_length=1, max_length=8_000)
     undesiredPrompt: str = Field(min_length=1, max_length=8_000)
     layer: int = Field(ge=0)
@@ -376,8 +382,9 @@ class InterventionRunRequest(BaseModel):
     positionEnd: int = Field(ge=1)
     targetTokenId: int = Field(ge=0)
     seed: int = Field(default=0, ge=0, le=2_147_483_647)
-    maxNewTokens: int = Field(default=16, ge=1, le=64)
+    maxNewTokens: int = Field(default=64, ge=1, le=128)
     temperature: float = Field(default=0.0, ge=0.0, le=2.0)
+    neuron: int | None = Field(default=None, ge=0)
 
 
 class JobSnapshot(BaseModel):
@@ -1130,6 +1137,7 @@ def create_app(
                 detail={"code": "run_too_large", "message": "Run exceeds the compact job limit."},
             )
         try:
+            payload = _hydrate_workspace_job_payload(payload, root=root, max_file_bytes=max_file_bytes)
             _require_sample_metadata(payload.run, index=0)
             if payload.run["modelName"] not in allowed_models:
                 raise HTTPException(
@@ -1140,6 +1148,7 @@ def create_app(
                     },
                 )
             preflight_request = InterventionPreflightRequest(
+                mode=payload.mode,
                 modelName=payload.run["modelName"],
                 promptTokenCount=len(payload.run["tokens"]),
                 availableLayers=[int(layer) for layer in payload.run["layers"]],
@@ -1150,6 +1159,12 @@ def create_app(
                 targetTokenId=payload.targetTokenId,
                 desiredPrompt=payload.desiredPrompt,
                 undesiredPrompt=payload.undesiredPrompt,
+                neuron=payload.neuron,
+                availableNeurons=[
+                    int(item.get("neuron")) for item in payload.run.get("mlpNeurons", [])
+                    if isinstance(item, dict) and isinstance(item.get("neuron"), int)
+                    and int(item.get("layer", -1)) == payload.layer
+                ],
             )
             tokenizer = load_intervention_tokenizer(payload.run["modelName"])
             preflight = _intervention_preflight(
@@ -1180,7 +1195,7 @@ def create_app(
         return intervention_manager.submit(
             job_payload,
             public_request={
-                **payload.model_dump(exclude={"run"}),
+                **payload.model_dump(exclude={"run"}, exclude_none=True),
                 "sourceRun": {
                     "runId": payload.run["runId"],
                     "sampleId": payload.run["sampleId"],
@@ -1508,10 +1523,23 @@ def _subprocess_prompt_runner(*, root: Path) -> PromptRunner:
         output_dir = root / ".jobs"
         output_dir.mkdir(parents=True, exist_ok=True)
         ts_output = output_dir / f"{job_suffix}.ts"
+        prompt_input = output_dir / f"{job_suffix}.prompt.json"
         temp_artifact = output_dir / f"{job_suffix}.tmp.json"
         final_artifact = root / "generated" / f"{run_id}.explorer.json"
         final_artifact.parent.mkdir(parents=True, exist_ok=True)
-        prompt = _render_prompt(payload.prompt, payload.template, payload.messages)
+        prompt_input.write_text(
+            json.dumps(
+                {
+                    "prompt": payload.prompt,
+                    "template": payload.template,
+                    "messages": [
+                        message.model_dump(mode="json") for message in payload.messages
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
         configured_device = os.environ.get("SAFELENS_EXPLORER_JOB_DEVICE", "cpu")
         device_label = "GPU" if configured_device.startswith("cuda") else "CPU"
         progress(8, "model", f"Loading {payload.model} on the local {device_label} worker.")
@@ -1520,8 +1548,8 @@ def _subprocess_prompt_runner(*, root: Path) -> PromptRunner:
             str(script),
             "--model",
             payload.model,
-            "--prompt",
-            prompt,
+            "--prompt-input",
+            str(prompt_input),
             "--output",
             str(ts_output),
             "--artifact-output",
@@ -1592,6 +1620,7 @@ def _subprocess_prompt_runner(*, root: Path) -> PromptRunner:
             return sample
         finally:
             ts_output.unlink(missing_ok=True)
+            prompt_input.unlink(missing_ok=True)
             temp_artifact.unlink(missing_ok=True)
 
     return run
@@ -1951,7 +1980,10 @@ def _intervention_preflight(
     position_range_valid = (
         0 <= payload.positionStart < payload.positionEnd <= payload.promptTokenCount
     )
-    references_differ = payload.desiredPrompt.strip() != payload.undesiredPrompt.strip()
+    references_differ = payload.mode == "neuron" or payload.desiredPrompt.strip() != payload.undesiredPrompt.strip()
+    feature_available = payload.mode == "direction" or (
+        payload.neuron is not None and payload.neuron in payload.availableNeurons
+    )
     try:
         vocab_size = int(len(tokenizer))
     except (TypeError, AttributeError):
@@ -1974,16 +2006,19 @@ def _intervention_preflight(
         "position range must stay inside the source prompt": position_range_valid,
         "target token is outside the tokenizer vocabulary": target_token_valid,
         "desired and undesired references are identical": references_differ,
+        "selected MLP neuron is not available in the source run": feature_available,
     }
     failures = [message for message, passed in checks.items() if not passed]
     can_submit = not failures
     return InterventionPreflightResponse(
+        mode=payload.mode,
         modelAllowed=model_allowed,
         layerAvailable=layer_available,
         componentSupported=component_supported,
         positionRangeValid=position_range_valid,
         targetTokenValid=target_token_valid,
         referencesDiffer=references_differ,
+        featureAvailable=feature_available,
         targetTokenId=payload.targetTokenId,
         targetTokenText=target_text,
         positionStart=payload.positionStart,
@@ -2279,7 +2314,10 @@ def _subprocess_intervention_runner(*, root: Path) -> JobRunner:
                 stderr=subprocess.PIPE,
                 text=True,
             )
-            progress(24, "steering-vector", "Building the normalized contrastive direction.")
+            if payload.mode == "neuron":
+                progress(24, "neuron-intervention", "Preparing the selected MLP neuron hook.")
+            else:
+                progress(24, "steering-vector", "Building the chat-aligned contrastive direction.")
             stdout, stderr = _communicate_cancellable(process, cancel_event)
             _require_not_cancelled(cancel_event)
             if process.returncode != 0:

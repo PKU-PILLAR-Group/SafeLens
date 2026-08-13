@@ -201,7 +201,18 @@ const interventionOutputSchema = z.object({
 });
 
 const interventionExperimentSchema = z.object({
+  mode: z.enum(["direction", "neuron"]).default("direction"),
+  feature: z.object({
+    kind: z.literal("mlp_neuron"),
+    id: z.string().min(1),
+    label: z.string().min(1),
+    layer: z.number().int().nonnegative(),
+    neuron: z.number().int().nonnegative(),
+    baselineActivation: z.number().finite(),
+    operation: z.enum(["suppress", "reduce", "enhance", "invert"])
+  }).optional(),
   vector: z.object({
+    algorithmVersion: z.string().min(1).optional(),
     method: z.string().min(1),
     desiredPrompt: z.string().min(1),
     undesiredPrompt: z.string().min(1),
@@ -209,7 +220,13 @@ const interventionExperimentSchema = z.object({
     rawNorm: z.number().finite().positive(),
     normalized: z.boolean(),
     dimension: z.number().int().positive(),
-    sourceKey: z.string().min(1)
+    sourceKey: z.string().min(1),
+    referenceTemplate: z.string().min(1).optional(),
+    desiredTokenCount: z.number().int().positive().optional(),
+    undesiredTokenCount: z.number().int().positive().optional(),
+    sourceActivationNorm: z.number().finite().positive().optional(),
+    appliedVectorNorm: z.number().finite().nonnegative().optional(),
+    relativeStrength: z.number().finite().nonnegative().optional()
   }),
   layer: z.number().int().nonnegative(),
   component: z.enum(["resid_post", "attn_out", "mlp_out"]),
@@ -228,6 +245,14 @@ const interventionExperimentSchema = z.object({
     lexicalRisk: z.number().finite(),
     tokenEditDistance: z.number().int().nonnegative(),
     generationChanged: z.boolean(),
+    firstDivergenceIndex: z.number().int().nonnegative().nullable().optional(),
+    maxAbsLogit: z.number().finite().nonnegative().optional(),
+    meanAbsLogit: z.number().finite().nonnegative().optional(),
+    changedVocabularyLogits: z.number().int().nonnegative().optional(),
+    topChangedTokenId: z.number().int().nonnegative().optional(),
+    topChangedTokenDelta: z.number().finite().optional(),
+    directionProjectionDelta: z.number().finite().optional(),
+    effectStatus: z.enum(["changed", "no_change"]).optional(),
     probeScore: z.number().finite().nullable(),
     probeReason: z.string().min(1)
   }),

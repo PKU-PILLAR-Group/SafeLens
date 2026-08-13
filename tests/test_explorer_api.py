@@ -1245,6 +1245,43 @@ def test_intervention_preflight_checks_layer_range_target_and_references(tmp_pat
     assert blocked["referencesDiffer"] is False
 
 
+def test_neuron_intervention_preflight_requires_a_real_cached_neuron(tmp_path: Path) -> None:
+    client = TestClient(
+        create_app(
+            tmp_path,
+            intervention_tokenizer_loader=lambda _model: _PatchingTokenizer(),
+        )
+    )
+    request = {
+        "mode": "neuron",
+        "modelName": "sshleifer/tiny-gpt2",
+        "promptTokenCount": 2,
+        "availableLayers": [0, 1],
+        "layer": 1,
+        "component": "mlp_out",
+        "positionStart": 0,
+        "positionEnd": 2,
+        "targetTokenId": 42,
+        "neuron": 7,
+        "availableNeurons": [3, 7],
+        "desiredPrompt": "Enhance selected MLP neuron",
+        "undesiredPrompt": "Suppress selected MLP neuron",
+    }
+    ready = client.post("/api/intervention/preflight", json=request)
+    assert ready.status_code == 200
+    assert ready.json()["mode"] == "neuron"
+    assert ready.json()["featureAvailable"] is True
+    assert ready.json()["referencesDiffer"] is True
+
+    blocked = client.post(
+        "/api/intervention/preflight",
+        json={**request, "neuron": 99},
+    )
+    assert blocked.status_code == 200
+    assert blocked.json()["canSubmit"] is False
+    assert blocked.json()["featureAvailable"] is False
+
+
 def test_intervention_job_queues_only_after_authoritative_preflight(tmp_path: Path) -> None:
     source = _sample()
     source.update(
@@ -1302,6 +1339,7 @@ def test_intervention_job_queues_only_after_authoritative_preflight(tmp_path: Pa
     assert response.status_code == 202
     assert response.json()["kind"] == "intervention"
     assert "run" not in response.json()["request"]
+    assert "neuron" not in response.json()["request"]
     assert response.json()["request"]["preflight"]["canSubmit"] is True
     snapshot = _wait_for_job(client, response.json()["id"], "ready")
     assert snapshot["result"]["runId"] == "run-a-intervention-derived"

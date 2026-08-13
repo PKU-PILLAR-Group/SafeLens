@@ -8,6 +8,7 @@ import { useAttributionRunner } from "../state/useAttributionRunner";
 import type { JobFailure } from "../jobFailure";
 import type { AttributionJob, AttributionRunInput } from "../api/explorerClient";
 import type { ExplorerRun } from "../types";
+import { generatedResponseText, trimGeneratedTurn } from "../generatedResponse";
 
 interface AttributionJobPanelProps {
   run: ExplorerRun;
@@ -172,12 +173,10 @@ function inferredResponse(run: ExplorerRun) {
     const latest = jobs[jobs.length - 1];
     if (latest && typeof latest === "object" && !Array.isArray(latest)) {
       const response = (latest as Record<string, unknown>).response;
-      if (typeof response === "string") return response;
+      if (typeof response === "string") return trimGeneratedTurn(response);
     }
   }
-  const generated = run.metadata?.generatedContinuation;
-  if (typeof generated !== "string") return "";
-  return generated.startsWith(run.prompt) ? generated.slice(run.prompt.length) : generated;
+  return generatedResponseText(run);
 }
 
 function latestAttributionProvenance(run: ExplorerRun) {

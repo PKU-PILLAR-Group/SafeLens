@@ -4,6 +4,7 @@ import type { PromptJob, PromptMessage } from "../api/explorerClient";
 import { usePromptRunner } from "./usePromptRunner";
 import type { ExplorerRun } from "../types";
 import type { TurnView } from "../components/TurnCard";
+import { generatedResponseText } from "../generatedResponse";
 
 export type { TurnView };
 
@@ -35,7 +36,7 @@ export function useTurnManager({
     return sourceTurns
       .filter((turn) => turn.id !== excludeId && turn.run && turn.status === "ready")
       .flatMap((turn) => {
-        const response = generatedResponse(turn.run!);
+        const response = generatedResponseText(turn.run!);
         return response ? [
           { role: "user" as const, content: turn.prompt },
           { role: "assistant" as const, content: response }
@@ -171,17 +172,4 @@ export function useTurnManager({
     reset,
     hydrate
   };
-}
-
-function generatedResponse(run: ExplorerRun): string {
-  const generated = run.metadata?.generatedContinuation;
-  if (typeof generated !== "string" || !generated.trim()) return "";
-  const userPrompt = run.metadata?.promptRunner;
-  const promptRunner = userPrompt && typeof userPrompt === "object"
-    ? userPrompt as Record<string, unknown>
-    : undefined;
-  const sourcePrompt = typeof promptRunner?.userPrompt === "string"
-    ? promptRunner.userPrompt
-    : run.prompt;
-  return (generated.startsWith(run.prompt) ? generated.slice(run.prompt.length) : generated.startsWith(sourcePrompt) ? generated.slice(sourcePrompt.length) : generated).trim();
 }

@@ -340,7 +340,18 @@ export interface InterventionOutput {
 }
 
 export interface InterventionExperiment {
+  mode: "direction" | "neuron";
+  feature?: {
+    kind: "mlp_neuron";
+    id: string;
+    label: string;
+    layer: number;
+    neuron: number;
+    baselineActivation: number;
+    operation: "suppress" | "reduce" | "enhance" | "invert";
+  };
   vector: {
+    algorithmVersion?: string;
     method: string;
     desiredPrompt: string;
     undesiredPrompt: string;
@@ -349,6 +360,12 @@ export interface InterventionExperiment {
     normalized: boolean;
     dimension: number;
     sourceKey: string;
+    referenceTemplate?: string;
+    desiredTokenCount?: number;
+    undesiredTokenCount?: number;
+    sourceActivationNorm?: number;
+    appliedVectorNorm?: number;
+    relativeStrength?: number;
   };
   layer: number;
   component: "resid_post" | "attn_out" | "mlp_out";
@@ -367,6 +384,14 @@ export interface InterventionExperiment {
     lexicalRisk: number;
     tokenEditDistance: number;
     generationChanged: boolean;
+    firstDivergenceIndex?: number | null;
+    maxAbsLogit?: number;
+    meanAbsLogit?: number;
+    changedVocabularyLogits?: number;
+    topChangedTokenId?: number;
+    topChangedTokenDelta?: number;
+    directionProjectionDelta?: number;
+    effectStatus?: "changed" | "no_change";
     probeScore: number | null;
     probeReason: string;
   };

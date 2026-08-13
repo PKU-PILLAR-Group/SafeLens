@@ -17,7 +17,6 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from SafeLens.explorer_model import load_explorer_hf_model
-from SafeLens.steering import ContrastiveSteeringVector
 from SafeLens.utils import HuggingFaceModelWrapper
 
 RISK_TERMS = ("jail", "break", "attack", "harm", "weapon", "malware", "bypass", "exploit")
@@ -41,29 +40,52 @@ def main() -> None:
         if prompt_ids != expected_ids:
             raise ValueError("Source prompt token IDs no longer match the Explorer artifact.")
 
+        mode = str(request.get("mode", "direction"))
         activation_name = f"layer_{int(request['layer'])}.{request['component']}"
-        desired_vector = _reference_vector(wrapper, str(request["desiredPrompt"]), activation_name)
-        undesired_vector = _reference_vector(
-            wrapper, str(request["undesiredPrompt"]), activation_name
-        )
-        raw_vector = desired_vector - undesired_vector
-        raw_norm = float(raw_vector.float().norm().detach().cpu().item())
-        if math.isclose(raw_norm, 0.0, abs_tol=1e-12):
-            raise ValueError("Desired and undesired references produced a zero steering direction.")
-        vector = raw_vector / raw_vector.norm().clamp_min(1e-12)
-        steering = ContrastiveSteeringVector(
-            layer=activation_name,
-            vector=vector,
-            activation_reduce="last_token",
-            metadata={
-                "method": "contrastive_mean_difference",
-                "positive_count": 1,
-                "negative_count": 1,
-                "normalized": True,
-            },
-        )
+        feature: dict[str, Any] | None = None
+        if mode == "neuron":
+            selected = next(
+                (
+                    item for item in run.get("mlpNeurons", [])
+                    if isinstance(item, dict)
+                    and int(item.get("layer", -1)) == int(request["layer"])
+                    and int(item.get("neuron", -1)) == int(request.get("neuron", -1))
+                ),
+                None,
+            )
+            if selected is None:
+                raise ValueError("Selected MLP neuron is not available in the source run.")
+            activation_name = f"layer_{int(request['layer'])}.post"
+            factor = float(request["scale"])
+            feature = {
+                "kind": "mlp_neuron",
+                "id": str(selected.get("id", f"L{request['layer']}N{request['neuron']}")),
+                "label": str(selected.get("label", "MLP neuron")),
+                "layer": int(request["layer"]),
+                "neuron": int(request["neuron"]),
+                "baselineActivation": float(
+                    selected.get("maxAbsoluteActivation", selected.get("activation", 0.0))
+                ),
+                "operation": _neuron_operation(factor),
+            }
+        else:
+            desired_vector, desired_token_count, reference_template = _reference_vector(
+                wrapper,
+                str(request["desiredPrompt"]),
+                activation_name,
+            )
+            undesired_vector, undesired_token_count, _ = _reference_vector(
+                wrapper, str(request["undesiredPrompt"]), activation_name
+            )
+            vector, raw_norm = _contrastive_direction(desired_vector, undesired_vector)
+            source_activation_norm = _source_activation_norm(
+                wrapper,
+                str(run["prompt"]),
+                activation_name,
+                position=(int(request["positionStart"]), int(request["positionEnd"])),
+            )
         position = (int(request["positionStart"]), int(request["positionEnd"]))
-        original = _run_condition(
+        original, original_logits = _run_condition(
             wrapper,
             prompt=str(run["prompt"]),
             prompt_token_count=len(prompt_ids),
@@ -72,13 +94,28 @@ def main() -> None:
             max_new_tokens=int(request["maxNewTokens"]),
             temperature=float(request["temperature"]),
         )
-        handle = steering.apply(
-            wrapper,
-            scale=float(request["scale"]),
-            position=position,
-        )
+        if mode == "neuron":
+            handle = wrapper.add_hook(
+                activation_name,
+                _make_neuron_hook(
+                    neuron=int(request["neuron"]),
+                    factor=float(request["scale"]),
+                    position=position,
+                    prompt_token_count=len(prompt_ids),
+                ),
+            )
+        else:
+            handle = wrapper.add_hook(
+                activation_name,
+                _make_prompt_range_direction_hook(
+                    vector=vector,
+                    scale=float(request["scale"]),
+                    position=position,
+                    prompt_token_count=len(prompt_ids),
+                ),
+            )
         try:
-            steered = _run_condition(
+            steered, steered_logits = _run_condition(
                 wrapper,
                 prompt=str(run["prompt"]),
                 prompt_token_count=len(prompt_ids),
@@ -97,15 +134,43 @@ def main() -> None:
             )
         )
         comparison = {
+            "mode": mode,
+            **({"feature": feature} if feature is not None else {}),
             "vector": {
-                "method": "contrastive_mean_difference",
+                "algorithmVersion": "2.0",
+                "method": (
+                    "mlp_neuron_activation_scaling"
+                    if mode == "neuron"
+                    else "contrastive_mean_difference"
+                ),
                 "desiredPrompt": str(request["desiredPrompt"]),
                 "undesiredPrompt": str(request["undesiredPrompt"]),
-                "activationReduce": "last_token",
-                "rawNorm": round(raw_norm, 10),
-                "normalized": True,
-                "dimension": int(vector.shape[-1]),
+                "activationReduce": "selected_neuron" if mode == "neuron" else "last_token",
+                "rawNorm": round(
+                    max(abs(float(feature["baselineActivation"])), 1e-12)
+                    if feature
+                    else raw_norm,
+                    10,
+                ),
+                "normalized": False,
+                "dimension": 1 if mode == "neuron" else int(vector.shape[-1]),
                 "sourceKey": activation_name,
+                **(
+                    {
+                        "referenceTemplate": reference_template,
+                        "desiredTokenCount": desired_token_count,
+                        "undesiredTokenCount": undesired_token_count,
+                        "sourceActivationNorm": round(source_activation_norm, 10),
+                        "appliedVectorNorm": round(abs(float(request["scale"])) * raw_norm, 10),
+                        "relativeStrength": round(
+                            abs(float(request["scale"])) * raw_norm
+                            / max(source_activation_norm, 1e-12),
+                            10,
+                        ),
+                    }
+                    if mode != "neuron"
+                    else {}
+                ),
             },
             "layer": int(request["layer"]),
             "component": str(request["component"]),
@@ -124,6 +189,15 @@ def main() -> None:
                 "lexicalRisk": round(steered["lexicalRisk"] - original["lexicalRisk"], 8),
                 "tokenEditDistance": _levenshtein(original["tokenIds"], steered["tokenIds"]),
                 "generationChanged": original["tokenIds"] != steered["tokenIds"],
+                "firstDivergenceIndex": _first_divergence_index(
+                    original["tokenIds"], steered["tokenIds"]
+                ),
+                **(
+                    {"directionProjectionDelta": round(float(request["scale"]) * raw_norm, 10)}
+                    if mode != "neuron"
+                    else {}
+                ),
+                **_logit_delta_summary(original_logits, steered_logits),
                 "probeScore": None,
                 "probeReason": (
                     "No trained probe was configured for this Explorer intervention job."
@@ -146,7 +220,50 @@ def _reference_vector(
     wrapper: HuggingFaceModelWrapper,
     prompt: str,
     activation_name: str,
-) -> Any:
+) -> tuple[Any, int, str]:
+    rendered_prompt, template = _render_reference_prompt(wrapper.tokenizer, prompt)
+    tokens = wrapper.to_tokens(rendered_prompt, prepend_bos=False)
+    _output, cache = wrapper.run_with_cache(
+        {"input_ids": tokens},
+        layers=[activation_name],
+    )
+    activation = cache[activation_name]
+    if activation.ndim < 2:
+        raise ValueError(f"Steering activation {activation_name} must include a model dimension.")
+    return activation[0, -1, :].float().detach(), len(_flat_token_ids(tokens)), template
+
+
+def _render_reference_prompt(tokenizer: Any, prompt: str) -> tuple[str, str]:
+    apply_chat_template = getattr(tokenizer, "apply_chat_template", None)
+    if callable(apply_chat_template):
+        try:
+            rendered = apply_chat_template(
+                [{"role": "user", "content": prompt.strip()}],
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+        except (TypeError, ValueError):
+            rendered = None
+        if isinstance(rendered, str) and rendered:
+            return rendered, "tokenizer.apply_chat_template"
+    return prompt, "plain"
+
+
+def _contrastive_direction(desired: Any, undesired: Any) -> tuple[Any, float]:
+    vector = desired.float() - undesired.float()
+    norm = float(vector.norm().detach().cpu().item())
+    if math.isclose(norm, 0.0, abs_tol=1e-12):
+        raise ValueError("Desired and undesired references produced a zero steering direction.")
+    return vector.detach(), norm
+
+
+def _source_activation_norm(
+    wrapper: HuggingFaceModelWrapper,
+    prompt: str,
+    activation_name: str,
+    *,
+    position: tuple[int, int],
+) -> float:
     tokens = wrapper.to_tokens(prompt, prepend_bos=False)
     _output, cache = wrapper.run_with_cache(
         {"input_ids": tokens},
@@ -155,7 +272,11 @@ def _reference_vector(
     activation = cache[activation_name]
     if activation.ndim < 2:
         raise ValueError(f"Steering activation {activation_name} must include a model dimension.")
-    return activation[0, -1, :].float().detach()
+    start, end = position
+    selected = activation[0, start:min(end, activation.shape[-2]), :].float()
+    if selected.numel() == 0:
+        raise ValueError("Steering position range did not select any source activations.")
+    return float(selected.norm(dim=-1).median().detach().cpu().item())
 
 
 def _run_condition(
@@ -167,7 +288,7 @@ def _run_condition(
     seed: int,
     max_new_tokens: int,
     temperature: float,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], Any]:
     import torch
 
     random.seed(seed)
@@ -198,7 +319,7 @@ def _run_condition(
             clean_up_tokenization_spaces=False,
         )
     )
-    return {
+    result = {
         "text": continuation_text,
         "tokenIds": continuation_ids,
         "tokens": [
@@ -214,6 +335,95 @@ def _run_condition(
         "targetLogit": round(target_logit, 10),
         "lexicalRisk": _lexical_risk(continuation_text),
     }
+    return result, logits[0, -1, :].float().detach().cpu()
+
+
+def _make_neuron_hook(
+    *,
+    neuron: int,
+    factor: float,
+    position: tuple[int, int],
+    prompt_token_count: int | None = None,
+):
+    def hook(activation: Any = None, **kwargs: Any) -> Any:
+        value = kwargs.get("activation", activation)
+        if value is None or not hasattr(value, "clone") or getattr(value, "ndim", 0) < 2:
+            return value
+        if neuron < 0 or neuron >= value.shape[-1]:
+            raise ValueError(f"MLP neuron {neuron} is outside activation width {value.shape[-1]}.")
+        if prompt_token_count is not None and int(value.shape[-2]) < prompt_token_count:
+            return value
+        start, end = position
+        result = value.clone()
+        if value.ndim == 2:
+            result[:, neuron] *= factor
+        else:
+            result[:, max(0, start):min(value.shape[-2], end), neuron] *= factor
+        return result
+    return hook
+
+
+def _make_prompt_range_direction_hook(
+    *,
+    vector: Any,
+    scale: float,
+    position: tuple[int, int],
+    prompt_token_count: int,
+):
+    def hook(activation: Any = None, **kwargs: Any) -> Any:
+        value = kwargs.get("activation", activation)
+        if value is None or not hasattr(value, "clone") or getattr(value, "ndim", 0) < 2:
+            return value
+        sequence_length = int(value.shape[-2])
+        if sequence_length < prompt_token_count:
+            return value
+        start, end = position
+        bounded_end = min(end, sequence_length, prompt_token_count)
+        if start >= bounded_end:
+            return value
+        result = value.clone()
+        direction = vector.to(device=value.device, dtype=value.dtype)
+        if value.ndim >= 3:
+            result[:, start:bounded_end, :] += scale * direction
+        else:
+            result[start:bounded_end, :] += scale * direction
+        return result
+    return hook
+
+
+def _neuron_operation(factor: float) -> str:
+    if factor < 0:
+        return "invert"
+    if math.isclose(factor, 0.0, abs_tol=1e-8):
+        return "suppress"
+    if factor <= 1:
+        return "reduce"
+    return "enhance"
+
+
+def _logit_delta_summary(original: Any, steered: Any) -> dict[str, Any]:
+    signed_delta = steered.float() - original.float()
+    delta = signed_delta.abs()
+    maximum = float(delta.max().item()) if delta.numel() else 0.0
+    top_index = int(delta.argmax().item()) if delta.numel() else 0
+    return {
+        "maxAbsLogit": round(maximum, 10),
+        "meanAbsLogit": round(float(delta.mean().item()) if delta.numel() else 0.0, 10),
+        "changedVocabularyLogits": int((delta > 1e-6).sum().item()),
+        "topChangedTokenId": top_index,
+        "topChangedTokenDelta": round(
+            float(signed_delta[top_index].item()) if signed_delta.numel() else 0.0,
+            10,
+        ),
+        "effectStatus": "changed" if maximum > 1e-6 else "no_change",
+    }
+
+
+def _first_divergence_index(left: list[int], right: list[int]) -> int | None:
+    for index, (left_token, right_token) in enumerate(zip(left, right, strict=False)):
+        if left_token != right_token:
+            return index
+    return min(len(left), len(right)) if len(left) != len(right) else None
 
 
 def _flat_token_ids(tokens: Any) -> list[int]:
@@ -271,10 +481,16 @@ def _merge_intervention_result(
     source_run = {"runId": run["runId"], "sampleId": run["sampleId"]}
     run["intervention"] = comparison
     provenance = run.setdefault("metricProvenance", {})
+    is_neuron = comparison.get("mode") == "neuron"
+    method_label = (
+        "MLP post-activation neuron scaling"
+        if is_neuron
+        else "Raw contrastive activation steering"
+    )
     provenance["interventionTargetLogitDelta"] = {
         "label": "Target logit delta",
-        "method": "Normalized contrastive activation steering",
-        "semantics": "Steered target-token logit minus the original target-token logit.",
+        "method": method_label,
+        "semantics": "Intervened target-token logit minus the original target-token logit.",
         "normalization": "none; raw logit difference",
         "kind": "causal",
     }
@@ -292,13 +508,32 @@ def _merge_intervention_result(
         "normalization": "matched terms divided by output word count",
         "kind": "derived_proxy",
     }
+    provenance["interventionMaxVocabularyLogitDelta"] = {
+        "label": "Maximum vocabulary logit delta",
+        "method": method_label,
+        "semantics": "Largest absolute next-token logit change across the complete vocabulary.",
+        "normalization": "none; maximum absolute raw logit difference",
+        "kind": "causal",
+    }
+    if "directionProjectionDelta" in comparison.get("deltas", {}):
+        provenance["interventionDirectionProjectionDelta"] = {
+            "label": "Applied direction projection",
+            "method": method_label,
+            "semantics": (
+                "Signed L2 magnitude injected along the desired-minus-undesired direction."
+            ),
+            "normalization": "none; scale multiplied by the raw contrast-vector norm",
+            "kind": "causal",
+        }
     run["runId"] = run_id
     metadata = run.setdefault("metadata", {})
     jobs = list(metadata.get("interventionJobs", []))
     jobs.append(
         {
-            "jobVersion": "1.0",
+            "jobVersion": str(comparison["vector"].get("algorithmVersion", "1.0")),
             "method": comparison["vector"]["method"],
+            "mode": comparison.get("mode", "direction"),
+            **({"feature": comparison["feature"]} if "feature" in comparison else {}),
             "layer": comparison["layer"],
             "component": comparison["component"],
             "scale": comparison["scale"],

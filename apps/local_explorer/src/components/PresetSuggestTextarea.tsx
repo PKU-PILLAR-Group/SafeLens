@@ -1,11 +1,15 @@
-import { useId, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { Plus, X } from "lucide-react";
 
 import {
   createUserPreset,
+  BUILTIN_PRESETS,
   loadUserPresets,
   matchPresets,
+  presetsInCategory,
   saveUserPresets,
+  STEERING_CATEGORIES,
+  type SteeringCategory,
   type SteeringPreset
 } from "../state/steeringPresets";
 
@@ -17,6 +21,7 @@ interface PresetSuggestTextareaProps {
   contextQuery?: string;
   disabled?: boolean;
   onChange: (value: string) => void;
+  onSelectPreset?: (preset: SteeringPreset) => void;
 }
 
 export function PresetSuggestTextarea({
@@ -26,13 +31,15 @@ export function PresetSuggestTextarea({
   direction,
   contextQuery = "",
   disabled = false,
-  onChange
+  onChange,
+  onSelectPreset
 }: PresetSuggestTextareaProps) {
   const [open, setOpen] = useState(false);
   const [highlighted, setHighlighted] = useState(0);
   const [userPresets, setUserPresets] = useState<SteeringPreset[]>(loadUserPresets);
   const [saveOpen, setSaveOpen] = useState(false);
   const [saveLabel, setSaveLabel] = useState("");
+  const [category, setCategory] = useState<SteeringCategory>("safety");
   const rootRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const listId = useId();
@@ -46,9 +53,21 @@ export function PresetSuggestTextarea({
   const activeDescendant = open && highlightedPreset
     ? `${listId}-option-${safeHighlighted}`
     : undefined;
+  const categoryPresets = useMemo(
+    () => presetsInCategory(direction, category, userPresets),
+    [category, direction, userPresets]
+  );
+
+  useEffect(() => {
+    const selected = [...userPresets, ...BUILTIN_PRESETS].find(
+      (preset) => preset.direction === direction && preset.text === value && preset.category
+    );
+    if (selected?.category) setCategory(selected.category);
+  }, [direction, userPresets, value]);
 
   function choose(preset: SteeringPreset) {
-    onChange(preset.text);
+    if (onSelectPreset) onSelectPreset(preset);
+    else onChange(preset.text);
     setOpen(false);
     setHighlighted(0);
     window.requestAnimationFrame(() => textareaRef.current?.focus());
@@ -63,7 +82,7 @@ export function PresetSuggestTextarea({
   function saveCurrent() {
     const label = saveLabel.trim();
     if (!label || !value.trim()) return;
-    const next = [...userPresets, createUserPreset(label, value, direction)];
+    const next = [...userPresets, createUserPreset(label, value, direction, category)];
     setUserPresets(next);
     saveUserPresets(next);
     setSaveLabel("");
@@ -93,6 +112,30 @@ export function PresetSuggestTextarea({
           <Plus size={12} /> Save as preset
         </button>
       </span>
+      <div className="preset-suggest-categories" role="group" aria-label={`${label} category`}>
+        {STEERING_CATEGORIES.map((item) => (
+          <button
+            key={item.id}
+            type="button"
+            className={category === item.id ? "active" : ""}
+            aria-pressed={category === item.id}
+            disabled={disabled}
+            onClick={() => setCategory(item.id)}
+          >{item.label}</button>
+        ))}
+        <select
+          aria-label={`${label} direction preset`}
+          value=""
+          disabled={disabled}
+          onChange={(event) => {
+            const preset = categoryPresets.find((item) => item.id === event.target.value);
+            if (preset) choose(preset);
+          }}
+        >
+          <option value="">Choose direction...</option>
+          {categoryPresets.map((preset) => <option key={preset.id} value={preset.id}>{preset.label}</option>)}
+        </select>
+      </div>
       <textarea
         ref={textareaRef}
         aria-label={ariaLabel}

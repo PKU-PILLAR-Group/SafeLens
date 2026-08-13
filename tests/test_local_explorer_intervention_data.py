@@ -3,6 +3,8 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
+import pytest
+
 SCRIPT_PATH = Path(__file__).resolve().parents[1] / "scripts/run_local_explorer_intervention.py"
 SPEC = importlib.util.spec_from_file_location("run_local_explorer_intervention", SCRIPT_PATH)
 assert SPEC is not None and SPEC.loader is not None
@@ -40,6 +42,7 @@ def test_merge_intervention_result_preserves_causal_and_proxy_provenance() -> No
     }
     comparison = {
         "vector": {
+            "algorithmVersion": "2.0",
             "method": "contrastive_mean_difference",
             "sourceKey": "layer_1.resid_post",
         },
@@ -55,7 +58,7 @@ def test_merge_intervention_result_preserves_causal_and_proxy_provenance() -> No
         "temperature": 0.0,
         "original": {"text": "original"},
         "steered": {"text": "steered"},
-        "deltas": {"targetLogit": 0.5},
+        "deltas": {"targetLogit": 0.5, "directionProjectionDelta": 12.0},
     }
 
     derived = MODULE._merge_intervention_result(
@@ -70,5 +73,93 @@ def test_merge_intervention_result_preserves_causal_and_proxy_provenance() -> No
         "runId": "source-run",
         "sampleId": "sample-a",
     }
+    assert derived["metadata"]["interventionJobs"][0]["jobVersion"] == "2.0"
     assert derived["metricProvenance"]["interventionTargetLogitDelta"]["kind"] == "causal"
     assert derived["metricProvenance"]["interventionLexicalRiskDelta"]["kind"] == "derived_proxy"
+    assert derived["metricProvenance"]["interventionDirectionProjectionDelta"] == {
+        "label": "Applied direction projection",
+        "method": "Raw contrastive activation steering",
+        "semantics": "Signed L2 magnitude injected along the desired-minus-undesired direction.",
+        "normalization": "none; scale multiplied by the raw contrast-vector norm",
+        "kind": "causal",
+    }
+
+
+def test_neuron_hook_scales_only_the_selected_neuron_and_position_range() -> None:
+    torch = pytest.importorskip("torch")
+    activation = torch.tensor(
+        [[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]]]
+    )
+    hook = MODULE._make_neuron_hook(neuron=1, factor=0.25, position=(1, 3))
+
+    patched = hook(activation=activation)
+
+    assert patched is not activation
+    assert torch.equal(
+        activation,
+        torch.tensor([[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]]]),
+    )
+    assert torch.equal(
+        patched,
+        torch.tensor([[[1.0, 2.0, 3.0], [4.0, 1.25, 6.0], [7.0, 2.0, 9.0]]]),
+    )
+
+
+def test_logit_delta_summary_detects_full_vocabulary_effect() -> None:
+    torch = pytest.importorskip("torch")
+    summary = MODULE._logit_delta_summary(
+        torch.tensor([0.0, 1.0, 2.0, 3.0]),
+        torch.tensor([0.0, 1.5, 2.0, 2.75]),
+    )
+
+    assert summary == {
+        "maxAbsLogit": 0.5,
+        "meanAbsLogit": 0.1875,
+        "changedVocabularyLogits": 2,
+        "topChangedTokenId": 1,
+        "topChangedTokenDelta": 0.5,
+        "effectStatus": "changed",
+    }
+
+
+def test_direction_hook_applies_raw_contrast_to_prompt_prefill_only() -> None:
+    torch = pytest.importorskip("torch")
+    desired = torch.tensor([4.0, 8.0])
+    undesired = torch.tensor([1.0, 2.0])
+    vector, raw_norm = MODULE._contrastive_direction(desired, undesired)
+    hook = MODULE._make_prompt_range_direction_hook(
+        vector=vector,
+        scale=1.0,
+        position=(1, 3),
+        prompt_token_count=3,
+    )
+
+    prefill = torch.zeros((1, 3, 2))
+    incremental = torch.zeros((1, 1, 2))
+
+    assert raw_norm == pytest.approx(6.7082039)
+    assert torch.equal(
+        hook(activation=prefill),
+        torch.tensor([[[0.0, 0.0], [3.0, 6.0], [3.0, 6.0]]]),
+    )
+    assert torch.equal(hook(activation=incremental), incremental)
+
+
+def test_reference_prompt_uses_native_chat_template_when_available() -> None:
+    class Tokenizer:
+        def apply_chat_template(self, messages, *, tokenize, add_generation_prompt):
+            assert messages == [{"role": "user", "content": "Use structure."}]
+            assert tokenize is False
+            assert add_generation_prompt is True
+            return "<user>Use structure.</user><assistant>"
+
+    rendered, method = MODULE._render_reference_prompt(Tokenizer(), " Use structure. ")
+
+    assert rendered == "<user>Use structure.</user><assistant>"
+    assert method == "tokenizer.apply_chat_template"
+
+
+def test_first_divergence_index_reports_change_or_matching_prefix() -> None:
+    assert MODULE._first_divergence_index([1, 2, 3], [1, 4, 3]) == 1
+    assert MODULE._first_divergence_index([1, 2], [1, 2, 3]) == 2
+    assert MODULE._first_divergence_index([1, 2], [1, 2]) is None

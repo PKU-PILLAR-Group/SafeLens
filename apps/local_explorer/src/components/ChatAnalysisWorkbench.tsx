@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   AlertCircle,
+  Activity,
   ArrowRight,
   CheckCircle2,
   GitCompareArrows,
@@ -20,6 +21,7 @@ import {
   type AttributionRunInput,
   type InterventionJob,
   type InterventionPreflight,
+  type InterventionRunInput,
   type JLensJob,
   type NLAJob,
   type PatchingComponent,
@@ -37,13 +39,15 @@ import type {
   PatchingCell,
   PatchingExperiment
 } from "../types";
+import { generatedResponseText } from "../generatedResponse";
 import { ChatAttentionWorkbench } from "./ChatAttentionWorkbench";
 import { ChatExplanationWorkbench } from "./ChatExplanationWorkbench";
 import { PresetSuggestTextarea } from "./PresetSuggestTextarea";
 import { ResponseTokenPicker } from "./ResponseTokenPicker";
+import { pairedSteeringPreset, type SteeringPreset } from "../state/steeringPresets";
 
 interface ChatAnalysisWorkbenchProps {
-  mode: "steering" | "attribution" | "patching" | "explanation" | "attention";
+  mode: "steering" | "attribution" | "patching" | "feature" | "explanation" | "attention";
   run: ExplorerRun;
   remoteSummary?: RemoteRunSummary;
   savedRun?: ExplorerRun;
@@ -60,6 +64,9 @@ export function ChatAnalysisWorkbench({ mode, run, remoteSummary, savedRun, sugg
   }
   if (mode === "patching") {
     return <PatchingWorkbench run={run} savedRun={savedRun} onRunReady={onRunReady} />;
+  }
+  if (mode === "feature") {
+    return <FeatureInterventionWorkbench run={run} savedRun={savedRun} onRunReady={onRunReady} />;
   }
   if (mode === "explanation") {
     return <ChatExplanationWorkbench run={run} savedRun={savedRun} onRunReady={onRunReady} />;
@@ -300,6 +307,129 @@ function PatchingWorkbench({
   );
 }
 
+function FeatureInterventionWorkbench({
+  run,
+  savedRun,
+  onRunReady
+}: Omit<ChatAnalysisWorkbenchProps, "mode">) {
+  const prior = savedRun?.intervention?.mode === "neuron" ? savedRun.intervention : undefined;
+  const featureLayers = useMemo(
+    () => [...new Set(run.mlpNeurons.map((item) => item.layer))].sort((a, b) => a - b),
+    [run.mlpNeurons]
+  );
+  const [layer, setLayer] = useState(prior?.feature?.layer ?? featureLayers[featureLayers.length - 1] ?? run.layers[run.layers.length - 1] ?? 0);
+  const neurons = useMemo(
+    () => run.mlpNeurons.filter((item) => item.layer === layer).sort((a, b) => b.maxAbsoluteActivation - a.maxAbsoluteActivation),
+    [layer, run.mlpNeurons]
+  );
+  const [neuron, setNeuron] = useState(prior?.feature?.neuron ?? neurons[0]?.neuron ?? 0);
+  const [scale, setScale] = useState(prior?.scale ?? 0);
+  const [positionStart, setPositionStart] = useState(prior?.positionStart ?? 0);
+  const [positionEnd, setPositionEnd] = useState(prior?.positionEnd ?? run.tokens.length);
+  const targetOptions = useMemo(() => steeringTargetOptions(run), [run]);
+  const [targetTokenId, setTargetTokenId] = useState(prior?.targetTokenId ?? targetOptions[0]?.tokenId ?? 0);
+  const [preflight, setPreflight] = useState<InterventionPreflight | null>(null);
+  const [preflightError, setPreflightError] = useState<string | null>(null);
+  const [result, setResult] = useState<ExplorerRun | null>(savedRun?.intervention?.mode === "neuron" ? savedRun : null);
+  const handleReady = useCallback((derived: ExplorerRun, job: InterventionJob) => {
+    setResult(derived);
+    onRunReady(derived, job);
+  }, [onRunReady]);
+  const runner = useInterventionRunner(handleReady);
+  const running = runner.submitting || runner.job?.status === "idle" || runner.job?.status === "loading";
+  const selectedNeuron = neurons.find((item) => item.neuron === neuron) ?? neurons[0];
+
+  useEffect(() => {
+    if (!neurons.some((item) => item.neuron === neuron)) setNeuron(neurons[0]?.neuron ?? 0);
+  }, [neuron, neurons]);
+  useEffect(() => {
+    if (!featureLayers.includes(layer) && featureLayers.length) setLayer(featureLayers[featureLayers.length - 1]);
+  }, [featureLayers, layer]);
+  useEffect(() => {
+    const controller = new AbortController();
+    setPreflight(null);
+    setPreflightError(null);
+    const timer = window.setTimeout(() => {
+      void fetchInterventionPreflight({
+        mode: "neuron",
+        modelName: run.modelName,
+        promptTokenCount: run.tokens.length,
+        availableLayers: run.layers,
+        layer,
+        component: "mlp_out",
+        positionStart,
+        positionEnd,
+        targetTokenId,
+        neuron,
+        availableNeurons: neurons.map((item) => item.neuron),
+        desiredPrompt: "Enhance selected MLP neuron",
+        undesiredPrompt: "Suppress selected MLP neuron"
+      }, controller.signal).then(setPreflight).catch((error) => {
+        if (!controller.signal.aborted) setPreflightError(error instanceof Error ? error.message : "Neuron preflight failed.");
+      });
+    }, 180);
+    return () => { window.clearTimeout(timer); controller.abort(); };
+  }, [layer, neuron, neurons, positionEnd, positionStart, run.layers, run.modelName, run.tokens.length, targetTokenId]);
+
+  function setRange(start: number, end: number) {
+    const nextStart = Math.max(0, Math.min(run.tokens.length - 1, start));
+    setPositionStart(nextStart);
+    setPositionEnd(Math.max(nextStart + 1, Math.min(run.tokens.length, end)));
+  }
+
+  function submit() {
+    if (!preflight?.canSubmit || running || !selectedNeuron) return;
+    setResult(null);
+    const input: InterventionRunInput = {
+      run,
+      mode: "neuron",
+      desiredPrompt: "Enhance selected MLP neuron",
+      undesiredPrompt: "Suppress selected MLP neuron",
+      layer,
+      component: "mlp_out",
+      neuron,
+      scale,
+      positionStart,
+      positionEnd,
+      targetTokenId,
+      seed: 0,
+      maxNewTokens: 16,
+      temperature: 0
+    };
+    void runner.submit(input);
+  }
+
+  if (featureLayers.length === 0) {
+    return (
+      <section className="chat-analysis-workbench chat-feature-workbench" aria-label="MLP neuron intervention workbench">
+        <header className="chat-workbench-heading"><span><Activity size={17} /></span><div><h2>Neuron intervention</h2><p>This run does not expose MLP neuron activations.</p></div></header>
+      </section>
+    );
+  }
+  return (
+    <section className="chat-analysis-workbench chat-feature-workbench" aria-label="MLP neuron intervention workbench">
+      <header className="chat-workbench-heading">
+        <span><Activity size={17} /></span>
+        <div><h2>Neuron intervention</h2><p>Scale one real MLP post-activation and compare the model output</p></div>
+        <StatusDot ready={Boolean(preflight?.canSubmit)} pending={!preflight && !preflightError} />
+      </header>
+      <div className="chat-feature-controls">
+        <label><span>Layer</span><select aria-label="Neuron intervention layer" value={layer} disabled={running} onChange={(event) => setLayer(Number(event.target.value))}>{featureLayers.map((item) => <option key={item} value={item}>L{item}</option>)}</select></label>
+        <label><span>MLP neuron</span><select aria-label="MLP neuron" value={neuron} disabled={running} onChange={(event) => setNeuron(Number(event.target.value))}>{neurons.map((item) => <option key={item.neuron} value={item.neuron}>N{item.neuron} · {item.label}</option>)}</select></label>
+        <label><span>Tracked output token</span><select aria-label="Neuron tracked output token" value={targetTokenId} disabled={running} onChange={(event) => setTargetTokenId(Number(event.target.value))}>{targetOptions.map((option) => <option key={option.tokenId} value={option.tokenId}>{visibleToken(option.tokenText)} · #{option.tokenId}</option>)}</select></label>
+        <label className="chat-feature-strength"><span>Activation factor <b>{scale.toFixed(1)}</b></span><input aria-label="Neuron activation factor" type="range" min={-2} max={4} step={0.1} value={scale} disabled={running} onChange={(event) => setScale(Number(event.target.value))} /></label>
+      </div>
+      <div className="chat-feature-operations" role="group" aria-label="Neuron intervention operation">
+        {[{ label: "Suppress", value: 0 }, { label: "Reduce", value: 0.25 }, { label: "Enhance", value: 2 }, { label: "Invert", value: -1 }].map((item) => <button key={item.label} type="button" className={Math.abs(scale - item.value) < 1e-6 ? "active" : ""} aria-pressed={Math.abs(scale - item.value) < 1e-6} disabled={running} onClick={() => setScale(item.value)}>{item.label}</button>)}
+      </div>
+      <div className="chat-token-range"><header><span>Apply to</span><div><button className={positionStart === 0 && positionEnd === run.tokens.length ? "active" : ""} aria-pressed={positionStart === 0 && positionEnd === run.tokens.length} disabled={running} onClick={() => setRange(0, run.tokens.length)}>Entire input</button><button className={positionStart === run.tokens.length - 1 && positionEnd === run.tokens.length ? "active" : ""} aria-pressed={positionStart === run.tokens.length - 1 && positionEnd === run.tokens.length} disabled={running} onClick={() => setRange(run.tokens.length - 1, run.tokens.length)}>Last token</button></div><small>T{positionStart}–T{positionEnd - 1}</small></header><div aria-label="Neuron intervention token range">{run.tokens.map((token) => <button key={token.index} className={token.index >= positionStart && token.index < positionEnd ? "active" : ""} aria-pressed={token.index >= positionStart && token.index < positionEnd} disabled={running} onClick={() => setRange(token.index, token.index + 1)}>{visibleToken(token.text)}</button>)}</div></div>
+      <div className="chat-feature-selected"><strong>{selectedNeuron?.id}</strong><span>{selectedNeuron?.label}</span><small>peak activation {selectedNeuron?.maxAbsoluteActivation.toFixed(4)} · factor {scale.toFixed(1)}</small></div>
+      <WorkbenchActions running={running} disabled={!preflight?.canSubmit || !selectedNeuron} runLabel="Run neuron intervention" status={runner.error?.message ?? preflightError ?? preflight?.reason} progress={runner.job?.progress} onRun={submit} onCancel={() => void runner.cancel()} onReset={runner.reset} failed={Boolean(runner.error)} />
+      {result?.intervention && <SteeringResult experiment={result.intervention} />}
+    </section>
+  );
+}
+
 function SteeringWorkbench({
   run,
   savedRun,
@@ -316,6 +446,9 @@ function SteeringWorkbench({
   const [layer, setLayer] = useState(prior?.layer ?? defaultLayer(run));
   const [component, setComponent] = useState<ActivationComponent>(prior?.component ?? "resid_post");
   const [scale, setScale] = useState(prior?.scale ?? 1);
+  const [maxNewTokens, setMaxNewTokens] = useState(
+    prior?.vector.normalized ? 64 : prior?.maxNewTokens ?? 64
+  );
   const [positionStart, setPositionStart] = useState(prior?.positionStart ?? 0);
   const [positionEnd, setPositionEnd] = useState(prior?.positionEnd ?? run.tokens.length);
   const targetOptions = useMemo(() => steeringTargetOptions(run), [run]);
@@ -372,6 +505,17 @@ function SteeringWorkbench({
     setPositionEnd(nextEnd);
   }
 
+  function applyPairedPreset(preset: SteeringPreset) {
+    const paired = pairedSteeringPreset(preset);
+    if (preset.direction === "toward") {
+      setDesiredPrompt(preset.text);
+      if (paired) setUndesiredPrompt(paired.text);
+    } else {
+      setUndesiredPrompt(preset.text);
+      if (paired) setDesiredPrompt(paired.text);
+    }
+  }
+
   function submit() {
     if (!canRun) return;
     setResult(null);
@@ -386,7 +530,7 @@ function SteeringWorkbench({
       positionEnd,
       targetTokenId,
       seed: 0,
-      maxNewTokens: 16,
+      maxNewTokens,
       temperature: 0
     });
   }
@@ -397,7 +541,7 @@ function SteeringWorkbench({
         <span><SlidersHorizontal size={17} /></span>
         <div>
           <h2>Steering</h2>
-          <p>Contrastive activation direction</p>
+          <p>Move the model away from one behavior and toward another</p>
         </div>
         <StatusDot ready={Boolean(preflight?.canSubmit)} pending={!preflight && !preflightError} />
       </header>
@@ -411,6 +555,7 @@ function SteeringWorkbench({
           value={desiredPrompt}
           disabled={running}
           onChange={setDesiredPrompt}
+          onSelectPreset={applyPairedPreset}
         />
         <PresetSuggestTextarea
           ariaLabel="Steering undesired behavior"
@@ -420,6 +565,7 @@ function SteeringWorkbench({
           value={undesiredPrompt}
           disabled={running}
           onChange={setUndesiredPrompt}
+          onSelectPreset={applyPairedPreset}
         />
       </div>
 
@@ -439,8 +585,8 @@ function SteeringWorkbench({
           </select>
         </label>
         <label>
-          <span>Tracked output token</span>
-          <select aria-label="Steering tracked output token" value={targetTokenId} disabled={running} onChange={(event) => setTargetTokenId(Number(event.target.value))}>
+          <span>Diagnostic token</span>
+          <select aria-label="Steering diagnostic token" value={targetTokenId} disabled={running} onChange={(event) => setTargetTokenId(Number(event.target.value))}>
             {targetOptions.map((option) => (
               <option key={option.tokenId} value={option.tokenId}>{visibleToken(option.tokenText)} · #{option.tokenId}</option>
             ))}
@@ -448,7 +594,11 @@ function SteeringWorkbench({
         </label>
         <label className="chat-steering-strength">
           <span>Strength <b>{scale.toFixed(1)}</b></span>
-          <input aria-label="Steering strength" type="range" min={-6} max={6} step={0.1} value={scale} disabled={running} onChange={(event) => setScale(Number(event.target.value))} />
+          <input aria-label="Steering strength" type="range" min={0} max={2} step={0.1} value={scale} disabled={running} onChange={(event) => setScale(Number(event.target.value))} />
+        </label>
+        <label>
+          <span>Output tokens</span>
+          <input aria-label="Steering output tokens" type="number" min={16} max={128} step={16} value={maxNewTokens} disabled={running} onChange={(event) => setMaxNewTokens(Math.max(16, Math.min(128, Number(event.target.value) || 16)))} />
         </label>
       </div>
 
@@ -540,7 +690,7 @@ function AttributionWorkbench({
         <span><ScanSearch size={17} /></span>
         <div>
           <h2>Input attribution</h2>
-          <p>Integrated Gradients</p>
+          <p>Show which input tokens support or suppress the selected output token</p>
         </div>
         <StatusDot ready={Boolean(method)} pending={false} />
       </header>
@@ -642,32 +792,47 @@ function StatusDot({ ready, pending }: { ready: boolean; pending: boolean }) {
 }
 
 function SteeringResult({ experiment }: { experiment: InterventionExperiment }) {
+  const isFeature = experiment.mode === "neuron";
+  const isLegacyDirection = !isFeature && experiment.vector.normalized;
+  const maxLogitDelta = experiment.deltas.maxAbsLogit;
+  const firstDivergence = experiment.deltas.firstDivergenceIndex;
+  const relativeStrength = experiment.vector.relativeStrength;
   return (
     <section className="chat-steering-result" aria-label="Steering comparison">
       <header>
-        <div><GitCompareArrows size={16} /><strong>Generation comparison</strong></div>
-        <span>L{experiment.layer} · {experiment.component} · {signed(experiment.scale)}</span>
+        <div>{isFeature ? <Activity size={16} /> : <GitCompareArrows size={16} />}<strong>{isFeature ? "Neuron intervention comparison" : "Steering generation comparison"}</strong></div>
+        <span>{isFeature && experiment.feature ? `${experiment.feature.id} · ${experiment.feature.operation}` : `L${experiment.layer} · ${experiment.component}`} · factor {signed(experiment.scale)}</span>
       </header>
       <div className="chat-steering-output">
         <article className="is-original">
           <span>Original</span>
           <p>{experiment.original.text || "No continuation"}</p>
-          <small>Target logit {experiment.original.targetLogit.toFixed(3)}</small>
+          <small>Diagnostic token logit {experiment.original.targetLogit.toFixed(3)}</small>
         </article>
-        <div className="chat-steering-transition" title="Target logit delta">
+        <div className="chat-steering-transition" title="Diagnostic token logit delta">
           <ArrowRight size={20} />
           <span>{signed(experiment.deltas.targetLogit)}</span>
         </div>
         <article className="is-steered">
           <span>Steered</span>
           <p>{experiment.steered.text || "No continuation"}</p>
-          <small>Target logit {experiment.steered.targetLogit.toFixed(3)}</small>
+          <small>Diagnostic token logit {experiment.steered.targetLogit.toFixed(3)}</small>
         </article>
       </div>
+      <p className={`chat-steering-verdict ${experiment.deltas.generationChanged ? "changed" : "unchanged"}`}>
+        {isLegacyDirection
+          ? "This saved result used legacy unit-vector steering. Run steering again to use the calibrated contrastive algorithm."
+          : experiment.deltas.generationChanged
+          ? `Generation diverged at output token ${firstDivergence ?? 0}.`
+          : maxLogitDelta && maxLogitDelta > 0
+            ? "The intervention changed next-token logits, but not enough to change greedy decoding in this window. Increase strength or choose another layer."
+            : "No measurable intervention effect was recorded. Check the selected layer and activation site."}
+      </p>
       <footer>
-        <span><b>{signed(experiment.deltas.targetLogit)}</b> target logit</span>
+        <span><b>{signed(experiment.deltas.targetLogit)}</b> diagnostic logit</span>
         <span><b>{experiment.deltas.tokenEditDistance}</b> token edits</span>
-        <span><b>{signed(experiment.deltas.lexicalRisk)}</b> lexical risk</span>
+        {maxLogitDelta !== undefined && <span><b>{maxLogitDelta.toFixed(3)}</b> max vocabulary change</span>}
+        {relativeStrength !== undefined && <span><b>{(relativeStrength * 100).toFixed(1)}%</b> relative injection</span>}
       </footer>
     </section>
   );
@@ -686,10 +851,16 @@ function AttributionResult({
 }) {
   const values = method.rows[method.rows.length - 1]?.values ?? [];
   const maximum = Math.max(1e-8, ...values.map((value) => Math.abs(value)));
-  const ranked = run.tokens
+  const positive = run.tokens
     .map((token, index) => ({ token, value: values[index] ?? 0 }))
-    .sort((left, right) => Math.abs(right.value) - Math.abs(left.value))
-    .slice(0, 3);
+    .filter((item) => item.value > 0)
+    .sort((left, right) => right.value - left.value)
+    .slice(0, 5);
+  const negative = run.tokens
+    .map((token, index) => ({ token, value: values[index] ?? 0 }))
+    .filter((item) => item.value < 0)
+    .sort((left, right) => left.value - right.value)
+    .slice(0, 5);
   const attributionJobs = run.metadata?.attributionJobs;
   const targetJob = Array.isArray(attributionJobs)
     ? attributionJobs[attributionJobs.length - 1]
@@ -723,10 +894,9 @@ function AttributionResult({
           );
         })}
       </div>
-      <footer>
-        {ranked.map(({ token, value }) => (
-          <span key={token.index}><small>T{token.index}</small><b>{visibleToken(token.text)}</b><em>{signed(value)}</em></span>
-        ))}
+      <footer className="chat-attribution-rankings">
+        <section aria-label="Positive attribution tokens"><header><i className="positive" /><strong>Supports target</strong></header>{positive.length ? positive.map(({ token, value }) => <span key={token.index}><small>T{token.index}</small><b>{visibleToken(token.text)}</b><em className="positive-value">{signed(value)}</em></span>) : <p>No positive token contribution.</p>}</section>
+        <section aria-label="Negative attribution tokens"><header><i className="negative" /><strong>Suppresses target</strong></header>{negative.length ? negative.map(({ token, value }) => <span key={token.index}><small>T{token.index}</small><b>{visibleToken(token.text)}</b><em className="negative-value">{signed(value)}</em></span>) : <p>No negative token contribution.</p>}</section>
       </footer>
     </section>
   );
@@ -851,16 +1021,7 @@ function steeringTargetOptions(run: ExplorerRun) {
 }
 
 function inferredResponse(run: ExplorerRun) {
-  const generated = run.metadata?.generatedContinuation;
-  if (typeof generated !== "string") return "";
-  if (generated.startsWith(run.prompt)) return generated.slice(run.prompt.length).trim();
-  const promptRunner = run.metadata?.promptRunner;
-  const userPrompt = promptRunner && typeof promptRunner === "object"
-    ? (promptRunner as Record<string, unknown>).userPrompt
-    : undefined;
-  return (typeof userPrompt === "string" && generated.startsWith(userPrompt)
-    ? generated.slice(userPrompt.length)
-    : generated).trim();
+  return generatedResponseText(run);
 }
 
 function attributionTargetIndex(run: ExplorerRun) {

@@ -27,7 +27,7 @@ export function InterventionJobPanel({
   selectedToken,
   onRunReady
 }: InterventionJobPanelProps) {
-  const prior = run.intervention;
+  const prior = run.intervention?.mode === "neuron" ? undefined : run.intervention;
   const [desiredPrompt, setDesiredPrompt] = useState(
     prior?.vector.desiredPrompt ?? "Provide a safe, policy-compliant and helpful response."
   );
@@ -46,7 +46,7 @@ export function InterventionJobPanel({
     run.logitLens[0]?.targetTokenId ?? 0;
   const [targetTokenId, setTargetTokenId] = useState(defaultTarget);
   const [seed, setSeed] = useState(prior?.seed ?? 0);
-  const [maxNewTokens, setMaxNewTokens] = useState(prior?.maxNewTokens ?? 16);
+  const [maxNewTokens, setMaxNewTokens] = useState(prior?.maxNewTokens ?? 64);
   const [temperature, setTemperature] = useState(prior?.temperature ?? 0);
   const [preflight, setPreflight] = useState<InterventionPreflight | null>(null);
   const [preflightError, setPreflightError] = useState<string | null>(null);
@@ -169,8 +169,8 @@ export function InterventionJobPanel({
           <input
             aria-label="Intervention scale"
             type="range"
-            min={-10}
-            max={10}
+            min={0}
+            max={2}
             step={0.1}
             value={scale}
             disabled={isRunning}
@@ -208,7 +208,7 @@ export function InterventionJobPanel({
 
       <div className="intervention-generation-grid">
         <label><span>Seed</span><input aria-label="Intervention seed" type="number" min={0} value={seed} disabled={isRunning} onChange={(event) => setSeed(Math.max(0, Number(event.target.value) || 0))} /></label>
-        <label><span>New tokens</span><input aria-label="Intervention new tokens" type="number" min={1} max={64} value={maxNewTokens} disabled={isRunning} onChange={(event) => setMaxNewTokens(clamp(event.target.value, 1, 64))} /></label>
+        <label><span>New tokens</span><input aria-label="Intervention new tokens" type="number" min={1} max={128} value={maxNewTokens} disabled={isRunning} onChange={(event) => setMaxNewTokens(clamp(event.target.value, 1, 128))} /></label>
         <label><span>Temperature</span><input aria-label="Intervention temperature" type="number" min={0} max={2} step={0.1} value={temperature} disabled={isRunning} onChange={(event) => setTemperature(clampFloat(event.target.value, 0, 2))} /></label>
       </div>
 

@@ -62,9 +62,13 @@ const steeringRun = {
       undesiredPrompt: "Bypass safety guidance.",
       activationReduce: "last_token",
       rawNorm: 12.4,
-      normalized: true,
+      normalized: false,
       dimension: 768,
-      sourceKey: "test:steering"
+      sourceKey: "test:steering",
+      referenceTemplate: "tokenizer.apply_chat_template",
+      sourceActivationNorm: 24.8,
+      appliedVectorNorm: 12.4,
+      relativeStrength: 0.5
     },
     layer: generatedRun.layers[0],
     component: "resid_post" as const,
@@ -74,7 +78,7 @@ const steeringRun = {
     targetTokenId: generatedRun.logitLens[0]?.targetTokenId ?? 0,
     targetTokenText: generatedRun.logitLens[0]?.targetTokenText ?? "target",
     seed: 0,
-    maxNewTokens: 16,
+    maxNewTokens: 64,
     temperature: 0,
     original: {
       text: "Original model response.",
@@ -95,6 +99,7 @@ const steeringRun = {
       lexicalRisk: -0.3,
       tokenEditDistance: 2,
       generationChanged: true,
+      firstDivergenceIndex: 0,
       probeScore: null,
       probeReason: "No probe configured."
     },
@@ -357,7 +362,9 @@ async function mockReadyPromptSequence(page: Page) {
       `User: ${prompt}`,
       "Assistant:"
     ].join("\n");
-    const answer = index === 1 ? "First answer from the model." : "Second answer uses the prior turn.";
+    const answer = index === 1
+      ? "First answer from the model. User: This leaked turn must be ignored. Assistant: ignored"
+      : "Second answer uses the prior turn.";
     const result = {
       ...generatedRun,
       runId: `chat-sequence-run-${index}`,
@@ -489,8 +496,9 @@ async function mockReadySteeringJob(page: Page) {
       positionEnd: generatedRun.tokens.length,
       targetTokenId: generatedRun.logitLens[0]?.targetTokenId ?? 0,
       seed: 0,
-      maxNewTokens: 16,
+      maxNewTokens: 64,
       temperature: 0,
+      neuron: null,
       sourceRun: { runId: generatedRun.runId, sampleId: generatedRun.sampleId, modelName: generatedRun.modelName },
       preflight: {
         modelAllowed: true,
@@ -783,8 +791,8 @@ test("runs the real prompt-job protocol and keeps the conversation above two foc
 
   await expect(page.locator(".chat-user-message")).toHaveText(generatedRun.prompt);
   await expect(page.locator(".chat-assistant-message")).toContainText("strongest residual alignment");
-  await expect(page.locator(".chat-turn-explore-bar > button")).toHaveCount(5);
-  await expect(page.getByRole("button", { name: /Patch/ })).toBeVisible();
+  await expect(page.locator(".chat-turn-explore-bar > button")).toHaveCount(6);
+  await expect(page.getByRole("button", { name: /Neuron/ })).toBeVisible();
   await expect(page.getByRole("button", { name: /Steer/ })).toBeVisible();
   await expect(page.getByRole("button", { name: /Attribute/ })).toBeVisible();
   await expect(page.getByRole("button", { name: /Explain/ })).toBeVisible();
@@ -815,7 +823,10 @@ test("sends prior user and assistant turns as real model context", async ({ page
   await page.getByLabel("Analysis prompt").fill("What follows from that?");
   await page.getByLabel("Run analysis").click();
   await expect(page.locator(".chat-turn-card")).toHaveCount(2);
+  await expect(page.locator(".chat-turn-explore-bar")).toHaveCount(1);
+  await expect(page.locator(".chat-turn-card").first().locator(".chat-turn-explore-bar")).toHaveCount(0);
   await expect(page.locator(".chat-assistant-message").last()).toContainText("Second answer uses the prior turn.");
+  await expect(page.locator(".chat-assistant-message").first()).not.toContainText("leaked turn");
 
   expect(submissions).toHaveLength(2);
   expect(submissions[1]).toMatchObject({
@@ -834,6 +845,7 @@ test("switches between steering and input attribution inside the current chat", 
   await runReadyAnalysis(page);
 
   await page.getByRole("button", { name: /Steer/ }).click();
+  await expect(page.getByLabel("Steering output tokens")).toHaveValue("64");
   await expect(page.getByRole("heading", { name: "Steering" })).toBeVisible();
   await expect(page.getByLabel("Steering desired behavior")).toBeVisible();
   await expect(page.getByLabel("Steering strength")).toHaveValue("1");
@@ -924,6 +936,9 @@ test("visualizes real attention heads and updates the selected layer, head, and 
   await expect(page.getByLabel("Selected attention pair")).toContainText("T10 · break");
   await expect(page.getByLabel("Attention head choices").getByRole("radio", { name: /L0H1/ }))
     .toHaveAttribute("aria-checked", "true");
+  await expect(page.getByLabel("Attention token heatmap")).toBeVisible();
+  await expect(page.getByText("View complete attention pattern")).toBeVisible();
+  await page.getByText("View complete attention pattern").click();
   const canvas = page.getByRole("img", { name: /L0H1 attention heatmap/ });
   await expect(canvas).toBeVisible();
   expect(await canvas.evaluate((element) => {
@@ -1050,25 +1065,22 @@ test("hydrates every available attention head for a restored workspace turn", as
   await page.getByRole("button", { name: /Attention/ }).click();
 
   await expect(page.locator(".chat-head-overview > header > span")).toHaveText("4 / 4 heads · complete");
-  await expect(page.getByLabel("Attention head", { exact: true }).locator("option")).toHaveCount(4);
-  await expect(page.getByLabel("Attention head choices").getByRole("radio")).toHaveCount(4);
+  await expect(page.getByLabel("Attention head", { exact: true }).locator("option")).toHaveCount(5);
+  await expect(page.getByLabel("Attention head", { exact: true })).toHaveValue(`L${layer}AVG`);
+  await expect(page.getByLabel("Attention head choices").getByRole("radio")).toHaveCount(5);
   expect(attentionRequests).toBe(1);
 });
 
-test("keeps Patching, Explanation, and Attention usable on mobile", async ({ page }) => {
+test("keeps Neuron, Explanation, and Attention usable on mobile", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await prepareHome(page);
   await mockReadyPromptJob(page);
-  await mockReadyPatchingJob(page);
   await page.goto("/");
   await runReadyAnalysis(page);
 
-  await page.getByRole("button", { name: /Patch/ }).click();
-  await page.getByLabel("Corrupt patching input").fill("Corrupted aligned prompt");
-  const runPatches = page.getByRole("button", { name: /Run \d+ patches/ });
-  await expect(runPatches).toBeEnabled();
-  await runPatches.click();
-  await expect(page.getByLabel("Patching recovery matrix")).toBeVisible();
+  await page.getByRole("button", { name: /Neuron/ }).click();
+  await expect(page.getByRole("heading", { name: "Neuron intervention" })).toBeVisible();
+  await expect(page.getByLabel("MLP neuron", { exact: true })).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
 
   await page.getByRole("button", { name: /Explain/ }).click();
@@ -1078,6 +1090,8 @@ test("keeps Patching, Explanation, and Attention usable on mobile", async ({ pag
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
 
   await page.getByRole("button", { name: /Attention/ }).click();
+  await expect(page.getByLabel("Attention token heatmap")).toBeVisible();
+  await page.getByText("View complete attention pattern").click();
   await expect(page.getByRole("img", { name: /attention heatmap/ })).toBeVisible();
   const box = await page.getByLabel("Attention head heatmap").boundingBox();
   expect(box).not.toBeNull();
@@ -1141,12 +1155,26 @@ test("runs steering from Chat and compares original with steered generation", as
     positionStart: 0,
     positionEnd: generatedRun.tokens.length,
     seed: 0,
-    maxNewTokens: 16,
+    maxNewTokens: 64,
     temperature: 0
   });
 });
 
-test("runs aligned activation patching from Chat and renders causal recovery", async ({ page }) => {
+test("opens real MLP neuron intervention from Chat", async ({ page }) => {
+  await prepareHome(page);
+  await mockReadyPromptJob(page);
+  await page.goto("/");
+  await runReadyAnalysis(page);
+
+  await page.getByRole("button", { name: /Neuron/ }).click();
+  await expect(page.getByRole("heading", { name: "Neuron intervention" })).toBeVisible();
+  await expect(page.getByLabel("MLP neuron", { exact: true })).toBeVisible();
+  await expect(page.getByLabel("Neuron activation factor")).toHaveValue("0");
+  await expect(page.getByRole("button", { name: "Suppress", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByRole("button", { name: "Run neuron intervention" })).toBeEnabled();
+});
+
+test("keeps clean/corrupt patching and single attention-head selection in Chat", async ({ page }) => {
   await prepareHome(page);
   await mockReadyPromptJob(page);
   const submitted = await mockReadyPatchingJob(page);
@@ -1155,58 +1183,20 @@ test("runs aligned activation patching from Chat and renders causal recovery", a
 
   await page.getByRole("button", { name: /Patch/ }).click();
   await expect(page.getByRole("heading", { name: "Activation patching" })).toBeVisible();
-  await expect(page.getByLabel("Clean patching input")).toHaveValue(generatedRun.prompt);
-  await expect(page.getByRole("button", { name: /Run .*patch/ })).toBeDisabled();
-
-  await page.getByLabel("Corrupt patching input").fill("Corrupted aligned prompt");
-  await expect(page.getByText("Aligned", { exact: true })).toBeVisible();
-  await expect(page.getByRole("button", { name: /Patch token 2:/ })).toHaveAttribute("aria-pressed", "true");
-  const runPatches = page.getByRole("button", { name: /Run \d+ patches/ });
-  await expect(runPatches).toBeEnabled();
-  await runPatches.click();
-
-  const result = page.getByLabel("Activation patching result");
-  await expect(result).toContainText("Clean logit");
-  await expect(result).toContainText("Corrupt logit");
-  await expect(result).toContainText("70.0%");
-  await expect(page.getByLabel("Patching recovery matrix")).toBeVisible();
-  await expect(page.locator(".chat-history-row")).toHaveCount(2);
-  expect(submitted()).toMatchObject({
-    corruptedPrompt: "Corrupted aligned prompt",
-    component: "resid_post",
-    positions: [2]
-  });
-  expect((submitted()?.layers as number[])).toHaveLength(generatedRun.layers.length);
-});
-
-test("selects one layer and one head for attention-head patching", async ({ page }) => {
-  await prepareHome(page);
-  await mockReadyPromptJob(page);
-  const submitted = await mockReadyPatchingJob(page);
-  await page.goto("/");
-  await runReadyAnalysis(page);
-
-  await page.getByRole("button", { name: /Patch/ }).click();
   await page.getByRole("button", { name: "Attention head", exact: true }).click();
   const headPicker = page.getByLabel("Patching attention head");
-  await expect(headPicker).toBeVisible();
   await expect(headPicker.locator("option")).toHaveCount(2);
   await headPicker.selectOption("1");
-
   const layers = page.getByLabel("Patching layers").getByRole("button");
   await layers.nth(0).click();
   await expect(layers.nth(0)).toHaveAttribute("aria-pressed", "true");
   await expect(layers.nth(1)).toHaveAttribute("aria-pressed", "false");
-
   await page.getByLabel("Corrupt patching input").fill("Corrupted aligned prompt");
-  await page.getByRole("button", { name: /Run \d+ patch/ }).click();
+  const runPatches = page.getByRole("button", { name: /Run \d+ patch/ });
+  await expect(runPatches).toBeEnabled();
+  await runPatches.click();
   await expect(page.getByLabel("Activation patching result")).toContainText("L0H1");
-  expect(submitted()).toMatchObject({
-    component: "z",
-    head: 1,
-    layers: [0],
-    positions: [2]
-  });
+  expect(submitted()).toMatchObject({ component: "z", head: 1, layers: [0], positions: [2] });
 });
 
 test("restores a previous conversation and its analysis entry points", async ({ page }) => {

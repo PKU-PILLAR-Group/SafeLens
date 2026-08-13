@@ -20,6 +20,8 @@ _logit_lens_rows = MODULE._logit_lens_rows
 _mlp_neurons = MODULE._mlp_neurons
 _mlp_cells = MODULE._mlp_cells
 _nla_compatibility = MODULE._nla_compatibility
+_generation_stop_token_ids = MODULE._generation_stop_token_ids
+_prepare_generation_prompt = MODULE._prepare_generation_prompt
 
 
 def test_real_run_worker_uses_configured_gpu_and_dtype(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -45,6 +47,58 @@ def test_real_run_worker_uses_configured_gpu_and_dtype(monkeypatch: pytest.Monke
     assert captured["config"].device == "cuda:0"
     assert captured["config"].dtype == "bfloat16"
     assert captured["config"].load_kwargs == {"low_cpu_mem_usage": True}
+
+
+def test_chat_prompt_uses_the_model_native_template() -> None:
+    class Tokenizer:
+        def apply_chat_template(self, messages, *, tokenize, add_generation_prompt):
+            assert tokenize is False
+            assert add_generation_prompt is True
+            assert messages == [
+                {"role": "user", "content": "First question"},
+                {"role": "assistant", "content": "First answer"},
+                {"role": "user", "content": "你好！"},
+            ]
+            return "<|im_start|>user\nFirst question<|im_end|>...<|im_start|>assistant\n"
+
+    prompt, metadata = _prepare_generation_prompt(
+        Tokenizer(),
+        {
+            "prompt": "你好！",
+            "template": "chat",
+            "messages": [
+                {"role": "user", "content": "First question"},
+                {"role": "assistant", "content": "First answer"},
+            ],
+        },
+    )
+
+    assert prompt.endswith("<|im_start|>assistant\n")
+    assert metadata == {
+        "template": "chat",
+        "method": "tokenizer.apply_chat_template",
+        "messageCount": 3,
+    }
+
+
+def test_chat_generation_stops_at_model_and_template_end_tokens() -> None:
+    class Tokenizer:
+        eos_token_id = 2
+        unk_token_id = 0
+
+        def convert_tokens_to_ids(self, token):
+            return {"<|im_end|>": 151645, "<|eot_id|>": 0}[token]
+
+    class GenerationConfig:
+        eos_token_id = [2, 3]
+
+    class Wrapper:
+        tokenizer = Tokenizer()
+        model = type("Model", (), {"generation_config": GenerationConfig()})()
+
+    assert _generation_stop_token_ids(
+        Wrapper(), prompt_format={"template": "chat"}
+    ) == [2, 3, 151645]
 
 
 def test_real_run_worker_uses_complete_local_snapshot_without_network(

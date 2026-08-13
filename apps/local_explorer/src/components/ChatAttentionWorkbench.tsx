@@ -30,24 +30,35 @@ export function ChatAttentionWorkbench({ run, remoteSummary }: ChatAttentionWork
     () => [...run.layers].sort((left, right) => left - right),
     [run.layers]
   );
+  const tokens = run.tokens;
   const initialLayer = availableLayers[availableLayers.length - 1] ?? run.layers[run.layers.length - 1] ?? 0;
   const [selectedLayer, setSelectedLayer] = useState(initialLayer);
   const layerHeads = useMemo(
     () => rawHeads.filter((head) => head.layer === selectedLayer),
     [rawHeads, selectedLayer]
   );
-  const [selectedHeadId, setSelectedHeadId] = useState(layerHeads[0]?.id ?? rawHeads[0]?.id ?? "");
-  const selectedHead = layerHeads.find((head) => head.id === selectedHeadId) ?? layerHeads[0];
+  const averageHead = useMemo(
+    () => averageAttentionHead(selectedLayer, layerHeads, tokens.length),
+    [layerHeads, selectedLayer, tokens.length]
+  );
+  const selectableHeads = useMemo(
+    () => averageHead ? [averageHead, ...layerHeads] : layerHeads,
+    [averageHead, layerHeads]
+  );
+  const [selectedHeadId, setSelectedHeadId] = useState(averageHead?.id ?? layerHeads[0]?.id ?? rawHeads[0]?.id ?? "");
+  const selectedHead = selectableHeads.find((head) => head.id === selectedHeadId) ?? selectableHeads[0];
   const coverage = attentionHeadCoverage(run, selectedLayer, layerHeads.length, rawHeads.length);
-  const tokens = run.tokens;
   const [selectedDestination, setSelectedDestination] = useState(tokens[tokens.length - 1]?.index ?? 0);
   const [selectedSource, setSelectedSource] = useState(0);
 
   useEffect(() => {
     setHydratedHeads(run.attentionHeads);
     setHeadLoadError(null);
+  }, [run.attentionHeads]);
+
+  useEffect(() => {
     loadedScopesRef.current.clear();
-  }, [run.attentionHeads, run.runId, run.sampleId]);
+  }, [run.runId, run.sampleId]);
 
   useEffect(() => {
     if (!remoteSummary || tokens.length === 0) return;
@@ -62,6 +73,7 @@ export function ChatAttentionWorkbench({ run, remoteSummary }: ChatAttentionWork
     const sourceRange = tokenBlock(selectedSource, tokens.length);
     const scope = `${selectedLayer}:${destinationRange.start}:${sourceRange.start}`;
     if (loadedScopesRef.current.has(scope)) return;
+    loadedScopesRef.current.add(scope);
     setLoadingHeads(true);
     setHeadLoadError(null);
     void fetchRemoteRunChunk(remoteSummary, {
@@ -72,13 +84,13 @@ export function ChatAttentionWorkbench({ run, remoteSummary }: ChatAttentionWork
       sourceStart: sourceRange.start,
       sourceEnd: sourceRange.end
     }, controller.signal).then((chunk) => {
-      loadedScopesRef.current.add(scope);
       setHydratedHeads((current) => mergeRunChunk({
         ...run,
         attentionHeads: current
       }, chunk).attentionHeads);
     }).catch((error) => {
       if (!controller.signal.aborted) {
+        loadedScopesRef.current.delete(scope);
         setHeadLoadError(error instanceof Error ? error.message : "Attention heads could not be loaded.");
       }
     }).finally(() => {
@@ -96,9 +108,8 @@ export function ChatAttentionWorkbench({ run, remoteSummary }: ChatAttentionWork
   ]);
 
   useEffect(() => {
-    const nextHead = rawHeads.find((head) => head.layer === selectedLayer);
-    if (nextHead && !layerHeads.some((head) => head.id === selectedHeadId)) setSelectedHeadId(nextHead.id);
-  }, [layerHeads, rawHeads, selectedHeadId, selectedLayer]);
+    if (averageHead && selectedHeadId !== averageHead.id && !layerHeads.some((head) => head.id === selectedHeadId)) setSelectedHeadId(averageHead.id);
+  }, [averageHead, layerHeads, selectedHeadId]);
 
   useEffect(() => {
     if (!selectedHead) return;
@@ -128,8 +139,8 @@ export function ChatAttentionWorkbench({ run, remoteSummary }: ChatAttentionWork
 
   function selectLayer(layer: number) {
     setSelectedLayer(layer);
-    const nextHead = rawHeads.find((head) => head.layer === layer);
-    if (nextHead) setSelectedHeadId(nextHead.id);
+    const nextMean = averageAttentionHead(layer, rawHeads.filter((head) => head.layer === layer), tokens.length);
+    setSelectedHeadId(nextMean?.id ?? rawHeads.find((head) => head.layer === layer)?.id ?? "");
   }
 
   function selectDestination(destination: number) {
@@ -149,7 +160,7 @@ export function ChatAttentionWorkbench({ run, remoteSummary }: ChatAttentionWork
     <section className="chat-analysis-workbench chat-attention-workbench" aria-label="Attention heads workbench">
       <header className="chat-workbench-heading">
         <span><Network size={17} /></span>
-        <div><h2>Attention heads</h2><p>Compare raw head patterns and inspect one destination token</p></div>
+        <div><h2>Attention heads</h2><p>See which earlier tokens each head reads for one selected token</p></div>
         <span className={`chat-workbench-status ${loadingHeads ? "pending" : "ready"}`}>
           <i />{loadingHeads ? "loading" : `${coverage.storedAtLayer} cached`}
         </span>
@@ -165,7 +176,7 @@ export function ChatAttentionWorkbench({ run, remoteSummary }: ChatAttentionWork
         <label>
           <span>Head</span>
           <select aria-label="Attention head" value={selectedHead.id} onChange={(event) => setSelectedHeadId(event.target.value)}>
-            {layerHeads.map((head) => <option key={head.id} value={head.id}>{head.id} · {head.role}</option>)}
+            {selectableHeads.map((head) => <option key={head.id} value={head.id}>{head.id} · {head.role}</option>)}
           </select>
         </label>
         <div className="chat-attention-focus" aria-label="Selected attention pair">
@@ -183,7 +194,7 @@ export function ChatAttentionWorkbench({ run, remoteSummary }: ChatAttentionWork
           </span>
         </header>
         <div role="radiogroup" aria-label="Attention head choices">
-          {layerHeads.map((head) => (
+            {selectableHeads.map((head) => (
             <button
               key={head.id}
               type="button"
@@ -194,7 +205,7 @@ export function ChatAttentionWorkbench({ run, remoteSummary }: ChatAttentionWork
             >
               <MiniHeadHeatmap head={head} tokens={tokens} />
               <span><b>{head.id}</b><small>{head.role}</small></span>
-              <em>risk {head.riskContribution.toFixed(3)}</em>
+              <em>{head.aggregation === "mean" ? "layer average" : `risk ${head.riskContribution.toFixed(3)}`}</em>
             </button>
           ))}
         </div>
@@ -223,15 +234,15 @@ export function ChatAttentionWorkbench({ run, remoteSummary }: ChatAttentionWork
           <div className="chat-attention-metrics"><span><b>{selectedHead.entropy.toFixed(3)}</b> entropy</span><span><b>{selectedHead.riskContribution.toFixed(3)}</b> risk proxy</span></div>
         </header>
         <div className="chat-attention-visuals">
-          <div className="chat-attention-heatmap-wrap">
-            <AttentionHeatmap
-              head={selectedHead}
-              tokens={displayedTokens}
-              selectedSource={selectedSource}
-              selectedDestination={selectedDestination}
-              onSelectPair={selectPair}
-            />
-            {tokens.length > MAX_CHAT_ATTENTION_TOKENS && <p>Heatmap shows the first {MAX_CHAT_ATTENTION_TOKENS} tokens; the selected distribution below includes the full run.</p>}
+          <div className="chat-attention-row-heatmap">
+            <header><strong>Token influence on T{selectedDestination}</strong><small>Click a token to inspect its exact attention value</small></header>
+            <div className="chat-attention-token-strip" aria-label="Attention token heatmap">
+              {incoming.map((item) => {
+                const strength = item.value / incomingMaximum;
+                return <button key={item.token.index} type="button" className={item.token.index === selectedSource ? "active" : ""} aria-pressed={item.token.index === selectedSource} onClick={() => selectPair(item.token.index, selectedDestination)} style={{ "--attention-strength": strength } as React.CSSProperties} title={`T${item.token.index} · ${item.value.toFixed(6)}`}><small>T{item.token.index}</small><b>{visibleToken(item.token.text)}</b><em>{item.value.toFixed(3)}</em></button>;
+              })}
+            </div>
+            <p>Color strength shows how much the selected head reads each earlier token. Future tokens are masked.</p>
           </div>
           <div className="chat-attention-incoming">
             <header><strong>Incoming attention</strong><small>Destination T{selectedDestination}</small></header>
@@ -251,6 +262,11 @@ export function ChatAttentionWorkbench({ run, remoteSummary }: ChatAttentionWork
           </div>
         </div>
       </section>
+      <details className="chat-attention-full-pattern">
+        <summary>View complete attention pattern</summary>
+        <AttentionHeatmap head={selectedHead} tokens={tokens.slice(0, MAX_CHAT_ATTENTION_TOKENS)} selectedSource={selectedSource} selectedDestination={selectedDestination} onSelectPair={selectPair} />
+        {tokens.length > MAX_CHAT_ATTENTION_TOKENS && <p>Only the first {MAX_CHAT_ATTENTION_TOKENS} tokens are drawn in the full pattern view.</p>}
+      </details>
       <p className="chat-explanation-note">Values are raw softmax attention probabilities from the cached model forward pass. Masked future positions are not selectable.</p>
     </section>
   );
@@ -380,6 +396,30 @@ function incomingAttention(head: AttentionHead, destination: number, tokens: Tok
   return tokens
     .filter((token) => token.index <= destination)
     .map((token) => ({ token, value: head.distributionByToken[destination]?.[token.index] ?? 0 }));
+}
+
+function averageAttentionHead(layer: number, heads: AttentionHead[], tokenCount: number): AttentionHead | undefined {
+  if (heads.length === 0) return undefined;
+  const rows = Array.from({ length: tokenCount }, (_, destination) => {
+    const width = Math.min(destination + 1, tokenCount);
+    return Array.from({ length: width }, (_, source) => {
+      const values = heads.map((head) => head.distributionByToken[destination]?.[source]).filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+      return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0;
+    });
+  });
+  const risk = heads.reduce((sum, head) => sum + head.riskContribution, 0) / heads.length;
+  const entropy = heads.reduce((sum, head) => sum + head.entropy, 0) / heads.length;
+  return {
+    id: `L${layer}AVG`,
+    layer,
+    head: -1,
+    role: `Mean of ${heads.length} heads`,
+    riskContribution: risk,
+    entropy,
+    distributionByToken: rows,
+    aggregation: "mean",
+    memberHeadIds: heads.map((head) => head.id)
+  };
 }
 
 function peakSource(head: AttentionHead, destination: number) {

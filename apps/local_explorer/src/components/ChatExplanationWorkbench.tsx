@@ -244,7 +244,7 @@ export function ChatExplanationWorkbench({
         <span><Sparkles size={17} /></span>
         <div>
           <h2>Explanation</h2>
-          <p>Natural-language and Jacobian readouts</p>
+          <p>Describe hidden states and reveal the words they can influence</p>
         </div>
         <span className={`chat-workbench-status ${selectedNlaRow?.status === "available" || selectedLensRow ? "ready" : "idle"}`}>
           <i />{mode === "nla" ? "NLA" : "J-LENS"}
@@ -259,7 +259,7 @@ export function ChatExplanationWorkbench({
           className={mode === "nla" ? "active" : ""}
           onClick={() => selectMode("nla")}
         >
-          <Sparkles size={16} /><span><b>NLA</b><small>Natural-language explanation</small></span>
+          <Sparkles size={16} /><span><b>NLA</b><small>Explain what the hidden state represents</small></span>
         </button>
         <button
           type="button"
@@ -268,7 +268,7 @@ export function ChatExplanationWorkbench({
           className={mode === "j-lens" ? "active" : ""}
           onClick={() => selectMode("j-lens")}
         >
-          <BarChart3 size={16} /><span><b>J-Lens</b><small>Jacobian vocabulary readout</small></span>
+          <BarChart3 size={16} /><span><b>J-Lens</b><small>Reveal vocabulary most affected by this state</small></span>
         </button>
       </div>
 
@@ -385,7 +385,7 @@ function NlaOutput({
 
       {available ? (
         <article className="chat-nla-result">
-          <header><CheckCircle2 size={17} /><span>Natural-language explanation</span></header>
+          <header><CheckCircle2 size={17} /><span>What this activation represents</span></header>
           <p>{row.explanation}</p>
           <dl>
             <div><dt>Cosine</dt><dd>{formatMetric(row.cosine)}</dd></div>
