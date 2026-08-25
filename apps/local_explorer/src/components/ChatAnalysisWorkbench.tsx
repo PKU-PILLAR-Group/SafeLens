@@ -4,13 +4,17 @@ import {
   Activity,
   ArrowRight,
   CheckCircle2,
+  ChevronDown,
+  ChevronUp,
   GitCompareArrows,
   LoaderCircle,
+  Plus,
   RotateCcw,
   ScanSearch,
   Send,
   SlidersHorizontal,
-  Square
+  Square,
+  Trash2
 } from "lucide-react";
 
 import {
@@ -32,6 +36,7 @@ import {
 import { useAttributionRunner } from "../state/useAttributionRunner";
 import { useInterventionRunner } from "../state/useInterventionRunner";
 import { usePatchingRunner } from "../state/usePatchingRunner";
+import { HYBRID_STEERING_BATCHES } from "../state/steeringHybridPresets";
 import type {
   AttributionMethod,
   ExplorerRun,
@@ -42,9 +47,7 @@ import type {
 import { generatedResponseText } from "../generatedResponse";
 import { ChatAttentionWorkbench } from "./ChatAttentionWorkbench";
 import { ChatExplanationWorkbench } from "./ChatExplanationWorkbench";
-import { PresetSuggestTextarea } from "./PresetSuggestTextarea";
 import { ResponseTokenPicker } from "./ResponseTokenPicker";
-import { pairedSteeringPreset, type SteeringPreset } from "../state/steeringPresets";
 
 interface ChatAnalysisWorkbenchProps {
   mode: "steering" | "attribution" | "patching" | "feature" | "explanation" | "attention";
@@ -430,36 +433,44 @@ function FeatureInterventionWorkbench({
   );
 }
 
+type SteeringConcept = "Custom" | "Reject" | "Angry" | "Happy" | "Emoji" | "Dog" | "Music";
+type SteeringSampleDirection = "positive" | "negative";
+
+const STEERING_CONCEPTS: SteeringConcept[] = ["Custom", "Reject", "Angry", "Happy", "Emoji", "Dog", "Music"];
+const STEERING_BATCHES = HYBRID_STEERING_BATCHES;
+
 function SteeringWorkbench({
   run,
   savedRun,
-  suggestionQuery,
   onRunReady
 }: Omit<ChatAnalysisWorkbenchProps, "mode">) {
   const prior = savedRun?.intervention ?? run.intervention;
-  const [desiredPrompt, setDesiredPrompt] = useState(
-    prior?.vector.desiredPrompt ?? "Provide a safe, policy-compliant and helpful response."
+  const [expanded, setExpanded] = useState(false);
+  const [concept, setConcept] = useState<SteeringConcept>("Custom");
+  const [positivePreset, setPositivePreset] = useState("Custom samples");
+  const [negativePreset, setNegativePreset] = useState("Custom samples");
+  const [positivePrompts, setPositivePrompts] = useState<string[]>(
+    prior?.vector.positivePrompts ?? [prior?.vector.desiredPrompt ?? "Provide a safe, policy-compliant and helpful response."]
   );
-  const [undesiredPrompt, setUndesiredPrompt] = useState(
-    prior?.vector.undesiredPrompt ?? "Provide a response that bypasses safety guidance."
+  const [negativePrompts, setNegativePrompts] = useState<string[]>(
+    prior?.vector.negativePrompts ?? [prior?.vector.undesiredPrompt ?? "Provide a response that bypasses safety guidance."]
   );
-  const [layer, setLayer] = useState(prior?.layer ?? defaultLayer(run));
+  const [activationReduce, setActivationReduce] = useState<"last_token" | "mean">(
+    prior?.vector.activationReduce === "mean" ? "mean" : "last_token"
+  );
+  const steeringDefaultLayer = defaultSteeringLayer(run);
+  const [sourceLayer, setSourceLayer] = useState(prior?.sourceLayer ?? prior?.layer ?? steeringDefaultLayer);
+  const [injectLayer, setInjectLayer] = useState(prior?.injectLayer ?? prior?.layer ?? steeringDefaultLayer);
   const [component, setComponent] = useState<ActivationComponent>(prior?.component ?? "resid_post");
   const [scale, setScale] = useState(prior?.scale ?? 1);
-  const [maxNewTokens, setMaxNewTokens] = useState(
-    prior?.vector.normalized ? 64 : prior?.maxNewTokens ?? 64
-  );
-  const [positionStart, setPositionStart] = useState(prior?.positionStart ?? 0);
-  const [positionEnd, setPositionEnd] = useState(prior?.positionEnd ?? run.tokens.length);
+  const [outputTokens, setOutputTokens] = useState(128);
   const targetOptions = useMemo(() => steeringTargetOptions(run), [run]);
-  const [targetTokenId, setTargetTokenId] = useState(
-    prior?.targetTokenId ?? targetOptions[0]?.tokenId ?? 0
-  );
+  const [targetTokenId, setTargetTokenId] = useState(prior?.targetTokenId ?? targetOptions[0]?.tokenId ?? 0);
   const [preflight, setPreflight] = useState<InterventionPreflight | null>(null);
   const [preflightError, setPreflightError] = useState<string | null>(null);
-  const [result, setResult] = useState<ExplorerRun | null>(
-    savedRun?.intervention ? savedRun : prior ? run : null
-  );
+  const [result, setResult] = useState<ExplorerRun | null>(savedRun?.intervention ? savedRun : prior ? run : null);
+  const positiveRequest = useMemo(() => positivePrompts.map((prompt) => prompt.trim()).filter(Boolean), [positivePrompts]);
+  const negativeRequest = useMemo(() => negativePrompts.map((prompt) => prompt.trim()).filter(Boolean), [negativePrompts]);
 
   const handleReady = useCallback((derived: ExplorerRun, job: InterventionJob) => {
     setResult(derived);
@@ -472,18 +483,25 @@ function SteeringWorkbench({
     const controller = new AbortController();
     setPreflight(null);
     setPreflightError(null);
+    if (positiveRequest.length === 0 || negativeRequest.length === 0) {
+      setPreflightError("Add at least one non-empty sample to each direction.");
+      return () => controller.abort();
+    }
     const timer = window.setTimeout(() => {
       void fetchInterventionPreflight({
         modelName: run.modelName,
         promptTokenCount: run.tokens.length,
         availableLayers: run.layers,
-        layer,
+        layer: injectLayer,
+        sourceLayer,
+        injectLayer,
         component,
-        positionStart,
-        positionEnd,
+        positionStart: 0,
+        positionEnd: run.tokens.length,
         targetTokenId,
-        desiredPrompt,
-        undesiredPrompt
+        positivePrompts: positiveRequest,
+        negativePrompts: negativeRequest,
+        activationReduce
       }, controller.signal).then(setPreflight).catch((error) => {
         if (!controller.signal.aborted) {
           setPreflightError(error instanceof Error ? error.message : "Steering preflight failed.");
@@ -494,26 +512,32 @@ function SteeringWorkbench({
       window.clearTimeout(timer);
       controller.abort();
     };
-  }, [component, desiredPrompt, layer, positionEnd, positionStart, run.layers, run.modelName, run.tokens.length, targetTokenId, undesiredPrompt]);
+  }, [activationReduce, component, injectLayer, negativeRequest, positiveRequest, run.layers, run.modelName, run.tokens.length, sourceLayer, targetTokenId]);
 
   const canRun = Boolean(preflight?.canSubmit && !running);
 
-  function setRange(start: number, end: number) {
-    const nextStart = Math.max(0, Math.min(run.tokens.length - 1, start));
-    const nextEnd = Math.max(nextStart + 1, Math.min(run.tokens.length, end));
-    setPositionStart(nextStart);
-    setPositionEnd(nextEnd);
+  function selectConcept(next: SteeringConcept) {
+    setConcept(next);
+    if (next === "Custom") {
+      setPositivePreset("Custom samples");
+      setNegativePreset("Custom samples");
+      return;
+    }
+    setPositivePrompts([...STEERING_BATCHES[next].positive]);
+    setNegativePrompts([...STEERING_BATCHES[next].negative]);
+    setPositivePreset(`${next} positive batch`);
+    setNegativePreset(`${next} negative batch`);
   }
 
-  function applyPairedPreset(preset: SteeringPreset) {
-    const paired = pairedSteeringPreset(preset);
-    if (preset.direction === "toward") {
-      setDesiredPrompt(preset.text);
-      if (paired) setUndesiredPrompt(paired.text);
-    } else {
-      setUndesiredPrompt(preset.text);
-      if (paired) setDesiredPrompt(paired.text);
-    }
+  function selectBatch(direction: SteeringSampleDirection, value: string) {
+    if (direction === "positive") setPositivePreset(value);
+    else setNegativePreset(value);
+    if (value === "Custom samples") return;
+    const batchConcept = STEERING_CONCEPTS.find((item) => value.startsWith(`${item} `));
+    if (!batchConcept || batchConcept === "Custom") return;
+    const prompts = [...STEERING_BATCHES[batchConcept][direction]];
+    if (direction === "positive") setPositivePrompts(prompts);
+    else setNegativePrompts(prompts);
   }
 
   function submit() {
@@ -521,123 +545,153 @@ function SteeringWorkbench({
     setResult(null);
     void runner.submit({
       run,
-      desiredPrompt,
-      undesiredPrompt,
-      layer,
+      desiredPrompt: positiveRequest[0],
+      undesiredPrompt: negativeRequest[0],
+      positivePrompts: positiveRequest,
+      negativePrompts: negativeRequest,
+      activationReduce,
+      layer: injectLayer,
+      sourceLayer,
+      injectLayer,
       component,
       scale,
-      positionStart,
-      positionEnd,
+      positionStart: 0,
+      positionEnd: run.tokens.length,
       targetTokenId,
       seed: 0,
-      maxNewTokens,
+      maxNewTokens: outputTokens,
       temperature: 0
     });
   }
 
+  const conceptControl = (
+    <label className="chat-steering-concept">
+      <span>Steering concept</span>
+      <select aria-label="Steering concept" value={concept} disabled={running} onChange={(event) => selectConcept(event.target.value as SteeringConcept)}>
+        {STEERING_CONCEPTS.map((item) => <option key={item} value={item}>{item}</option>)}
+      </select>
+    </label>
+  );
+  const advancedToggle = (
+    <button type="button" className="chat-steering-advanced-toggle" aria-expanded={expanded} onClick={() => setExpanded((value) => !value)}>
+      <SlidersHorizontal size={16} />
+      {expanded ? "Hide advanced settings" : "Advanced settings"}
+      {expanded ? <ChevronUp size={15} /> : <ChevronDown size={15} />}
+    </button>
+  );
+
   return (
-    <section className="chat-analysis-workbench" aria-label="Steering workbench">
-      <header className="chat-workbench-heading">
-        <span><SlidersHorizontal size={17} /></span>
-        <div>
-          <h2>Steering</h2>
-          <p>Move the model away from one behavior and toward another</p>
-        </div>
-        <StatusDot ready={Boolean(preflight?.canSubmit)} pending={!preflight && !preflightError} />
-      </header>
-
-      <div className="chat-steering-references">
-        <PresetSuggestTextarea
-          ariaLabel="Steering desired behavior"
-          label="Steer toward"
-          direction="toward"
-          contextQuery={suggestionQuery}
-          value={desiredPrompt}
-          disabled={running}
-          onChange={setDesiredPrompt}
-          onSelectPreset={applyPairedPreset}
-        />
-        <PresetSuggestTextarea
-          ariaLabel="Steering undesired behavior"
-          label="Steer away from"
-          direction="away"
-          contextQuery={suggestionQuery}
-          value={undesiredPrompt}
-          disabled={running}
-          onChange={setUndesiredPrompt}
-          onSelectPreset={applyPairedPreset}
-        />
-      </div>
-
-      <div className="chat-steering-controls">
-        <label>
-          <span>Layer</span>
-          <select aria-label="Steering layer" value={layer} disabled={running} onChange={(event) => setLayer(Number(event.target.value))}>
-            {run.layers.map((item) => <option key={item} value={item}>L{item}</option>)}
-          </select>
-        </label>
-        <label>
-          <span>Activation site</span>
-          <select aria-label="Steering activation site" value={component} disabled={running} onChange={(event) => setComponent(event.target.value as ActivationComponent)}>
-            <option value="resid_post">Residual stream · post-layer</option>
-            <option value="attn_out">Attention output</option>
-            <option value="mlp_out">MLP output</option>
-          </select>
-        </label>
-        <label>
-          <span>Diagnostic token</span>
-          <select aria-label="Steering diagnostic token" value={targetTokenId} disabled={running} onChange={(event) => setTargetTokenId(Number(event.target.value))}>
-            {targetOptions.map((option) => (
-              <option key={option.tokenId} value={option.tokenId}>{visibleToken(option.tokenText)} · #{option.tokenId}</option>
-            ))}
-          </select>
-        </label>
-        <label className="chat-steering-strength">
-          <span>Strength <b>{scale.toFixed(1)}</b></span>
-          <input aria-label="Steering strength" type="range" min={0} max={2} step={0.1} value={scale} disabled={running} onChange={(event) => setScale(Number(event.target.value))} />
-        </label>
-        <label>
-          <span>Output tokens</span>
-          <input aria-label="Steering output tokens" type="number" min={16} max={128} step={16} value={maxNewTokens} disabled={running} onChange={(event) => setMaxNewTokens(Math.max(16, Math.min(128, Number(event.target.value) || 16)))} />
-        </label>
-      </div>
-
-      <div className="chat-token-range">
-        <header>
-          <span>Apply to</span>
-          <div>
-            <button className={positionStart === 0 && positionEnd === run.tokens.length ? "active" : ""} aria-pressed={positionStart === 0 && positionEnd === run.tokens.length} disabled={running} onClick={() => setRange(0, run.tokens.length)}>Entire input</button>
-            <button className={positionStart === run.tokens.length - 1 && positionEnd === run.tokens.length ? "active" : ""} aria-pressed={positionStart === run.tokens.length - 1 && positionEnd === run.tokens.length} disabled={running} onClick={() => setRange(run.tokens.length - 1, run.tokens.length)}>Last token</button>
+    <section className={`chat-analysis-workbench chat-steering-workbench ${expanded ? "is-expanded" : "is-compact"}`} aria-label="Steering workbench">
+      {expanded ? (
+        <>
+          <div className="chat-steering-expanded-top">{conceptControl}{advancedToggle}</div>
+          <div className="chat-steering-references">
+            <SteeringSamples direction="positive" prompts={positivePrompts} preset={positivePreset} running={running} onPreset={selectBatch} onChange={setPositivePrompts} />
+            <SteeringSamples direction="negative" prompts={negativePrompts} preset={negativePreset} running={running} onPreset={selectBatch} onChange={setNegativePrompts} />
           </div>
-          <small>T{positionStart}–T{positionEnd - 1}</small>
-        </header>
-        <div aria-label="Steering token range">
-          {run.tokens.map((token) => (
-            <button
-              key={token.index}
-              className={token.index >= positionStart && token.index < positionEnd ? "active" : ""}
-              aria-pressed={token.index >= positionStart && token.index < positionEnd}
-              disabled={running}
-              title={`Apply steering to token ${token.index}`}
-              onClick={() => setRange(token.index, token.index + 1)}
-            >{visibleToken(token.text)}</button>
-          ))}
+          <div className="chat-steering-controls">
+            <label>
+              <span>Sample activation</span>
+              <select aria-label="Steering sample activation" value={activationReduce} disabled={running} onChange={(event) => setActivationReduce(event.target.value as "last_token" | "mean")}>
+                <option value="last_token">Last token</option>
+                <option value="mean">Token average</option>
+              </select>
+            </label>
+            <label>
+              <span>Source layer</span>
+              <select aria-label="Steering source layer" value={sourceLayer} disabled={running} onChange={(event) => setSourceLayer(Number(event.target.value))}>
+                {run.layers.map((item) => <option key={item} value={item}>L{item}</option>)}
+              </select>
+            </label>
+            <label>
+              <span>Inject layer</span>
+              <select aria-label="Steering inject layer" value={injectLayer} disabled={running} onChange={(event) => setInjectLayer(Number(event.target.value))}>
+                {run.layers.map((item) => <option key={item} value={item}>L{item}</option>)}
+              </select>
+            </label>
+            <label>
+              <span>Component</span>
+              <select aria-label="Steering activation site" value={component} disabled={running} onChange={(event) => setComponent(event.target.value as ActivationComponent)}>
+                <option value="resid_post">Residual stream</option>
+                <option value="attn_out">Attention output</option>
+                <option value="mlp_out">MLP output</option>
+              </select>
+            </label>
+            <label>
+              <span>Objective</span>
+              <select aria-label="Steering diagnostic token" value={targetTokenId} disabled={running} onChange={(event) => setTargetTokenId(Number(event.target.value))}>
+                {targetOptions.map((option) => <option key={option.tokenId} value={option.tokenId}>{visibleToken(option.tokenText)} · #{option.tokenId}</option>)}
+              </select>
+            </label>
+            <label className="chat-steering-strength">
+              <span>Strength <b>{scale.toFixed(1)}</b></span>
+              <input aria-label="Steering strength" type="range" min={0} max={2.5} step={0.1} value={scale} disabled={running} onChange={(event) => setScale(Number(event.target.value))} />
+            </label>
+            <label>
+              <span>Output tokens</span>
+              <input aria-label="Steering output tokens" type="number" min={1} max={128} step={1} value={outputTokens} disabled={running} onChange={(event) => setOutputTokens(Math.max(1, Math.min(128, Number(event.target.value) || 1)))} />
+            </label>
+          </div>
+        </>
+      ) : (
+        <div className="chat-steering-quick-controls">
+          {conceptControl}
+          <label className="chat-steering-strength">
+            <span>Strength <b>{scale.toFixed(1)}</b></span>
+            <input aria-label="Steering strength" type="range" min={0} max={2.5} step={0.1} value={scale} disabled={running} onChange={(event) => setScale(Number(event.target.value))} />
+          </label>
+          {advancedToggle}
         </div>
-      </div>
-
-      <WorkbenchActions
-        running={running}
-        disabled={!canRun}
-        runLabel="Run steering"
-        status={runner.error?.message ?? preflightError ?? preflight?.reason}
-        progress={runner.job?.progress}
-        onRun={submit}
-        onCancel={() => void runner.cancel()}
-        onReset={runner.reset}
-        failed={Boolean(runner.error)}
-      />
-
+      )}
+      <WorkbenchActions running={running} disabled={!canRun} runLabel="Run steering" status={runner.error?.message ?? preflightError ?? preflight?.reason} progress={runner.job?.progress} onRun={submit} onCancel={() => void runner.cancel()} onReset={runner.reset} failed={Boolean(runner.error)} />
       {result?.intervention && <SteeringResult experiment={result.intervention} />}
+    </section>
+  );
+}
+
+function SteeringSamples({
+  direction,
+  prompts,
+  preset,
+  running,
+  onPreset,
+  onChange
+}: {
+  direction: SteeringSampleDirection;
+  prompts: string[];
+  preset: string;
+  running: boolean;
+  onPreset: (direction: SteeringSampleDirection, value: string) => void;
+  onChange: (prompts: string[]) => void;
+}) {
+  const title = direction === "positive" ? "Steer toward" : "Steer away from";
+  const updatePrompt = (index: number, value: string) => onChange(prompts.map((prompt, item) => item === index ? value : prompt));
+  const removePrompt = (index: number) => {
+    if (prompts.length === 1) return;
+    onChange(prompts.filter((_prompt, item) => item !== index));
+  };
+  return (
+    <section className="chat-steering-samples">
+      <header><strong>{title}</strong><span>{prompts.length}</span></header>
+      <label className="chat-steering-preset">
+        <span>Sample preset</span>
+        <select aria-label={`${title} sample preset`} value={preset} disabled={running} onChange={(event) => onPreset(direction, event.target.value)}>
+          <option value="Custom samples">Custom samples</option>
+          {STEERING_CONCEPTS.filter((item) => item !== "Custom").map((item) => <option key={item} value={`${item} ${direction} batch`}>{item} {direction} batch</option>)}
+        </select>
+      </label>
+      <div className="chat-steering-sample-list">
+        {prompts.map((prompt, index) => (
+          <label key={index}>
+            <span>Sample {index + 1}</span>
+            <div>
+              <textarea aria-label={`${title} sample ${index + 1}`} value={prompt} disabled={running} onChange={(event) => updatePrompt(index, event.target.value)} />
+              <button type="button" aria-label={`Remove ${title.toLowerCase()} sample ${index + 1}`} disabled={running || prompts.length === 1} onClick={() => removePrompt(index)}><Trash2 size={15} /></button>
+            </div>
+          </label>
+        ))}
+      </div>
+      <button type="button" className="chat-steering-add-sample" disabled={running || prompts.length >= 64} onClick={() => onChange([...prompts, ""])}><Plus size={15} />Add sample</button>
     </section>
   );
 }
@@ -794,6 +848,9 @@ function StatusDot({ ready, pending }: { ready: boolean; pending: boolean }) {
 function SteeringResult({ experiment }: { experiment: InterventionExperiment }) {
   const isFeature = experiment.mode === "neuron";
   const isLegacyDirection = !isFeature && experiment.vector.normalized;
+  const layerLabel = experiment.sourceLayer !== undefined || experiment.injectLayer !== undefined
+    ? `source L${experiment.sourceLayer ?? experiment.layer} → inject L${experiment.injectLayer ?? experiment.layer}`
+    : `L${experiment.layer}`;
   const maxLogitDelta = experiment.deltas.maxAbsLogit;
   const firstDivergence = experiment.deltas.firstDivergenceIndex;
   const relativeStrength = experiment.vector.relativeStrength;
@@ -801,7 +858,7 @@ function SteeringResult({ experiment }: { experiment: InterventionExperiment }) 
     <section className="chat-steering-result" aria-label="Steering comparison">
       <header>
         <div>{isFeature ? <Activity size={16} /> : <GitCompareArrows size={16} />}<strong>{isFeature ? "Neuron intervention comparison" : "Steering generation comparison"}</strong></div>
-        <span>{isFeature && experiment.feature ? `${experiment.feature.id} · ${experiment.feature.operation}` : `L${experiment.layer} · ${experiment.component}`} · factor {signed(experiment.scale)}</span>
+        <span>{isFeature && experiment.feature ? `${experiment.feature.id} · ${experiment.feature.operation}` : `${layerLabel} · ${experiment.component}`} · factor {signed(experiment.scale)}</span>
       </header>
       <div className="chat-steering-output">
         <article className="is-original">
@@ -973,6 +1030,11 @@ function PatchingResult({ experiment }: { experiment: PatchingExperiment }) {
 
 function defaultLayer(run: ExplorerRun) {
   return run.layers[Math.max(0, Math.floor(run.layers.length * 0.7) - 1)] ?? run.layers[0] ?? 0;
+}
+
+function defaultSteeringLayer(run: ExplorerRun) {
+  const sourceGridLayer = Math.floor((2 * run.layers.length) / 4) + 1;
+  return run.layers.includes(sourceGridLayer) ? sourceGridLayer : defaultLayer(run);
 }
 
 function defaultPatchingLayers(layers: number[]) {

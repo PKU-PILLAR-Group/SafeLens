@@ -11,12 +11,15 @@ export function InterventionComparison({ experiment, onPin }: InterventionCompar
   const originalKinds = tokenKinds(experiment, "original");
   const steeredKinds = tokenKinds(experiment, "steered");
   const isNeuron = experiment.mode === "neuron";
+  const layerLabel = experiment.sourceLayer !== undefined || experiment.injectLayer !== undefined
+    ? `source L${experiment.sourceLayer ?? experiment.layer} → inject L${experiment.injectLayer ?? experiment.layer}`
+    : `L${experiment.layer}`;
   return (
     <section className="surface intervention-comparison">
       <div className="surface-header intervention-comparison-header">
         <div>
           <h3>Original vs intervention</h3>
-          <p>{isNeuron && experiment.feature ? `${experiment.feature.id} · ${experiment.feature.operation}` : `L${experiment.layer} · ${experiment.component}`} · factor {experiment.scale.toFixed(1)} · T{experiment.positionStart}–T{experiment.positionEnd - 1}</p>
+          <p>{isNeuron && experiment.feature ? `${experiment.feature.id} · ${experiment.feature.operation}` : `${layerLabel} · ${experiment.component} · generation-time`} · factor {experiment.scale.toFixed(1)}</p>
         </div>
         <button className="icon-button" aria-label="Pin intervention comparison" title="Pin comparison" onClick={onPin}><Pin size={15} /></button>
       </div>

@@ -782,12 +782,17 @@ export interface InterventionPreflightInput {
   promptTokenCount: number;
   availableLayers: number[];
   layer: number;
+  sourceLayer?: number;
+  injectLayer?: number;
   component: ActivationComponent;
   positionStart: number;
   positionEnd: number;
   targetTokenId: number;
-  desiredPrompt: string;
-  undesiredPrompt: string;
+  desiredPrompt?: string;
+  undesiredPrompt?: string;
+  positivePrompts?: string[];
+  negativePrompts?: string[];
+  activationReduce?: "last_token" | "mean";
   neuron?: number;
   availableNeurons?: number[];
 }
@@ -805,7 +810,12 @@ export const interventionJobSchema = z.object({
     mode: z.enum(["direction", "neuron"]).default("direction"),
     desiredPrompt: z.string(),
     undesiredPrompt: z.string(),
+    positivePrompts: z.array(z.string()).min(1).optional(),
+    negativePrompts: z.array(z.string()).min(1).optional(),
+    activationReduce: z.enum(["last_token", "mean"]).default("last_token"),
     layer: z.number().int().nonnegative(),
+    sourceLayer: z.number().int().nonnegative().optional(),
+    injectLayer: z.number().int().nonnegative().optional(),
     component: z.enum(["resid_post", "attn_out", "mlp_out"]),
     scale: z.number(),
     positionStart: z.number().int().nonnegative(),
@@ -826,9 +836,14 @@ export type InterventionJob = z.infer<typeof interventionJobSchema>;
 export interface InterventionRunInput {
   mode?: "direction" | "neuron";
   run: ExplorerRun;
-  desiredPrompt: string;
-  undesiredPrompt: string;
+  desiredPrompt?: string;
+  undesiredPrompt?: string;
+  positivePrompts?: string[];
+  negativePrompts?: string[];
+  activationReduce?: "last_token" | "mean";
   layer: number;
+  sourceLayer?: number;
+  injectLayer?: number;
   component: ActivationComponent;
   scale: number;
   positionStart: number;
