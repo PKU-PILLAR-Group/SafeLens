@@ -355,11 +355,17 @@ export interface InterventionExperiment {
     method: string;
     desiredPrompt: string;
     undesiredPrompt: string;
+    positivePrompts?: string[];
+    negativePrompts?: string[];
+    positiveCount?: number;
+    negativeCount?: number;
     activationReduce: string;
     rawNorm: number;
     normalized: boolean;
     dimension: number;
     sourceKey: string;
+    injectionKey?: string;
+    injectionPhase?: "generation" | "prompt";
     referenceTemplate?: string;
     desiredTokenCount?: number;
     undesiredTokenCount?: number;
@@ -368,6 +374,8 @@ export interface InterventionExperiment {
     relativeStrength?: number;
   };
   layer: number;
+  sourceLayer?: number;
+  injectLayer?: number;
   component: "resid_post" | "attn_out" | "mlp_out";
   scale: number;
   positionStart: number;

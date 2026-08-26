@@ -337,20 +337,48 @@ class PatchingRunRequest(BaseModel):
     targetTokenId: int = Field(ge=0)
 
 
+def _clean_intervention_prompts(prompts: list[str], field_name: str) -> list[str]:
+    cleaned = [prompt.strip() for prompt in prompts]
+    if not cleaned or any(not prompt for prompt in cleaned):
+        raise ValueError(f"{field_name} must contain at least one non-empty prompt")
+    if any(len(prompt) > 8_000 for prompt in cleaned):
+        raise ValueError(f"each {field_name} item must be at most 8000 characters")
+    return cleaned
+
+
 class InterventionPreflightRequest(BaseModel):
     mode: Literal["direction", "neuron"] = "direction"
     modelName: str = Field(min_length=1)
     promptTokenCount: int = Field(ge=1, le=4_096)
     availableLayers: list[int] = Field(min_length=1, max_length=128)
     layer: int = Field(ge=0)
+    sourceLayer: int | None = Field(default=None, ge=0)
+    injectLayer: int | None = Field(default=None, ge=0)
     component: Literal["resid_post", "attn_out", "mlp_out"]
     positionStart: int = Field(ge=0)
     positionEnd: int = Field(ge=1)
     targetTokenId: int = Field(ge=0)
-    desiredPrompt: str = Field(min_length=1, max_length=8_000)
-    undesiredPrompt: str = Field(min_length=1, max_length=8_000)
+    desiredPrompt: str | None = Field(default=None, min_length=1, max_length=8_000)
+    undesiredPrompt: str | None = Field(default=None, min_length=1, max_length=8_000)
+    positivePrompts: list[str] = Field(default_factory=list, max_length=64)
+    negativePrompts: list[str] = Field(default_factory=list, max_length=64)
+    activationReduce: Literal["last_token", "mean"] = "last_token"
     neuron: int | None = Field(default=None, ge=0)
     availableNeurons: list[int] = Field(default_factory=list, max_length=256)
+
+    @model_validator(mode="after")
+    def normalize_references(self) -> "InterventionPreflightRequest":
+        self.positivePrompts = _clean_intervention_prompts(
+            self.positivePrompts or ([self.desiredPrompt] if self.desiredPrompt else []),
+            "positivePrompts",
+        )
+        self.negativePrompts = _clean_intervention_prompts(
+            self.negativePrompts or ([self.undesiredPrompt] if self.undesiredPrompt else []),
+            "negativePrompts",
+        )
+        self.desiredPrompt = self.desiredPrompt or self.positivePrompts[0]
+        self.undesiredPrompt = self.undesiredPrompt or self.negativePrompts[0]
+        return self
 
 
 class InterventionPreflightResponse(BaseModel):
@@ -373,9 +401,14 @@ class InterventionPreflightResponse(BaseModel):
 class InterventionRunRequest(BaseModel):
     run: dict[str, Any]
     mode: Literal["direction", "neuron"] = "direction"
-    desiredPrompt: str = Field(min_length=1, max_length=8_000)
-    undesiredPrompt: str = Field(min_length=1, max_length=8_000)
+    desiredPrompt: str | None = Field(default=None, min_length=1, max_length=8_000)
+    undesiredPrompt: str | None = Field(default=None, min_length=1, max_length=8_000)
+    positivePrompts: list[str] = Field(default_factory=list, max_length=64)
+    negativePrompts: list[str] = Field(default_factory=list, max_length=64)
+    activationReduce: Literal["last_token", "mean"] = "last_token"
     layer: int = Field(ge=0)
+    sourceLayer: int | None = Field(default=None, ge=0)
+    injectLayer: int | None = Field(default=None, ge=0)
     component: Literal["resid_post", "attn_out", "mlp_out"]
     scale: float = Field(ge=-20.0, le=20.0)
     positionStart: int = Field(ge=0)
@@ -385,6 +418,20 @@ class InterventionRunRequest(BaseModel):
     maxNewTokens: int = Field(default=64, ge=1, le=128)
     temperature: float = Field(default=0.0, ge=0.0, le=2.0)
     neuron: int | None = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def normalize_references(self) -> "InterventionRunRequest":
+        self.positivePrompts = _clean_intervention_prompts(
+            self.positivePrompts or ([self.desiredPrompt] if self.desiredPrompt else []),
+            "positivePrompts",
+        )
+        self.negativePrompts = _clean_intervention_prompts(
+            self.negativePrompts or ([self.undesiredPrompt] if self.undesiredPrompt else []),
+            "negativePrompts",
+        )
+        self.desiredPrompt = self.desiredPrompt or self.positivePrompts[0]
+        self.undesiredPrompt = self.undesiredPrompt or self.negativePrompts[0]
+        return self
 
 
 class JobSnapshot(BaseModel):
@@ -1153,12 +1200,17 @@ def create_app(
                 promptTokenCount=len(payload.run["tokens"]),
                 availableLayers=[int(layer) for layer in payload.run["layers"]],
                 layer=payload.layer,
+                sourceLayer=payload.sourceLayer,
+                injectLayer=payload.injectLayer,
                 component=payload.component,
                 positionStart=payload.positionStart,
                 positionEnd=payload.positionEnd,
                 targetTokenId=payload.targetTokenId,
                 desiredPrompt=payload.desiredPrompt,
                 undesiredPrompt=payload.undesiredPrompt,
+                positivePrompts=payload.positivePrompts,
+                negativePrompts=payload.negativePrompts,
+                activationReduce=payload.activationReduce,
                 neuron=payload.neuron,
                 availableNeurons=[
                     int(item.get("neuron")) for item in payload.run.get("mlpNeurons", [])
@@ -1975,12 +2027,16 @@ def _intervention_preflight(
     allowed_models: tuple[str, ...],
 ) -> InterventionPreflightResponse:
     model_allowed = payload.modelName in allowed_models
-    layer_available = payload.layer in payload.availableLayers
+    source_layer = payload.sourceLayer if payload.sourceLayer is not None else payload.layer
+    inject_layer = payload.injectLayer if payload.injectLayer is not None else payload.layer
+    source_layer_available = source_layer in payload.availableLayers
+    inject_layer_available = inject_layer in payload.availableLayers
+    layer_available = source_layer_available and inject_layer_available
     component_supported = payload.component in {"resid_post", "attn_out", "mlp_out"}
     position_range_valid = (
         0 <= payload.positionStart < payload.positionEnd <= payload.promptTokenCount
     )
-    references_differ = payload.mode == "neuron" or payload.desiredPrompt.strip() != payload.undesiredPrompt.strip()
+    references_differ = payload.mode == "neuron" or payload.positivePrompts != payload.negativePrompts
     feature_available = payload.mode == "direction" or (
         payload.neuron is not None and payload.neuron in payload.availableNeurons
     )
@@ -2001,7 +2057,8 @@ def _intervention_preflight(
     )
     checks = {
         "model is not enabled for local jobs": model_allowed,
-        f"layer L{payload.layer} is not available in the source Run": layer_available,
+        f"source layer L{source_layer} is not available in the source Run": source_layer_available,
+        f"inject layer L{inject_layer} is not available in the source Run": inject_layer_available,
         "component is not supported": component_supported,
         "position range must stay inside the source prompt": position_range_valid,
         "target token is outside the tokenizer vocabulary": target_token_valid,
@@ -2025,7 +2082,7 @@ def _intervention_preflight(
         positionEnd=payload.positionEnd,
         canSubmit=can_submit,
         reason=(
-            "Intervention references, activation target, range, and objective are ready."
+            "Intervention references, source/inject layers, activation target, and objective are ready."
             if can_submit
             else "; ".join(failures)
         ),

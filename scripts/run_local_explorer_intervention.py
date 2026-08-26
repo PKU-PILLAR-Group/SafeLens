@@ -41,7 +41,12 @@ def main() -> None:
             raise ValueError("Source prompt token IDs no longer match the Explorer artifact.")
 
         mode = str(request.get("mode", "direction"))
-        activation_name = f"layer_{int(request['layer'])}.{request['component']}"
+        requested_layer = int(request["layer"])
+        source_layer = int(request.get("sourceLayer", requested_layer))
+        inject_layer = int(request.get("injectLayer", requested_layer))
+        source_activation_name = f"layer_{source_layer}.{request['component']}"
+        inject_activation_name = f"layer_{inject_layer}.{request['component']}"
+        activation_name = inject_activation_name
         feature: dict[str, Any] | None = None
         if mode == "neuron":
             selected = next(
@@ -55,7 +60,11 @@ def main() -> None:
             )
             if selected is None:
                 raise ValueError("Selected MLP neuron is not available in the source run.")
-            activation_name = f"layer_{int(request['layer'])}.post"
+            source_layer = requested_layer
+            inject_layer = requested_layer
+            source_activation_name = f"layer_{requested_layer}.post"
+            inject_activation_name = source_activation_name
+            activation_name = inject_activation_name
             factor = float(request["scale"])
             feature = {
                 "kind": "mlp_neuron",
@@ -69,19 +78,30 @@ def main() -> None:
                 "operation": _neuron_operation(factor),
             }
         else:
-            desired_vector, desired_token_count, reference_template = _reference_vector(
-                wrapper,
-                str(request["desiredPrompt"]),
-                activation_name,
+            positive_prompts = _request_prompt_batch(
+                request, "positivePrompts", "desiredPrompt"
             )
-            undesired_vector, undesired_token_count, _ = _reference_vector(
-                wrapper, str(request["undesiredPrompt"]), activation_name
+            negative_prompts = _request_prompt_batch(
+                request, "negativePrompts", "undesiredPrompt"
+            )
+            activation_reduce = str(request.get("activationReduce", "last_token"))
+            desired_vector, desired_token_counts, reference_template = _reference_centroid(
+                wrapper,
+                positive_prompts,
+                source_activation_name,
+                activation_reduce=activation_reduce,
+            )
+            undesired_vector, undesired_token_counts, _ = _reference_centroid(
+                wrapper,
+                negative_prompts,
+                source_activation_name,
+                activation_reduce=activation_reduce,
             )
             vector, raw_norm = _contrastive_direction(desired_vector, undesired_vector)
             source_activation_norm = _source_activation_norm(
                 wrapper,
                 str(run["prompt"]),
-                activation_name,
+                inject_activation_name,
                 position=(int(request["positionStart"]), int(request["positionEnd"])),
             )
         position = (int(request["positionStart"]), int(request["positionEnd"]))
@@ -104,17 +124,19 @@ def main() -> None:
                     prompt_token_count=len(prompt_ids),
                 ),
             )
-        else:
-            handle = wrapper.add_hook(
-                activation_name,
-                _make_prompt_range_direction_hook(
-                    vector=vector,
-                    scale=float(request["scale"]),
-                    position=position,
+            try:
+                steered, steered_logits = _run_condition(
+                    wrapper,
+                    prompt=str(run["prompt"]),
                     prompt_token_count=len(prompt_ids),
-                ),
-            )
-        try:
+                    target_token_id=int(request["targetTokenId"]),
+                    seed=int(request["seed"]),
+                    max_new_tokens=int(request["maxNewTokens"]),
+                    temperature=float(request["temperature"]),
+                )
+            finally:
+                handle.remove()
+        else:
             steered, steered_logits = _run_condition(
                 wrapper,
                 prompt=str(run["prompt"]),
@@ -123,9 +145,14 @@ def main() -> None:
                 seed=int(request["seed"]),
                 max_new_tokens=int(request["maxNewTokens"]),
                 temperature=float(request["temperature"]),
+                generation_hook=(
+                    inject_activation_name,
+                    _make_generation_direction_hook(
+                        vector=vector,
+                        scale=float(request["scale"]),
+                    ),
+                ),
             )
-        finally:
-            handle.remove()
 
         target_text = str(
             wrapper.tokenizer.decode(
@@ -137,7 +164,7 @@ def main() -> None:
             "mode": mode,
             **({"feature": feature} if feature is not None else {}),
             "vector": {
-                "algorithmVersion": "2.0",
+                "algorithmVersion": "3.0",
                 "method": (
                     "mlp_neuron_activation_scaling"
                     if mode == "neuron"
@@ -145,7 +172,19 @@ def main() -> None:
                 ),
                 "desiredPrompt": str(request["desiredPrompt"]),
                 "undesiredPrompt": str(request["undesiredPrompt"]),
-                "activationReduce": "selected_neuron" if mode == "neuron" else "last_token",
+                **(
+                    {
+                        "positivePrompts": positive_prompts,
+                        "negativePrompts": negative_prompts,
+                        "positiveCount": len(positive_prompts),
+                        "negativeCount": len(negative_prompts),
+                    }
+                    if mode != "neuron"
+                    else {}
+                ),
+                "activationReduce": (
+                    "selected_neuron" if mode == "neuron" else activation_reduce
+                ),
                 "rawNorm": round(
                     max(abs(float(feature["baselineActivation"])), 1e-12)
                     if feature
@@ -154,12 +193,14 @@ def main() -> None:
                 ),
                 "normalized": False,
                 "dimension": 1 if mode == "neuron" else int(vector.shape[-1]),
-                "sourceKey": activation_name,
+                "sourceKey": source_activation_name,
                 **(
                     {
                         "referenceTemplate": reference_template,
-                        "desiredTokenCount": desired_token_count,
-                        "undesiredTokenCount": undesired_token_count,
+                        "injectionKey": inject_activation_name,
+                        "injectionPhase": "generation",
+                        "desiredTokenCount": desired_token_counts[0],
+                        "undesiredTokenCount": undesired_token_counts[0],
                         "sourceActivationNorm": round(source_activation_norm, 10),
                         "appliedVectorNorm": round(abs(float(request["scale"])) * raw_norm, 10),
                         "relativeStrength": round(
@@ -172,7 +213,9 @@ def main() -> None:
                     else {}
                 ),
             },
-            "layer": int(request["layer"]),
+            "layer": inject_layer,
+            "sourceLayer": source_layer,
+            "injectLayer": inject_layer,
             "component": str(request["component"]),
             "scale": float(request["scale"]),
             "positionStart": position[0],
@@ -220,6 +263,8 @@ def _reference_vector(
     wrapper: HuggingFaceModelWrapper,
     prompt: str,
     activation_name: str,
+    *,
+    activation_reduce: str = "last_token",
 ) -> tuple[Any, int, str]:
     rendered_prompt, template = _render_reference_prompt(wrapper.tokenizer, prompt)
     tokens = wrapper.to_tokens(rendered_prompt, prepend_bos=False)
@@ -230,10 +275,64 @@ def _reference_vector(
     activation = cache[activation_name]
     if activation.ndim < 2:
         raise ValueError(f"Steering activation {activation_name} must include a model dimension.")
-    return activation[0, -1, :].float().detach(), len(_flat_token_ids(tokens)), template
+    return (
+        _reduce_reference_activation(activation, activation_reduce),
+        len(_flat_token_ids(tokens)),
+        template,
+    )
+
+
+def _reduce_reference_activation(activation: Any, activation_reduce: str) -> Any:
+    if activation_reduce == "last_token":
+        return activation[0, -1, :].float().detach()
+    if activation_reduce == "mean":
+        return activation[0, :, :].float().mean(dim=0).detach()
+    raise ValueError(f"Unsupported sample activation reduction: {activation_reduce}")
+
+
+def _reference_centroid(
+    wrapper: HuggingFaceModelWrapper,
+    prompts: list[str],
+    activation_name: str,
+    *,
+    activation_reduce: str,
+) -> tuple[Any, list[int], str]:
+    import torch
+
+    vectors = []
+    token_counts = []
+    reference_template = "plain"
+    for prompt in prompts:
+        vector, token_count, template = _reference_vector(
+            wrapper,
+            prompt,
+            activation_name,
+            activation_reduce=activation_reduce,
+        )
+        vectors.append(vector)
+        token_counts.append(token_count)
+        reference_template = template
+    return torch.stack(vectors, dim=0).mean(dim=0), token_counts, reference_template
+
+
+def _request_prompt_batch(
+    request: dict[str, Any], batch_key: str, legacy_key: str
+) -> list[str]:
+    prompts = request.get(batch_key)
+    if not isinstance(prompts, list) or not prompts:
+        prompts = [request[legacy_key]]
+    cleaned = [str(prompt).strip() for prompt in prompts]
+    if any(not prompt for prompt in cleaned):
+        raise ValueError(f"{batch_key} must contain non-empty prompts.")
+    return cleaned
 
 
 def _render_reference_prompt(tokenizer: Any, prompt: str) -> tuple[str, str]:
+    stripped = prompt.lstrip()
+    if stripped.startswith(
+        ("<|im_start|>", "<bos><start_of_turn>", "<|begin_of_text|><|start_header_id|>")
+    ):
+        return stripped, "preformatted_chat_template"
     apply_chat_template = getattr(tokenizer, "apply_chat_template", None)
     if callable(apply_chat_template):
         try:
@@ -288,6 +387,7 @@ def _run_condition(
     seed: int,
     max_new_tokens: int,
     temperature: float,
+    generation_hook: tuple[str, Any] | None = None,
 ) -> tuple[dict[str, Any], Any]:
     import torch
 
@@ -306,10 +406,19 @@ def _run_condition(
         "pad_token_id": wrapper.tokenizer.eos_token_id,
         "prepend_bos": False,
         "return_type": "tokens",
+        "use_cache": True,
     }
     if temperature > 0:
         generation_kwargs["temperature"] = temperature
-    generated = wrapper.generate(prompt, **generation_kwargs)
+    handle = None
+    if generation_hook is not None:
+        hook_name, hook_fn = generation_hook
+        handle = wrapper.add_hook(hook_name, hook_fn)
+    try:
+        generated = wrapper.generate(prompt, **generation_kwargs)
+    finally:
+        if handle is not None:
+            handle.remove()
     generated_ids = _flat_token_ids(generated)
     continuation_ids = generated_ids[prompt_token_count:]
     continuation_text = str(
@@ -363,30 +472,28 @@ def _make_neuron_hook(
     return hook
 
 
-def _make_prompt_range_direction_hook(
+def _make_generation_direction_hook(
     *,
     vector: Any,
     scale: float,
-    position: tuple[int, int],
-    prompt_token_count: int,
 ):
+    state = {"is_first_forward": True}
+
     def hook(activation: Any = None, **kwargs: Any) -> Any:
         value = kwargs.get("activation", activation)
         if value is None or not hasattr(value, "clone") or getattr(value, "ndim", 0) < 2:
             return value
-        sequence_length = int(value.shape[-2])
-        if sequence_length < prompt_token_count:
-            return value
-        start, end = position
-        bounded_end = min(end, sequence_length, prompt_token_count)
-        if start >= bounded_end:
+        # Match the source-grid runtime: leave the prompt prefill untouched, then
+        # add the direction on every cached autoregressive decoding forward.
+        if state["is_first_forward"]:
+            state["is_first_forward"] = False
             return value
         result = value.clone()
         direction = vector.to(device=value.device, dtype=value.dtype)
         if value.ndim >= 3:
-            result[:, start:bounded_end, :] += scale * direction
+            result[:, :, :] += scale * direction
         else:
-            result[start:bounded_end, :] += scale * direction
+            result[:, :] += scale * direction
         return result
     return hook
 
@@ -485,7 +592,7 @@ def _merge_intervention_result(
     method_label = (
         "MLP post-activation neuron scaling"
         if is_neuron
-        else "Raw contrastive activation steering"
+        else "Generation-time raw contrastive activation steering"
     )
     provenance["interventionTargetLogitDelta"] = {
         "label": "Target logit delta",
@@ -535,6 +642,9 @@ def _merge_intervention_result(
             "mode": comparison.get("mode", "direction"),
             **({"feature": comparison["feature"]} if "feature" in comparison else {}),
             "layer": comparison["layer"],
+            "sourceLayer": comparison.get("sourceLayer", comparison["layer"]),
+            "injectLayer": comparison.get("injectLayer", comparison["layer"]),
+            "injectionPhase": comparison["vector"].get("injectionPhase", "prompt"),
             "component": comparison["component"],
             "scale": comparison["scale"],
             "positionStart": comparison["positionStart"],

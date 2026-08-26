@@ -1230,6 +1230,21 @@ def test_intervention_preflight_checks_layer_range_target_and_references(tmp_pat
     assert ready.json()["canSubmit"] is True
     assert ready.json()["targetTokenText"] == "token-42"
 
+    split_layers = client.post(
+        "/api/intervention/preflight",
+        json={**request, "sourceLayer": 0, "injectLayer": 1},
+    )
+    assert split_layers.status_code == 200
+    assert split_layers.json()["layerAvailable"] is True
+
+    invalid_inject_layer = client.post(
+        "/api/intervention/preflight",
+        json={**request, "sourceLayer": 0, "injectLayer": 9},
+    ).json()
+    assert invalid_inject_layer["canSubmit"] is False
+    assert invalid_inject_layer["layerAvailable"] is False
+    assert "inject layer L9" in invalid_inject_layer["reason"]
+
     blocked = client.post(
         "/api/intervention/preflight",
         json={
@@ -1243,6 +1258,34 @@ def test_intervention_preflight_checks_layer_range_target_and_references(tmp_pat
     assert blocked["layerAvailable"] is False
     assert blocked["positionRangeValid"] is False
     assert blocked["referencesDiffer"] is False
+
+
+def test_intervention_preflight_accepts_prompt_batches_and_activation_reduction(tmp_path: Path) -> None:
+    client = TestClient(
+        create_app(
+            tmp_path,
+            intervention_tokenizer_loader=lambda _model: _PatchingTokenizer(),
+        )
+    )
+    response = client.post(
+        "/api/intervention/preflight",
+        json={
+            "modelName": "sshleifer/tiny-gpt2",
+            "promptTokenCount": 2,
+            "availableLayers": [0, 1],
+            "layer": 1,
+            "component": "resid_post",
+            "positionStart": 0,
+            "positionEnd": 2,
+            "targetTokenId": 42,
+            "positivePrompts": ["positive one", "positive two"],
+            "negativePrompts": ["negative one", "negative two"],
+            "activationReduce": "mean",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["canSubmit"] is True
 
 
 def test_neuron_intervention_preflight_requires_a_real_cached_neuron(tmp_path: Path) -> None:

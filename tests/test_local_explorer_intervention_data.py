@@ -42,11 +42,14 @@ def test_merge_intervention_result_preserves_causal_and_proxy_provenance() -> No
     }
     comparison = {
         "vector": {
-            "algorithmVersion": "2.0",
+            "algorithmVersion": "3.0",
             "method": "contrastive_mean_difference",
             "sourceKey": "layer_1.resid_post",
+            "injectionPhase": "generation",
         },
         "layer": 1,
+        "sourceLayer": 0,
+        "injectLayer": 1,
         "component": "resid_post",
         "scale": 1.5,
         "positionStart": 2,
@@ -73,12 +76,15 @@ def test_merge_intervention_result_preserves_causal_and_proxy_provenance() -> No
         "runId": "source-run",
         "sampleId": "sample-a",
     }
-    assert derived["metadata"]["interventionJobs"][0]["jobVersion"] == "2.0"
+    assert derived["metadata"]["interventionJobs"][0]["jobVersion"] == "3.0"
+    assert derived["metadata"]["interventionJobs"][0]["sourceLayer"] == 0
+    assert derived["metadata"]["interventionJobs"][0]["injectLayer"] == 1
+    assert derived["metadata"]["interventionJobs"][0]["injectionPhase"] == "generation"
     assert derived["metricProvenance"]["interventionTargetLogitDelta"]["kind"] == "causal"
     assert derived["metricProvenance"]["interventionLexicalRiskDelta"]["kind"] == "derived_proxy"
     assert derived["metricProvenance"]["interventionDirectionProjectionDelta"] == {
         "label": "Applied direction projection",
-        "method": "Raw contrastive activation steering",
+        "method": "Generation-time raw contrastive activation steering",
         "semantics": "Signed L2 magnitude injected along the desired-minus-undesired direction.",
         "normalization": "none; scale multiplied by the raw contrast-vector norm",
         "kind": "causal",
@@ -122,27 +128,29 @@ def test_logit_delta_summary_detects_full_vocabulary_effect() -> None:
     }
 
 
-def test_direction_hook_applies_raw_contrast_to_prompt_prefill_only() -> None:
+def test_direction_hook_skips_prefill_then_applies_raw_contrast_during_generation() -> None:
     torch = pytest.importorskip("torch")
     desired = torch.tensor([4.0, 8.0])
     undesired = torch.tensor([1.0, 2.0])
     vector, raw_norm = MODULE._contrastive_direction(desired, undesired)
-    hook = MODULE._make_prompt_range_direction_hook(
+    hook = MODULE._make_generation_direction_hook(
         vector=vector,
         scale=1.0,
-        position=(1, 3),
-        prompt_token_count=3,
     )
 
     prefill = torch.zeros((1, 3, 2))
     incremental = torch.zeros((1, 1, 2))
 
     assert raw_norm == pytest.approx(6.7082039)
+    assert torch.equal(hook(activation=prefill), prefill)
     assert torch.equal(
-        hook(activation=prefill),
-        torch.tensor([[[0.0, 0.0], [3.0, 6.0], [3.0, 6.0]]]),
+        hook(activation=incremental),
+        torch.tensor([[[3.0, 6.0]]]),
     )
-    assert torch.equal(hook(activation=incremental), incremental)
+    assert torch.equal(
+        hook(activation=incremental),
+        torch.tensor([[[3.0, 6.0]]]),
+    )
 
 
 def test_reference_prompt_uses_native_chat_template_when_available() -> None:
@@ -157,6 +165,32 @@ def test_reference_prompt_uses_native_chat_template_when_available() -> None:
 
     assert rendered == "<user>Use structure.</user><assistant>"
     assert method == "tokenizer.apply_chat_template"
+
+
+def test_reference_prompt_preserves_preformatted_chat_template() -> None:
+    class Tokenizer:
+        def apply_chat_template(self, *_args, **_kwargs):
+            raise AssertionError("preformatted prompts must not be wrapped again")
+
+    prompt = "<|im_start|>user\nQuestion<|im_end|>\n<|im_start|>assistant\n"
+    rendered, method = MODULE._render_reference_prompt(Tokenizer(), prompt)
+
+    assert rendered == prompt
+    assert method == "preformatted_chat_template"
+
+
+def test_reference_activation_can_use_last_token_or_token_average() -> None:
+    torch = pytest.importorskip("torch")
+    activation = torch.tensor([[[1.0, 3.0], [5.0, 7.0]]])
+
+    assert torch.equal(
+        MODULE._reduce_reference_activation(activation, "last_token"),
+        torch.tensor([5.0, 7.0]),
+    )
+    assert torch.equal(
+        MODULE._reduce_reference_activation(activation, "mean"),
+        torch.tensor([3.0, 5.0]),
+    )
 
 
 def test_first_divergence_index_reports_change_or_matching_prefix() -> None:
