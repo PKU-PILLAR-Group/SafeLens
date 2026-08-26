@@ -54,6 +54,12 @@ models = [
   "torch>=2",
   "transformers>=5.8"
 ]
+sae = [
+  "huggingface-hub>=0.24",
+  "sae-lens>=6.49,<7",
+  "torch>=2",
+  "transformers>=5.8"
+]
 nla = [
   "huggingface-hub>=0.24",
   "safetensors>=0.4",

@@ -10,7 +10,7 @@ interface InterventionComparisonProps {
 export function InterventionComparison({ experiment, onPin }: InterventionComparisonProps) {
   const originalKinds = tokenKinds(experiment, "original");
   const steeredKinds = tokenKinds(experiment, "steered");
-  const isNeuron = experiment.mode === "neuron";
+  const isFeature = experiment.mode === "neuron" || experiment.mode === "sae_feature";
   const layerLabel = experiment.sourceLayer !== undefined || experiment.injectLayer !== undefined
     ? `source L${experiment.sourceLayer ?? experiment.layer} → inject L${experiment.injectLayer ?? experiment.layer}`
     : `L${experiment.layer}`;
@@ -19,10 +19,25 @@ export function InterventionComparison({ experiment, onPin }: InterventionCompar
       <div className="surface-header intervention-comparison-header">
         <div>
           <h3>Original vs intervention</h3>
-          <p>{isNeuron && experiment.feature ? `${experiment.feature.id} · ${experiment.feature.operation}` : `${layerLabel} · ${experiment.component} · generation-time`} · factor {experiment.scale.toFixed(1)}</p>
+          <p>{isFeature && experiment.feature ? `${experiment.feature.id} · ${experiment.feature.operation}` : `${layerLabel} · ${experiment.component} · generation-time`}{experiment.mode === "sae_feature" && experiment.feature?.operation === "ablate" ? "" : ` · factor ${experiment.scale.toFixed(1)}`} · T{experiment.positionStart}–T{experiment.positionEnd - 1}</p>
         </div>
         <button className="icon-button" aria-label="Pin intervention comparison" title="Pin comparison" onClick={onPin}><Pin size={15} /></button>
       </div>
+
+      {experiment.mode === "sae_feature" && experiment.feature && (
+        <div className="intervention-concept-note">
+          <span>Concept label</span>
+          <strong>{experiment.feature.conceptLabel ?? experiment.feature.label}</strong>
+          <small>
+            {experiment.feature.conceptSource === "neuronpedia"
+              ? "Neuronpedia explanation metadata; the checkpoint itself stores only the feature index."
+              : "No canonical explanation is bundled with this SAE checkpoint."}
+            {experiment.feature.conceptUrl && (
+              <> <a href={featureCardUrl(experiment.feature.conceptUrl)} target="_blank" rel="noreferrer">Open feature card</a></>
+            )}
+          </small>
+        </div>
+      )}
 
       <div className="intervention-delta-grid" aria-label="Intervention metric changes">
         <Metric label="Diagnostic logit delta" value={signed(experiment.deltas.targetLogit)} kind="causal" />
@@ -38,8 +53,8 @@ export function InterventionComparison({ experiment, onPin }: InterventionCompar
       </div>
 
       <div className="intervention-provenance-strip">
-        {isNeuron ? <Activity size={15} /> : <GitCompareArrows size={15} />}
-        <span><b>{experiment.vector.method}</b>{isNeuron ? `peak activation ${experiment.vector.rawNorm.toFixed(4)}` : `${experiment.vector.dimension}d contrast vector · norm ${experiment.vector.rawNorm.toFixed(4)}`}</span>
+        {isFeature ? <Activity size={15} /> : <GitCompareArrows size={15} />}
+        <span><b>{experiment.vector.method}</b>{isFeature ? `feature reference ${experiment.vector.rawNorm.toFixed(4)}` : `${experiment.vector.dimension}d contrast vector · norm ${experiment.vector.rawNorm.toFixed(4)}`}</span>
         <span><b>Objective</b>{visible(experiment.targetTokenText)} ({experiment.targetTokenId})</span>
         <span><b>Generation</b>seed {experiment.seed} · {experiment.maxNewTokens} tokens · temperature {experiment.temperature}</span>
       </div>
@@ -93,6 +108,10 @@ function signed(value: number) {
     ? value.toExponential(2)
     : value.toFixed(4);
   return `${value > 0 ? "+" : ""}${magnitude}`;
+}
+
+function featureCardUrl(value: string | undefined) {
+  return value?.replace("/api/feature/", "/") ?? "";
 }
 
 function visible(value: string) {

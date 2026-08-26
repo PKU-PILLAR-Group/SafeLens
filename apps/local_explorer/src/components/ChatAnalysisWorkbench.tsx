@@ -20,6 +20,8 @@ import {
 import {
   fetchInterventionPreflight,
   fetchPatchingPreflight,
+  fetchSAEFeatureInfo,
+  fetchSAEProfiles,
   type ActivationComponent,
   type AttributionJob,
   type AttributionRunInput,
@@ -31,12 +33,15 @@ import {
   type PatchingComponent,
   type PatchingJob,
   type PatchingPreflight,
-  type RemoteRunSummary
+  type RemoteRunSummary,
+  type SAEFeatureInfo,
+  type SAEProfile
 } from "../api/explorerClient";
 import { useAttributionRunner } from "../state/useAttributionRunner";
 import { useInterventionRunner } from "../state/useInterventionRunner";
 import { usePatchingRunner } from "../state/usePatchingRunner";
 import { HYBRID_STEERING_BATCHES } from "../state/steeringHybridPresets";
+import { pairedSteeringPreset, type SteeringPreset } from "../state/steeringPresets";
 import type {
   AttributionMethod,
   ExplorerRun,
@@ -47,6 +52,7 @@ import type {
 import { generatedResponseText } from "../generatedResponse";
 import { ChatAttentionWorkbench } from "./ChatAttentionWorkbench";
 import { ChatExplanationWorkbench } from "./ChatExplanationWorkbench";
+import { PresetSuggestTextarea } from "./PresetSuggestTextarea";
 import { ResponseTokenPicker } from "./ResponseTokenPicker";
 
 interface ChatAnalysisWorkbenchProps {
@@ -315,64 +321,116 @@ function FeatureInterventionWorkbench({
   savedRun,
   onRunReady
 }: Omit<ChatAnalysisWorkbenchProps, "mode">) {
-  const prior = savedRun?.intervention?.mode === "neuron" ? savedRun.intervention : undefined;
-  const featureLayers = useMemo(
-    () => [...new Set(run.mlpNeurons.map((item) => item.layer))].sort((a, b) => a - b),
-    [run.mlpNeurons]
+  const prior = savedRun?.intervention?.mode === "sae_feature"
+    ? savedRun.intervention
+    : run.intervention?.mode === "sae_feature"
+      ? run.intervention
+      : undefined;
+  const [profiles, setProfiles] = useState<SAEProfile[]>([]);
+  const [profilesReady, setProfilesReady] = useState(false);
+  const [profileError, setProfileError] = useState<string | null>(null);
+  const [profileId, setProfileId] = useState("");
+  const [featureIndex, setFeatureIndex] = useState(prior?.feature?.featureIndex ?? 0);
+  const [operation, setOperation] = useState<"add" | "ablate">(
+    prior?.feature?.operation === "ablate" ? "ablate" : "add"
   );
-  const [layer, setLayer] = useState(prior?.feature?.layer ?? featureLayers[featureLayers.length - 1] ?? run.layers[run.layers.length - 1] ?? 0);
-  const neurons = useMemo(
-    () => run.mlpNeurons.filter((item) => item.layer === layer).sort((a, b) => b.maxAbsoluteActivation - a.maxAbsoluteActivation),
-    [layer, run.mlpNeurons]
-  );
-  const [neuron, setNeuron] = useState(prior?.feature?.neuron ?? neurons[0]?.neuron ?? 0);
-  const [scale, setScale] = useState(prior?.scale ?? 0);
+  const [scale, setScale] = useState(prior?.scale ?? 5);
   const [positionStart, setPositionStart] = useState(prior?.positionStart ?? 0);
   const [positionEnd, setPositionEnd] = useState(prior?.positionEnd ?? run.tokens.length);
   const targetOptions = useMemo(() => steeringTargetOptions(run), [run]);
   const [targetTokenId, setTargetTokenId] = useState(prior?.targetTokenId ?? targetOptions[0]?.tokenId ?? 0);
   const [preflight, setPreflight] = useState<InterventionPreflight | null>(null);
   const [preflightError, setPreflightError] = useState<string | null>(null);
-  const [result, setResult] = useState<ExplorerRun | null>(savedRun?.intervention?.mode === "neuron" ? savedRun : null);
+  const [featureInfo, setFeatureInfo] = useState<SAEFeatureInfo | null>(null);
+  const [result, setResult] = useState<ExplorerRun | null>(
+    savedRun?.intervention?.mode === "sae_feature" ? savedRun : null
+  );
   const handleReady = useCallback((derived: ExplorerRun, job: InterventionJob) => {
     setResult(derived);
     onRunReady(derived, job);
   }, [onRunReady]);
   const runner = useInterventionRunner(handleReady);
   const running = runner.submitting || runner.job?.status === "idle" || runner.job?.status === "loading";
-  const selectedNeuron = neurons.find((item) => item.neuron === neuron) ?? neurons[0];
+  const selectedProfile = profiles.find((profile) => profile.id === profileId)
+    ?? profiles.find((profile) => profile.layer === 12)
+    ?? profiles[0];
 
   useEffect(() => {
-    if (!neurons.some((item) => item.neuron === neuron)) setNeuron(neurons[0]?.neuron ?? 0);
-  }, [neuron, neurons]);
+    const controller = new AbortController();
+    setProfiles([]);
+    setProfilesReady(false);
+    setProfileError(null);
+    void fetchSAEProfiles(run.modelName, controller.signal).then((next) => {
+      setProfiles(next);
+      const priorProfile = next.find((profile) => profile.saeId === prior?.feature?.saeId);
+      const defaultProfile = priorProfile ?? next.find((profile) => profile.layer === 12) ?? next[0];
+      setProfileId(defaultProfile?.id ?? "");
+      setProfilesReady(true);
+    }).catch((error) => {
+      if (!controller.signal.aborted) {
+        setProfileError(error instanceof Error ? error.message : "SAE profiles failed to load.");
+        setProfilesReady(true);
+      }
+    });
+    return () => controller.abort();
+  }, [prior?.feature?.saeId, run.modelName]);
+
   useEffect(() => {
-    if (!featureLayers.includes(layer) && featureLayers.length) setLayer(featureLayers[featureLayers.length - 1]);
-  }, [featureLayers, layer]);
+    if (selectedProfile && featureIndex >= selectedProfile.width) setFeatureIndex(0);
+  }, [featureIndex, selectedProfile]);
+
   useEffect(() => {
+    if (!selectedProfile) {
+      setPreflight(null);
+      setFeatureInfo(null);
+      return;
+    }
     const controller = new AbortController();
     setPreflight(null);
     setPreflightError(null);
     const timer = window.setTimeout(() => {
       void fetchInterventionPreflight({
-        mode: "neuron",
+        mode: "sae_feature",
         modelName: run.modelName,
         promptTokenCount: run.tokens.length,
         availableLayers: run.layers,
-        layer,
-        component: "mlp_out",
+        layer: selectedProfile.layer,
+        component: selectedProfile.component,
         positionStart,
         positionEnd,
         targetTokenId,
-        neuron,
-        availableNeurons: neurons.map((item) => item.neuron),
-        desiredPrompt: "Enhance selected MLP neuron",
-        undesiredPrompt: "Suppress selected MLP neuron"
+        saeRelease: selectedProfile.release,
+        saeId: selectedProfile.saeId,
+        featureIndex,
+        saeOperation: operation,
+        desiredPrompt: "Enhance selected SAE feature",
+        undesiredPrompt: "Suppress selected SAE feature"
       }, controller.signal).then(setPreflight).catch((error) => {
-        if (!controller.signal.aborted) setPreflightError(error instanceof Error ? error.message : "Neuron preflight failed.");
+        if (!controller.signal.aborted) setPreflightError(error instanceof Error ? error.message : "SAE preflight failed.");
       });
     }, 180);
     return () => { window.clearTimeout(timer); controller.abort(); };
-  }, [layer, neuron, neurons, positionEnd, positionStart, run.layers, run.modelName, run.tokens.length, targetTokenId]);
+  }, [featureIndex, operation, positionEnd, positionStart, run.layers, run.modelName, run.tokens.length, selectedProfile, targetTokenId]);
+
+  useEffect(() => {
+    if (!selectedProfile) {
+      setFeatureInfo(null);
+      return;
+    }
+    const controller = new AbortController();
+    setFeatureInfo(null);
+    const timer = window.setTimeout(() => {
+      void fetchSAEFeatureInfo(
+        run.modelName,
+        selectedProfile.layer,
+        featureIndex,
+        controller.signal
+      ).then(setFeatureInfo).catch(() => {
+        if (!controller.signal.aborted) setFeatureInfo(null);
+      });
+    }, 180);
+    return () => { window.clearTimeout(timer); controller.abort(); };
+  }, [featureIndex, run.modelName, selectedProfile]);
 
   function setRange(start: number, end: number) {
     const nextStart = Math.max(0, Math.min(run.tokens.length - 1, start));
@@ -381,53 +439,75 @@ function FeatureInterventionWorkbench({
   }
 
   function submit() {
-    if (!preflight?.canSubmit || running || !selectedNeuron) return;
+    if (!preflight?.canSubmit || running || !selectedProfile) return;
     setResult(null);
     const input: InterventionRunInput = {
       run,
-      mode: "neuron",
-      desiredPrompt: "Enhance selected MLP neuron",
-      undesiredPrompt: "Suppress selected MLP neuron",
-      layer,
-      component: "mlp_out",
-      neuron,
+      mode: "sae_feature",
+      desiredPrompt: "Enhance selected SAE feature",
+      undesiredPrompt: "Suppress selected SAE feature",
+      layer: selectedProfile.layer,
+      component: selectedProfile.component,
+      saeRelease: selectedProfile.release,
+      saeId: selectedProfile.saeId,
+      featureIndex,
+      saeOperation: operation,
       scale,
       positionStart,
       positionEnd,
       targetTokenId,
       seed: 0,
-      maxNewTokens: 16,
+      maxNewTokens: 32,
       temperature: 0
     };
     void runner.submit(input);
   }
 
-  if (featureLayers.length === 0) {
+  if (profilesReady && profiles.length === 0) {
     return (
-      <section className="chat-analysis-workbench chat-feature-workbench" aria-label="MLP neuron intervention workbench">
-        <header className="chat-workbench-heading"><span><Activity size={17} /></span><div><h2>Neuron intervention</h2><p>This run does not expose MLP neuron activations.</p></div></header>
+      <section className="chat-analysis-workbench chat-feature-workbench" aria-label="SAE feature intervention workbench">
+        <header className="chat-workbench-heading">
+          <span><Activity size={17} /></span>
+          <div><h2>Gemma Scope SAE</h2><p>No compatible SAE for {run.modelName}</p></div>
+        </header>
+        <p className="chat-sae-empty">Select <b>google/gemma-3-270m-it</b> for a new chat run.</p>
       </section>
     );
   }
   return (
-    <section className="chat-analysis-workbench chat-feature-workbench" aria-label="MLP neuron intervention workbench">
+    <section className="chat-analysis-workbench chat-feature-workbench" aria-label="SAE feature intervention workbench">
       <header className="chat-workbench-heading">
         <span><Activity size={17} /></span>
-        <div><h2>Neuron intervention</h2><p>Scale one real MLP post-activation and compare the model output</p></div>
+        <div><h2>Gemma Scope SAE</h2><p>Sparse feature intervention · residual stream</p></div>
         <StatusDot ready={Boolean(preflight?.canSubmit)} pending={!preflight && !preflightError} />
       </header>
       <div className="chat-feature-controls">
-        <label><span>Layer</span><select aria-label="Neuron intervention layer" value={layer} disabled={running} onChange={(event) => setLayer(Number(event.target.value))}>{featureLayers.map((item) => <option key={item} value={item}>L{item}</option>)}</select></label>
-        <label><span>MLP neuron</span><select aria-label="MLP neuron" value={neuron} disabled={running} onChange={(event) => setNeuron(Number(event.target.value))}>{neurons.map((item) => <option key={item.neuron} value={item.neuron}>N{item.neuron} · {item.label}</option>)}</select></label>
-        <label><span>Tracked output token</span><select aria-label="Neuron tracked output token" value={targetTokenId} disabled={running} onChange={(event) => setTargetTokenId(Number(event.target.value))}>{targetOptions.map((option) => <option key={option.tokenId} value={option.tokenId}>{visibleToken(option.tokenText)} · #{option.tokenId}</option>)}</select></label>
-        <label className="chat-feature-strength"><span>Activation factor <b>{scale.toFixed(1)}</b></span><input aria-label="Neuron activation factor" type="range" min={-2} max={4} step={0.1} value={scale} disabled={running} onChange={(event) => setScale(Number(event.target.value))} /></label>
+        <label className="chat-sae-profile"><span>SAE checkpoint</span><select aria-label="SAE checkpoint" value={selectedProfile?.id ?? ""} disabled={running || profiles.length === 0} onChange={(event) => setProfileId(event.target.value)}>{profiles.map((profile) => <option key={profile.id} value={profile.id}>L{profile.layer} · 16k · L0 small</option>)}</select></label>
+        <label><span>Feature</span><input aria-label="SAE feature index" type="number" min={0} max={(selectedProfile?.width ?? 1) - 1} value={featureIndex} disabled={running || !selectedProfile} onChange={(event) => setFeatureIndex(Math.max(0, Number(event.target.value) || 0))} /></label>
+        <label><span>Tracked output token</span><select aria-label="SAE tracked output token" value={targetTokenId} disabled={running} onChange={(event) => setTargetTokenId(Number(event.target.value))}>{targetOptions.map((option) => <option key={option.tokenId} value={option.tokenId}>{visibleToken(option.tokenText)} · #{option.tokenId}</option>)}</select></label>
+        <label className="chat-feature-strength"><span>Feature delta <b>{operation === "ablate" ? "zero" : signed(scale)}</b></span><input aria-label="SAE feature delta" type="range" min={-20} max={20} step={0.5} value={scale} disabled={running || operation === "ablate"} onChange={(event) => setScale(Number(event.target.value))} /></label>
       </div>
-      <div className="chat-feature-operations" role="group" aria-label="Neuron intervention operation">
-        {[{ label: "Suppress", value: 0 }, { label: "Reduce", value: 0.25 }, { label: "Enhance", value: 2 }, { label: "Invert", value: -1 }].map((item) => <button key={item.label} type="button" className={Math.abs(scale - item.value) < 1e-6 ? "active" : ""} aria-pressed={Math.abs(scale - item.value) < 1e-6} disabled={running} onClick={() => setScale(item.value)}>{item.label}</button>)}
+      <div className="chat-feature-operations" role="group" aria-label="SAE feature operation">
+        <button type="button" className={operation === "add" ? "active" : ""} aria-pressed={operation === "add"} disabled={running} onClick={() => setOperation("add")}>Add activation</button>
+        <button type="button" className={operation === "ablate" ? "active" : ""} aria-pressed={operation === "ablate"} disabled={running} onClick={() => setOperation("ablate")}>Ablate feature</button>
       </div>
-      <div className="chat-token-range"><header><span>Apply to</span><div><button className={positionStart === 0 && positionEnd === run.tokens.length ? "active" : ""} aria-pressed={positionStart === 0 && positionEnd === run.tokens.length} disabled={running} onClick={() => setRange(0, run.tokens.length)}>Entire input</button><button className={positionStart === run.tokens.length - 1 && positionEnd === run.tokens.length ? "active" : ""} aria-pressed={positionStart === run.tokens.length - 1 && positionEnd === run.tokens.length} disabled={running} onClick={() => setRange(run.tokens.length - 1, run.tokens.length)}>Last token</button></div><small>T{positionStart}–T{positionEnd - 1}</small></header><div aria-label="Neuron intervention token range">{run.tokens.map((token) => <button key={token.index} className={token.index >= positionStart && token.index < positionEnd ? "active" : ""} aria-pressed={token.index >= positionStart && token.index < positionEnd} disabled={running} onClick={() => setRange(token.index, token.index + 1)}>{visibleToken(token.text)}</button>)}</div></div>
-      <div className="chat-feature-selected"><strong>{selectedNeuron?.id}</strong><span>{selectedNeuron?.label}</span><small>peak activation {selectedNeuron?.maxAbsoluteActivation.toFixed(4)} · factor {scale.toFixed(1)}</small></div>
-      <WorkbenchActions running={running} disabled={!preflight?.canSubmit || !selectedNeuron} runLabel="Run neuron intervention" status={runner.error?.message ?? preflightError ?? preflight?.reason} progress={runner.job?.progress} onRun={submit} onCancel={() => void runner.cancel()} onReset={runner.reset} failed={Boolean(runner.error)} />
+      <div className="chat-token-range"><header><span>Apply to</span><div><button className={positionStart === 0 && positionEnd === run.tokens.length ? "active" : ""} aria-pressed={positionStart === 0 && positionEnd === run.tokens.length} disabled={running} onClick={() => setRange(0, run.tokens.length)}>Entire input</button><button className={positionStart === run.tokens.length - 1 && positionEnd === run.tokens.length ? "active" : ""} aria-pressed={positionStart === run.tokens.length - 1 && positionEnd === run.tokens.length} disabled={running} onClick={() => setRange(run.tokens.length - 1, run.tokens.length)}>Last token</button></div><small>T{positionStart}–T{positionEnd - 1}</small></header><div aria-label="SAE intervention token range">{run.tokens.map((token) => <button key={token.index} className={token.index >= positionStart && token.index < positionEnd ? "active" : ""} aria-pressed={token.index >= positionStart && token.index < positionEnd} disabled={running} onClick={() => setRange(token.index, token.index + 1)}>{visibleToken(token.text)}</button>)}</div></div>
+      <div className="chat-feature-selected">
+        <div className="chat-feature-selected-id"><strong>F{featureIndex}</strong><span>L{selectedProfile?.layer ?? "..."} · resid_post</span><small>{selectedProfile?.saeId ?? "Loading checkpoint"}</small></div>
+        <div className="chat-feature-concept">
+          <span>Concept label</span>
+          <strong>{featureInfo?.label ?? prior?.feature?.conceptLabel ?? "Loading explanation..."}</strong>
+          <small>
+            {featureInfo?.source === "neuronpedia" || prior?.feature?.conceptSource === "neuronpedia"
+              ? "Neuronpedia explanation"
+              : "No canonical label is bundled with the SAE checkpoint"}
+            {(featureInfo?.url ?? prior?.feature?.conceptUrl) && (
+              <> · <a href={featureCardUrl(featureInfo?.url ?? prior?.feature?.conceptUrl)} target="_blank" rel="noreferrer">Open feature card</a></>
+            )}
+          </small>
+        </div>
+      </div>
+      <WorkbenchActions running={running} disabled={!preflight?.canSubmit || !selectedProfile} runLabel="Run SAE intervention" status={runner.error?.message ?? profileError ?? preflightError ?? preflight?.reason} progress={runner.job?.progress} onRun={submit} onCancel={() => void runner.cancel()} onReset={runner.reset} failed={Boolean(runner.error)} />
       {result?.intervention && <SteeringResult experiment={result.intervention} />}
     </section>
   );
@@ -442,6 +522,7 @@ const STEERING_BATCHES = HYBRID_STEERING_BATCHES;
 function SteeringWorkbench({
   run,
   savedRun,
+  suggestionQuery,
   onRunReady
 }: Omit<ChatAnalysisWorkbenchProps, "mode">) {
   const prior = savedRun?.intervention ?? run.intervention;
@@ -540,6 +621,28 @@ function SteeringWorkbench({
     else setNegativePrompts(prompts);
   }
 
+  function replacePrimarySample(direction: SteeringSampleDirection, text: string) {
+    const update = (prompts: string[]) => prompts.length > 0
+      ? [text, ...prompts.slice(1)]
+      : [text];
+    setConcept("Custom");
+    if (direction === "positive") {
+      setPositivePreset("Custom samples");
+      setPositivePrompts(update);
+    } else {
+      setNegativePreset("Custom samples");
+      setNegativePrompts(update);
+    }
+  }
+
+  function applyPairedPreset(preset: SteeringPreset) {
+    replacePrimarySample(preset.direction === "toward" ? "positive" : "negative", preset.text);
+    const paired = pairedSteeringPreset(preset);
+    if (paired) {
+      replacePrimarySample(paired.direction === "toward" ? "positive" : "negative", paired.text);
+    }
+  }
+
   function submit() {
     if (!canRun) return;
     setResult(null);
@@ -586,8 +689,8 @@ function SteeringWorkbench({
         <>
           <div className="chat-steering-expanded-top">{conceptControl}{advancedToggle}</div>
           <div className="chat-steering-references">
-            <SteeringSamples direction="positive" prompts={positivePrompts} preset={positivePreset} running={running} onPreset={selectBatch} onChange={setPositivePrompts} />
-            <SteeringSamples direction="negative" prompts={negativePrompts} preset={negativePreset} running={running} onPreset={selectBatch} onChange={setNegativePrompts} />
+            <SteeringSamples direction="positive" prompts={positivePrompts} preset={positivePreset} running={running} suggestionQuery={suggestionQuery} onPreset={selectBatch} onSelectPreset={applyPairedPreset} onChange={setPositivePrompts} />
+            <SteeringSamples direction="negative" prompts={negativePrompts} preset={negativePreset} running={running} suggestionQuery={suggestionQuery} onPreset={selectBatch} onSelectPreset={applyPairedPreset} onChange={setNegativePrompts} />
           </div>
           <div className="chat-steering-controls">
             <label>
@@ -654,14 +757,18 @@ function SteeringSamples({
   prompts,
   preset,
   running,
+  suggestionQuery,
   onPreset,
+  onSelectPreset,
   onChange
 }: {
   direction: SteeringSampleDirection;
   prompts: string[];
   preset: string;
   running: boolean;
+  suggestionQuery?: string;
   onPreset: (direction: SteeringSampleDirection, value: string) => void;
+  onSelectPreset: (preset: SteeringPreset) => void;
   onChange: (prompts: string[]) => void;
 }) {
   const title = direction === "positive" ? "Steer toward" : "Steer away from";
@@ -672,7 +779,7 @@ function SteeringSamples({
   };
   return (
     <section className="chat-steering-samples">
-      <header><strong>{title}</strong><span>{prompts.length}</span></header>
+      <header><strong>{title} samples</strong><span>{prompts.length}</span></header>
       <label className="chat-steering-preset">
         <span>Sample preset</span>
         <select aria-label={`${title} sample preset`} value={preset} disabled={running} onChange={(event) => onPreset(direction, event.target.value)}>
@@ -681,7 +788,19 @@ function SteeringSamples({
         </select>
       </label>
       <div className="chat-steering-sample-list">
-        {prompts.map((prompt, index) => (
+        <PresetSuggestTextarea
+          ariaLabel={direction === "positive" ? "Steering desired behavior" : "Steering undesired behavior"}
+          label={title}
+          direction={direction === "positive" ? "toward" : "away"}
+          contextQuery={suggestionQuery}
+          value={prompts[0] ?? ""}
+          disabled={running}
+          onChange={(value) => updatePrompt(0, value)}
+          onSelectPreset={onSelectPreset}
+        />
+        {prompts.slice(1).map((prompt, offset) => {
+          const index = offset + 1;
+          return (
           <label key={index}>
             <span>Sample {index + 1}</span>
             <div>
@@ -689,7 +808,8 @@ function SteeringSamples({
               <button type="button" aria-label={`Remove ${title.toLowerCase()} sample ${index + 1}`} disabled={running || prompts.length === 1} onClick={() => removePrompt(index)}><Trash2 size={15} /></button>
             </div>
           </label>
-        ))}
+          );
+        })}
       </div>
       <button type="button" className="chat-steering-add-sample" disabled={running || prompts.length >= 64} onClick={() => onChange([...prompts, ""])}><Plus size={15} />Add sample</button>
     </section>
@@ -846,7 +966,8 @@ function StatusDot({ ready, pending }: { ready: boolean; pending: boolean }) {
 }
 
 function SteeringResult({ experiment }: { experiment: InterventionExperiment }) {
-  const isFeature = experiment.mode === "neuron";
+  const isFeature = experiment.mode === "neuron" || experiment.mode === "sae_feature";
+  const isSAE = experiment.mode === "sae_feature";
   const isLegacyDirection = !isFeature && experiment.vector.normalized;
   const layerLabel = experiment.sourceLayer !== undefined || experiment.injectLayer !== undefined
     ? `source L${experiment.sourceLayer ?? experiment.layer} → inject L${experiment.injectLayer ?? experiment.layer}`
@@ -857,9 +978,29 @@ function SteeringResult({ experiment }: { experiment: InterventionExperiment }) 
   return (
     <section className="chat-steering-result" aria-label="Steering comparison">
       <header>
-        <div>{isFeature ? <Activity size={16} /> : <GitCompareArrows size={16} />}<strong>{isFeature ? "Neuron intervention comparison" : "Steering generation comparison"}</strong></div>
-        <span>{isFeature && experiment.feature ? `${experiment.feature.id} · ${experiment.feature.operation}` : `${layerLabel} · ${experiment.component}`} · factor {signed(experiment.scale)}</span>
+        <div>{isFeature ? <Activity size={16} /> : <GitCompareArrows size={16} />}<strong>{isSAE ? "SAE feature comparison" : isFeature ? "Neuron intervention comparison" : "Steering generation comparison"}</strong></div>
+        <span>{isFeature && experiment.feature ? `${experiment.feature.id} · ${experiment.feature.operation}` : `${layerLabel} · ${experiment.component}`}{isSAE && experiment.feature?.operation === "ablate" ? "" : ` · factor ${signed(experiment.scale)}`}</span>
       </header>
+      {isSAE && experiment.feature && (
+        <div className="chat-sae-concept-result">
+          <span>Concept label</span>
+          <strong>{experiment.feature.conceptLabel ?? experiment.feature.label}</strong>
+          <small>
+            {experiment.feature.conceptSource === "neuronpedia"
+              ? "External explanation metadata; the SAE weights only contain the numeric feature index."
+              : "No canonical explanation was bundled; this is an index-only feature."}
+            {experiment.feature.conceptUrl && (
+              <> <a href={featureCardUrl(experiment.feature.conceptUrl)} target="_blank" rel="noreferrer">Open feature card</a></>
+            )}
+          </small>
+          {((experiment.feature.positiveTokens?.length ?? 0) > 0 || (experiment.feature.negativeTokens?.length ?? 0) > 0) && (
+            <div className="chat-sae-concept-evidence">
+              {experiment.feature.positiveTokens?.length ? <span><b>Positive logits</b>{experiment.feature.positiveTokens.slice(0, 5).join(" · ")}</span> : null}
+              {experiment.feature.negativeTokens?.length ? <span><b>Negative logits</b>{experiment.feature.negativeTokens.slice(0, 5).join(" · ")}</span> : null}
+            </div>
+          )}
+        </div>
+      )}
       <div className="chat-steering-output">
         <article className="is-original">
           <span>Original</span>
@@ -1097,6 +1238,10 @@ function attributionTargetIndex(run: ExplorerRun) {
 
 function visibleToken(value: string) {
   return value.trim() || "space";
+}
+
+function featureCardUrl(value: string | undefined) {
+  return value?.replace("/api/feature/", "/") ?? "";
 }
 
 function signed(value: number) {

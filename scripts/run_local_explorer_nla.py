@@ -15,9 +15,9 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from SafeLens.core.base import PipelineConfig
+from SafeLens.explorer_model import load_explorer_hf_model
 from SafeLens.nla import NLAClient, get_nla_profile
-from SafeLens.utils import HuggingFaceModelWrapper, build_model_wrapper
+from SafeLens.utils import HuggingFaceModelWrapper
 
 
 def main() -> None:
@@ -96,32 +96,7 @@ def _load_base_model(model_id: str) -> HuggingFaceModelWrapper:
         "SAFELENS_EXPLORER_MODEL_CACHE",
         ".cache/safelens/local-explorer-real-flow",
     )
-    local_snapshot = _complete_hf_snapshot(model_id, cache_dir)
-    load_kwargs: dict[str, Any] = {}
-    tokenizer_kwargs: dict[str, Any] = {}
-    if local_snapshot is not None:
-        load_kwargs["local_files_only"] = True
-        tokenizer_kwargs["local_files_only"] = True
-    config = PipelineConfig.model_validate(
-        {
-            "model": {
-                "source": "local" if local_snapshot is not None else "huggingface",
-                "name": model_id,
-                "local_dir": str(local_snapshot) if local_snapshot is not None else None,
-                "device": os.environ.get("SAFELENS_EXPLORER_JOB_DEVICE", "cpu"),
-                "dtype": "auto",
-                "cache_dir": cache_dir,
-                "load_kwargs": load_kwargs,
-                "tokenizer_kwargs": tokenizer_kwargs,
-                "trust_remote_code": False,
-            }
-        }
-    )
-    wrapper = build_model_wrapper(config.model)
-    if not isinstance(wrapper, HuggingFaceModelWrapper):
-        raise TypeError(f"expected HuggingFaceModelWrapper, got {type(wrapper).__name__}")
-    wrapper.load_model()
-    return wrapper
+    return load_explorer_hf_model(model_id, cache_dir=cache_dir)
 
 
 def _complete_hf_snapshot(model_id: str, cache_dir: str) -> Path | None:

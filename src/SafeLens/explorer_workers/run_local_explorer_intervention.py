@@ -17,6 +17,8 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from SafeLens.explorer_model import load_explorer_hf_model
+from SafeLens.explorer_sae import explorer_sae_converter, neuronpedia_feature_info
+from SafeLens.sae_profiles import get_sae_profile
 from SafeLens.utils import HuggingFaceModelWrapper
 
 RISK_TERMS = ("jail", "break", "attack", "harm", "weapon", "malware", "bypass", "exploit")
@@ -33,6 +35,7 @@ def main() -> None:
     run = payload["run"]
     request = payload["request"]
     wrapper = load_explorer_hf_model(str(run["modelName"]))
+    sae: Any | None = None
     try:
         prompt_tokens = wrapper.to_tokens(str(run["prompt"]), prepend_bos=False)
         prompt_ids = _flat_token_ids(prompt_tokens)
@@ -77,6 +80,73 @@ def main() -> None:
                 ),
                 "operation": _neuron_operation(factor),
             }
+        elif mode == "sae_feature":
+            profile = get_sae_profile(
+                model_name=str(run["modelName"]),
+                release=str(request.get("saeRelease", "")),
+                sae_id=str(request.get("saeId", "")),
+            )
+            if profile is None:
+                raise ValueError(
+                    "Model, release, and SAE ID are not an enabled Gemma Scope profile."
+                )
+            if int(request["layer"]) != profile.layer or request["component"] != profile.component:
+                raise ValueError("Gemma Scope profile does not match the requested layer and site.")
+            source_layer = profile.layer
+            inject_layer = profile.layer
+            activation_name = f"layer_{profile.layer}.{profile.component}"
+            source_activation_name = activation_name
+            inject_activation_name = activation_name
+            sae = _load_sae(
+                wrapper,
+                release=profile.release,
+                sae_id=profile.sae_id,
+                expected_model_name=profile.model_name,
+            )
+            feature_index = int(request.get("featureIndex", -1))
+            feature_width = _sae_feature_width(sae)
+            if feature_index < 0 or feature_index >= feature_width:
+                raise ValueError(
+                    f"SAE feature {feature_index} is outside dictionary width {feature_width}."
+                )
+            feature_stats = _source_sae_feature_stats(
+                wrapper,
+                sae,
+                str(run["prompt"]),
+                activation_name,
+                feature_index=feature_index,
+                position=(int(request["positionStart"]), int(request["positionEnd"])),
+            )
+            concept = neuronpedia_feature_info(
+                model_name=profile.model_name,
+                layer=profile.layer,
+                sae_id=profile.sae_id,
+                feature_index=feature_index,
+            )
+            operation = str(request.get("saeOperation", "add"))
+            if operation not in {"add", "ablate"}:
+                raise ValueError(f"Unsupported SAE feature operation: {operation!r}.")
+            feature = {
+                "kind": "sae_feature",
+                "id": f"F{feature_index}",
+                "label": concept["label"],
+                "layer": profile.layer,
+                "featureIndex": feature_index,
+                "baselineActivation": feature_stats["maxActivation"],
+                "meanActivation": feature_stats["meanActivation"],
+                "activeTokenCount": feature_stats["activeTokenCount"],
+                "operation": operation,
+                "release": profile.release,
+                "saeId": profile.sae_id,
+                "width": feature_width,
+                "architecture": profile.architecture,
+                "source": profile.source,
+                "conceptLabel": concept["label"] if concept["source"] == "neuronpedia" else None,
+                "conceptSource": concept["source"],
+                "conceptUrl": concept["url"],
+                "positiveTokens": concept["positiveTokens"],
+                "negativeTokens": concept["negativeTokens"],
+            }
         else:
             positive_prompts = _request_prompt_batch(
                 request, "positivePrompts", "desiredPrompt"
@@ -114,16 +184,26 @@ def main() -> None:
             max_new_tokens=int(request["maxNewTokens"]),
             temperature=float(request["temperature"]),
         )
-        if mode == "neuron":
-            handle = wrapper.add_hook(
-                activation_name,
-                _make_neuron_hook(
+        if mode in {"neuron", "sae_feature"}:
+            if mode == "neuron":
+                hook = _make_neuron_hook(
                     neuron=int(request["neuron"]),
                     factor=float(request["scale"]),
                     position=position,
                     prompt_token_count=len(prompt_ids),
-                ),
-            )
+                )
+            else:
+                if sae is None:
+                    raise RuntimeError("Gemma Scope SAE was not loaded.")
+                hook = _make_sae_feature_hook(
+                    sae=sae,
+                    feature_index=int(request["featureIndex"]),
+                    operation=str(request.get("saeOperation", "add")),
+                    scale=float(request["scale"]),
+                    position=position,
+                    prompt_token_count=len(prompt_ids),
+                )
+            handle = wrapper.add_hook(activation_name, hook)
             try:
                 steered, steered_logits = _run_condition(
                     wrapper,
@@ -165,11 +245,7 @@ def main() -> None:
             **({"feature": feature} if feature is not None else {}),
             "vector": {
                 "algorithmVersion": "3.0",
-                "method": (
-                    "mlp_neuron_activation_scaling"
-                    if mode == "neuron"
-                    else "contrastive_mean_difference"
-                ),
+                "method": _intervention_method(mode, request),
                 "desiredPrompt": str(request["desiredPrompt"]),
                 "undesiredPrompt": str(request["undesiredPrompt"]),
                 **(
@@ -179,21 +255,31 @@ def main() -> None:
                         "positiveCount": len(positive_prompts),
                         "negativeCount": len(negative_prompts),
                     }
-                    if mode != "neuron"
+                    if mode == "direction"
                     else {}
                 ),
                 "activationReduce": (
-                    "selected_neuron" if mode == "neuron" else activation_reduce
+                    "selected_neuron"
+                    if mode == "neuron"
+                    else f"sae_feature_{request['featureIndex']}"
+                    if mode == "sae_feature"
+                    else activation_reduce
                 ),
                 "rawNorm": round(
-                    max(abs(float(feature["baselineActivation"])), 1e-12)
-                    if feature
+                    _feature_reference_norm(feature, sae)
+                    if feature is not None
                     else raw_norm,
                     10,
                 ),
                 "normalized": False,
-                "dimension": 1 if mode == "neuron" else int(vector.shape[-1]),
-                "sourceKey": source_activation_name,
+                "dimension": (
+                    1
+                    if mode == "neuron"
+                    else int(_sae_decoder_direction(sae, int(request["featureIndex"])).shape[-1])
+                    if mode == "sae_feature" and sae is not None
+                    else int(vector.shape[-1])
+                ),
+                "sourceKey": source_activation_name if mode == "direction" else activation_name,
                 **(
                     {
                         "referenceTemplate": reference_template,
@@ -209,7 +295,7 @@ def main() -> None:
                             10,
                         ),
                     }
-                    if mode != "neuron"
+                    if mode == "direction"
                     else {}
                 ),
             },
@@ -236,8 +322,20 @@ def main() -> None:
                     original["tokenIds"], steered["tokenIds"]
                 ),
                 **(
-                    {"directionProjectionDelta": round(float(request["scale"]) * raw_norm, 10)}
-                    if mode != "neuron"
+                    {
+                        "directionProjectionDelta": round(
+                            float(request["scale"]) * raw_norm, 10
+                        )
+                    }
+                    if mode == "direction"
+                    else {
+                        "featureActivationDelta": (
+                            round(float(request["scale"]), 10)
+                            if str(request.get("saeOperation", "add")) == "add"
+                            else round(-float(feature["meanActivation"]), 10)
+                        )
+                    }
+                    if mode == "sae_feature" and feature is not None
                     else {}
                 ),
                 **_logit_delta_summary(original_logits, steered_logits),
@@ -252,11 +350,192 @@ def main() -> None:
         derived = _merge_intervention_result(run, comparison, run_id=args.run_id)
     finally:
         wrapper.remove_hooks()
+        if sae is not None:
+            del sae
         del wrapper
         gc.collect()
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(derived, indent=2), encoding="utf-8")
+
+
+def _load_sae(
+    wrapper: HuggingFaceModelWrapper,
+    *,
+    release: str,
+    sae_id: str,
+    expected_model_name: str,
+) -> Any:
+    try:
+        from sae_lens import SAE
+    except ImportError as exc:
+        raise RuntimeError(
+            "SAE Lens is required for Gemma Scope interventions. Install SafeLens with "
+            "`pip install -e '.[sae]'`."
+        ) from exc
+
+    model = getattr(wrapper, "model", None)
+    if model is None:
+        raise RuntimeError("The base model must be loaded before the Gemma Scope SAE.")
+    try:
+        model_device = str(next(model.parameters()).device)
+    except (AttributeError, StopIteration) as exc:
+        raise RuntimeError("Could not determine the base model device for SAE loading.") from exc
+    loaded = SAE.from_pretrained(
+        release=release,
+        sae_id=sae_id,
+        device=model_device,
+        converter=explorer_sae_converter(release),
+    )
+    sae = loaded[0] if isinstance(loaded, tuple) else loaded
+    metadata = getattr(getattr(sae, "cfg", None), "metadata", None)
+    recorded_model = getattr(metadata, "model_name", None) or getattr(
+        getattr(sae, "cfg", None), "model_name", None
+    )
+    if recorded_model and str(recorded_model) != expected_model_name:
+        raise ValueError(
+            f"SAE was trained for {recorded_model}, not {expected_model_name}."
+        )
+    if not callable(getattr(sae, "encode", None)) or not callable(getattr(sae, "decode", None)):
+        raise TypeError("Loaded Gemma Scope object does not expose SAE encode/decode methods.")
+    _sae_feature_width(sae)
+    return sae
+
+
+def _sae_decoder_direction(sae: Any, feature_index: int) -> Any:
+    decoder = getattr(sae, "W_dec", None)
+    if decoder is None or getattr(decoder, "ndim", 0) != 2:
+        raise ValueError("Loaded SAE does not expose a two-dimensional decoder matrix.")
+    if feature_index < 0 or feature_index >= int(decoder.shape[0]):
+        raise ValueError(
+            f"SAE feature {feature_index} is outside dictionary width {decoder.shape[0]}."
+        )
+    return decoder[feature_index]
+
+
+def _sae_feature_width(sae: Any) -> int:
+    decoder = getattr(sae, "W_dec", None)
+    if decoder is None or getattr(decoder, "ndim", 0) != 2:
+        raise ValueError("Loaded SAE does not expose a two-dimensional decoder matrix.")
+    return int(decoder.shape[0])
+
+
+def _sae_dtype(sae: Any) -> Any:
+    try:
+        return next(sae.parameters()).dtype
+    except (AttributeError, StopIteration):
+        return getattr(sae.W_dec, "dtype", None)
+
+
+def _source_sae_feature_stats(
+    wrapper: HuggingFaceModelWrapper,
+    sae: Any,
+    prompt: str,
+    activation_name: str,
+    *,
+    feature_index: int,
+    position: tuple[int, int],
+) -> dict[str, float | int]:
+    import torch
+
+    tokens = wrapper.to_tokens(prompt, prepend_bos=False)
+    _output, cache = wrapper.run_with_cache(
+        {"input_ids": tokens},
+        layers=[activation_name],
+    )
+    activation = cache[activation_name]
+    start, end = position
+    selected = activation[:, start:min(end, activation.shape[-2]), :]
+    if selected.numel() == 0:
+        raise ValueError("SAE position range did not select any source activations.")
+    decoder = _sae_decoder_direction(sae, feature_index)
+    if int(selected.shape[-1]) != int(decoder.shape[-1]):
+        raise ValueError(
+            "SAE input width does not match the selected base-model residual stream: "
+            f"{decoder.shape[-1]} != {selected.shape[-1]}."
+        )
+    with torch.no_grad():
+        encoded = sae.encode(
+            selected.to(device=decoder.device, dtype=_sae_dtype(sae))
+        )[..., feature_index]
+    values = encoded.float().detach().cpu()
+    return {
+        "maxActivation": float(values.max().item()),
+        "meanActivation": float(values.mean().item()),
+        "activeTokenCount": int((values > 0).sum().item()),
+    }
+
+
+def _make_sae_feature_hook(
+    *,
+    sae: Any,
+    feature_index: int,
+    operation: str,
+    scale: float,
+    position: tuple[int, int],
+    prompt_token_count: int,
+):
+    import torch
+
+    if operation not in {"add", "ablate"}:
+        raise ValueError(f"Unsupported SAE feature operation: {operation!r}.")
+    decoder = _sae_decoder_direction(sae, feature_index)
+
+    def hook(activation: Any = None, **kwargs: Any) -> Any:
+        value = kwargs.get("activation", activation)
+        if value is None or not hasattr(value, "clone") or getattr(value, "ndim", 0) < 2:
+            return value
+        sequence_length = int(value.shape[-2])
+        if sequence_length < prompt_token_count:
+            return value
+        start, end = position
+        bounded_end = min(end, sequence_length, prompt_token_count)
+        if start >= bounded_end:
+            return value
+        result = value.clone()
+        selected = (
+            value[:, start:bounded_end, :]
+            if value.ndim >= 3
+            else value[start:bounded_end, :]
+        )
+        if int(selected.shape[-1]) != int(decoder.shape[-1]):
+            raise ValueError(
+                "SAE decoder width does not match the hooked residual activation: "
+                f"{decoder.shape[-1]} != {selected.shape[-1]}."
+            )
+        with torch.no_grad():
+            sae_input = selected.to(device=decoder.device, dtype=_sae_dtype(sae))
+            original_features = sae.encode(sae_input)
+            modified_features = original_features.clone()
+            if operation == "ablate":
+                modified_features[..., feature_index] = 0
+            else:
+                modified_features[..., feature_index] += scale
+            residual_delta = sae.decode(modified_features) - sae.decode(original_features)
+        delta = residual_delta.to(device=value.device, dtype=value.dtype)
+        if value.ndim >= 3:
+            result[:, start:bounded_end, :] += delta
+        else:
+            result[start:bounded_end, :] += delta
+        return result
+
+    return hook
+
+
+def _feature_reference_norm(feature: dict[str, Any], sae: Any | None) -> float:
+    if feature.get("kind") == "sae_feature" and sae is not None:
+        direction = _sae_decoder_direction(sae, int(feature["featureIndex"]))
+        return max(float(direction.float().norm().detach().cpu().item()), 1e-12)
+    return max(abs(float(feature["baselineActivation"])), 1e-12)
+
+
+def _intervention_method(mode: str, request: dict[str, Any]) -> str:
+    if mode == "neuron":
+        return "mlp_neuron_activation_scaling"
+    if mode == "sae_feature":
+        operation = str(request.get("saeOperation", "add"))
+        return f"gemma_scope_sae_feature_{operation}"
+    return "contrastive_mean_difference"
 
 
 def _reference_vector(
@@ -588,12 +867,11 @@ def _merge_intervention_result(
     source_run = {"runId": run["runId"], "sampleId": run["sampleId"]}
     run["intervention"] = comparison
     provenance = run.setdefault("metricProvenance", {})
-    is_neuron = comparison.get("mode") == "neuron"
-    method_label = (
-        "MLP post-activation neuron scaling"
-        if is_neuron
-        else "Generation-time raw contrastive activation steering"
-    )
+    mode = comparison.get("mode")
+    method_label = {
+        "neuron": "MLP post-activation neuron scaling",
+        "sae_feature": "Gemma Scope SAE feature intervention",
+    }.get(mode, "Generation-time raw contrastive activation steering")
     provenance["interventionTargetLogitDelta"] = {
         "label": "Target logit delta",
         "method": method_label,

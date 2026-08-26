@@ -7,16 +7,24 @@ export function generatedResponseText(run: ExplorerRun): string {
   const generated = run.metadata?.generatedContinuation;
   if (typeof generated !== "string" || !generated.trim()) return "";
 
+  const generation = run.metadata?.generation;
+  const generationMetadata = generation && typeof generation === "object" && !Array.isArray(generation)
+    ? generation as Record<string, unknown>
+    : undefined;
+  const continuationOnly = generationMetadata?.outputFormat === "continuation_only"
+    || typeof generationMetadata?.generatedTokenCount === "number";
   const promptRunner = run.metadata?.promptRunner;
   const userPrompt = promptRunner && typeof promptRunner === "object" && !Array.isArray(promptRunner)
     ? (promptRunner as Record<string, unknown>).userPrompt
     : undefined;
-  const prefixes = [run.prompt, typeof userPrompt === "string" ? userPrompt : ""]
-    .filter(Boolean)
-    .sort((left, right) => right.length - left.length);
   let response = generated.trim();
-  const prefix = prefixes.find((candidate) => response.startsWith(candidate));
-  if (prefix) response = response.slice(prefix.length).trim();
+  if (!continuationOnly) {
+    const prefixes = [run.prompt, typeof userPrompt === "string" ? userPrompt : ""]
+      .filter(Boolean)
+      .sort((left, right) => right.length - left.length);
+    const prefix = prefixes.find((candidate) => response.startsWith(candidate));
+    if (prefix) response = response.slice(prefix.length).trim();
+  }
   response = response.replace(/^(?:Assistant|助手)\s*:\s*/i, "");
   return trimGeneratedTurn(response);
 }

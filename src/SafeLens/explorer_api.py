@@ -40,9 +40,11 @@ TERMINAL_JOB_STATES = {"ready", "error", "cancelled"}
 
 def _default_allowed_models() -> tuple[str, ...]:
     from SafeLens.nla import list_nla_profiles
+    from SafeLens.sae_profiles import list_sae_profiles
 
     models = [DEFAULT_PROMPT_MODEL, TINYGPT2_MODEL]
     models.extend(str(profile["base_model"]) for profile in list_nla_profiles())
+    models.extend(profile.model_name for profile in list_sae_profiles())
     return tuple(dict.fromkeys(models))
 
 
@@ -156,6 +158,7 @@ class HealthResponse(BaseModel):
     jLensJobsEnabled: bool = True
     patchingJobsEnabled: bool = True
     interventionJobsEnabled: bool = True
+    datasetTestJobsEnabled: bool = True
     rootExists: bool
     artifactCount: int = Field(ge=0)
 
@@ -186,6 +189,63 @@ class PromptOptionsResponse(BaseModel):
     models: list[str]
     templates: list[str] = ["plain", "chat"]
     maxNewTokens: int = 512
+
+
+class DatasetMetricResponse(BaseModel):
+    name: str
+    shortName: str
+    definition: str
+    threshold: float = Field(ge=0.0, le=1.0)
+
+
+class DatasetSampleResponse(BaseModel):
+    id: str
+    category: str
+    prompt: str | None = None
+    cleanPrompt: str | None = None
+    corruptedPrompt: str | None = None
+    desiredPrompt: str | None = None
+    undesiredPrompt: str | None = None
+    targetText: str | None = None
+    expected: str
+
+
+class DatasetDefinitionResponse(BaseModel):
+    id: str
+    name: str
+    version: str
+    task: str
+    description: str
+    source: str
+    metric: DatasetMetricResponse
+    samples: list[DatasetSampleResponse]
+
+
+class DatasetAlgorithmResponse(BaseModel):
+    id: Literal["steering", "patching"]
+    name: str
+    kind: Literal["optimization"]
+    description: str
+    paperTitle: str
+    paperUrl: str
+    implementation: str
+    supportedDatasetIds: list[str]
+
+
+class DatasetCatalogResponse(BaseModel):
+    datasets: list[DatasetDefinitionResponse]
+    algorithms: list[DatasetAlgorithmResponse]
+
+
+class DatasetTestRequest(BaseModel):
+    datasetId: str = Field(min_length=1, max_length=128)
+    algorithmId: Literal["steering", "patching"]
+    model: str = DEFAULT_PROMPT_MODEL
+    sampleIds: list[str] = Field(default_factory=list, max_length=20)
+    layer: int = Field(default=12, ge=0, le=127)
+    strength: float = Field(default=1.0, ge=-20.0, le=20.0)
+    seed: int = Field(default=0, ge=0, le=2_147_483_647)
+    maxNewTokens: int = Field(default=24, ge=1, le=64)
 
 
 class TokenizeRequest(BaseModel):
@@ -337,6 +397,30 @@ class PatchingRunRequest(BaseModel):
     targetTokenId: int = Field(ge=0)
 
 
+class SAEProfileResponse(BaseModel):
+    id: str
+    label: str
+    modelName: str
+    release: str
+    saeId: str
+    layer: int = Field(ge=0)
+    component: Literal["resid_post"]
+    width: int = Field(gt=0)
+    architecture: Literal["jump_relu"]
+    source: str
+
+
+class SAEFeatureInfoResponse(BaseModel):
+    modelName: str
+    layer: int = Field(ge=0)
+    featureIndex: int = Field(ge=0)
+    label: str
+    source: Literal["neuronpedia", "index"]
+    url: str | None = None
+    positiveTokens: list[str] = Field(default_factory=list)
+    negativeTokens: list[str] = Field(default_factory=list)
+
+
 def _clean_intervention_prompts(prompts: list[str], field_name: str) -> list[str]:
     cleaned = [prompt.strip() for prompt in prompts]
     if not cleaned or any(not prompt for prompt in cleaned):
@@ -347,7 +431,7 @@ def _clean_intervention_prompts(prompts: list[str], field_name: str) -> list[str
 
 
 class InterventionPreflightRequest(BaseModel):
-    mode: Literal["direction", "neuron"] = "direction"
+    mode: Literal["direction", "neuron", "sae_feature"] = "direction"
     modelName: str = Field(min_length=1)
     promptTokenCount: int = Field(ge=1, le=4_096)
     availableLayers: list[int] = Field(min_length=1, max_length=128)
@@ -365,9 +449,13 @@ class InterventionPreflightRequest(BaseModel):
     activationReduce: Literal["last_token", "mean"] = "last_token"
     neuron: int | None = Field(default=None, ge=0)
     availableNeurons: list[int] = Field(default_factory=list, max_length=256)
+    saeRelease: str | None = Field(default=None, min_length=1, max_length=200)
+    saeId: str | None = Field(default=None, min_length=1, max_length=200)
+    featureIndex: int | None = Field(default=None, ge=0)
+    saeOperation: Literal["add", "ablate"] = "add"
 
     @model_validator(mode="after")
-    def normalize_references(self) -> "InterventionPreflightRequest":
+    def normalize_references(self) -> InterventionPreflightRequest:
         self.positivePrompts = _clean_intervention_prompts(
             self.positivePrompts or ([self.desiredPrompt] if self.desiredPrompt else []),
             "positivePrompts",
@@ -382,7 +470,7 @@ class InterventionPreflightRequest(BaseModel):
 
 
 class InterventionPreflightResponse(BaseModel):
-    mode: Literal["direction", "neuron"]
+    mode: Literal["direction", "neuron", "sae_feature"]
     modelAllowed: bool
     layerAvailable: bool
     componentSupported: bool
@@ -390,6 +478,8 @@ class InterventionPreflightResponse(BaseModel):
     targetTokenValid: bool
     referencesDiffer: bool
     featureAvailable: bool
+    saeProfileValid: bool = True
+    saeRuntimeAvailable: bool = True
     targetTokenId: int
     targetTokenText: str
     positionStart: int
@@ -400,7 +490,7 @@ class InterventionPreflightResponse(BaseModel):
 
 class InterventionRunRequest(BaseModel):
     run: dict[str, Any]
-    mode: Literal["direction", "neuron"] = "direction"
+    mode: Literal["direction", "neuron", "sae_feature"] = "direction"
     desiredPrompt: str | None = Field(default=None, min_length=1, max_length=8_000)
     undesiredPrompt: str | None = Field(default=None, min_length=1, max_length=8_000)
     positivePrompts: list[str] = Field(default_factory=list, max_length=64)
@@ -418,9 +508,13 @@ class InterventionRunRequest(BaseModel):
     maxNewTokens: int = Field(default=64, ge=1, le=128)
     temperature: float = Field(default=0.0, ge=0.0, le=2.0)
     neuron: int | None = Field(default=None, ge=0)
+    saeRelease: str | None = Field(default=None, min_length=1, max_length=200)
+    saeId: str | None = Field(default=None, min_length=1, max_length=200)
+    featureIndex: int | None = Field(default=None, ge=0)
+    saeOperation: Literal["add", "ablate"] = "add"
 
     @model_validator(mode="after")
-    def normalize_references(self) -> "InterventionRunRequest":
+    def normalize_references(self) -> InterventionRunRequest:
         self.positivePrompts = _clean_intervention_prompts(
             self.positivePrompts or ([self.desiredPrompt] if self.desiredPrompt else []),
             "positivePrompts",
@@ -436,7 +530,15 @@ class InterventionRunRequest(BaseModel):
 
 class JobSnapshot(BaseModel):
     id: str
-    kind: Literal["prompt-run", "attribution", "nla", "jlens", "patching", "intervention"]
+    kind: Literal[
+        "prompt-run",
+        "attribution",
+        "nla",
+        "jlens",
+        "patching",
+        "intervention",
+        "dataset-test",
+    ]
     status: Literal["idle", "loading", "ready", "error", "cancelled"]
     stage: str
     progress: int = Field(ge=0, le=100)
@@ -484,7 +586,15 @@ class ExplorerJobManager:
         self,
         runner: JobRunner,
         *,
-        kind: Literal["prompt-run", "attribution", "nla", "jlens", "patching", "intervention"],
+        kind: Literal[
+            "prompt-run",
+            "attribution",
+            "nla",
+            "jlens",
+            "patching",
+            "intervention",
+            "dataset-test",
+        ],
         ready_detail: str,
         error_detail: str,
     ) -> None:
@@ -648,6 +758,7 @@ def create_app(
     patching_tokenizer_loader: Callable[[str], Any] | None = None,
     intervention_runner: JobRunner | None = None,
     intervention_tokenizer_loader: Callable[[str], Any] | None = None,
+    dataset_test_runner: JobRunner | None = None,
     allowed_models: tuple[str, ...] | None = None,
 ) -> FastAPI:
     """Create a localhost-oriented API constrained to one artifact root."""
@@ -709,6 +820,12 @@ def create_app(
         ready_detail="Intervention comparison is ready in a derived Explorer run.",
         error_detail="Intervention failed. Inspect the vector references, range, and diagnostic.",
     )
+    dataset_manager = ExplorerJobManager(
+        dataset_test_runner or _local_dataset_test_runner(allowed_models=allowed_models),
+        kind="dataset-test",
+        ready_detail="Dataset test is complete. Review the metric and individual samples.",
+        error_detail="Dataset test failed. Inspect model availability and the diagnostic.",
+    )
     managers = (
         prompt_manager,
         attribution_manager,
@@ -716,6 +833,7 @@ def create_app(
         jlens_manager,
         patching_manager,
         intervention_manager,
+        dataset_manager,
     )
     load_patching_tokenizer = patching_tokenizer_loader or _default_patching_tokenizer_loader
     load_response_tokenizer = patching_tokenizer_loader or _default_patching_tokenizer_loader
@@ -735,6 +853,49 @@ def create_app(
     def prompt_options() -> PromptOptionsResponse:
         return PromptOptionsResponse(models=list(allowed_models))
 
+    @app.get("/api/datasets", response_model=DatasetCatalogResponse)
+    def datasets() -> DatasetCatalogResponse:
+        from SafeLens.dataset_eval import dataset_catalog
+
+        return DatasetCatalogResponse.model_validate(dataset_catalog())
+
+    @app.post("/api/jobs/dataset-test", response_model=JobSnapshot, status_code=202)
+    def submit_dataset_test(payload: DatasetTestRequest) -> JobSnapshot:
+        from SafeLens.dataset_eval import get_algorithm, get_dataset
+
+        dataset = get_dataset(payload.datasetId)
+        algorithm = get_algorithm(payload.algorithmId)
+        if dataset is None:
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "unknown_dataset", "message": "Select a known dataset."},
+            )
+        if algorithm is None or payload.datasetId not in algorithm["supportedDatasetIds"]:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "incompatible_dataset_algorithm",
+                    "message": "The selected algorithm does not support this dataset.",
+                },
+            )
+        if payload.model not in allowed_models:
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "model_not_allowed", "message": "Select an allowed model."},
+            )
+        available_ids = {str(sample["id"]) for sample in dataset["samples"]}
+        if len(set(payload.sampleIds)) != len(payload.sampleIds) or any(
+            sample_id not in available_ids for sample_id in payload.sampleIds
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "invalid_dataset_samples",
+                    "message": "Sample IDs must be unique members of the selected dataset.",
+                },
+            )
+        return dataset_manager.submit(payload)
+
     @app.post("/api/tokenize", response_model=TokenizeResponse)
     def tokenize_response(payload: TokenizeRequest) -> TokenizeResponse:
         if payload.modelName not in allowed_models:
@@ -744,20 +905,25 @@ def create_app(
             )
         try:
             tokenizer = load_response_tokenizer(payload.modelName)
-            token_ids = [int(token_id) for token_id in tokenizer.encode(
-                payload.text,
-                add_special_tokens=False,
-            )]
+            token_ids = [
+                int(token_id)
+                for token_id in tokenizer.encode(
+                    payload.text,
+                    add_special_tokens=False,
+                )
+            ]
             truncated = len(token_ids) > 64
             token_ids = token_ids[:64]
             tokens = [
                 TokenizedToken(
                     index=index,
                     tokenId=token_id,
-                    text=str(tokenizer.decode(
-                        [token_id],
-                        clean_up_tokenization_spaces=False,
-                    )),
+                    text=str(
+                        tokenizer.decode(
+                            [token_id],
+                            clean_up_tokenization_spaces=False,
+                        )
+                    ),
                 )
                 for index, token_id in enumerate(token_ids)
             ]
@@ -864,6 +1030,63 @@ def create_app(
                 detail={"code": "patching_preflight_error", "message": str(exc)},
             ) from exc
 
+    @app.get("/api/intervention/sae-profiles", response_model=list[SAEProfileResponse])
+    def intervention_sae_profiles(
+        modelName: str | None = Query(default=None, min_length=1),
+    ) -> list[SAEProfileResponse]:
+        from SafeLens.sae_profiles import list_sae_profiles
+
+        return [
+            SAEProfileResponse.model_validate(profile.to_api())
+            for profile in list_sae_profiles(model_name=modelName)
+        ]
+
+    @app.get("/api/intervention/sae-feature-info", response_model=SAEFeatureInfoResponse)
+    def intervention_sae_feature_info(
+        modelName: str = Query(min_length=1),
+        layer: int = Query(ge=0),
+        featureIndex: int = Query(ge=0),
+    ) -> SAEFeatureInfoResponse:
+        from SafeLens.explorer_sae import neuronpedia_feature_info
+        from SafeLens.sae_profiles import list_sae_profiles
+
+        profile = next(
+            (item for item in list_sae_profiles(model_name=modelName) if item.layer == layer),
+            None,
+        )
+        if profile is None:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "sae_profile_missing",
+                    "message": "No compatible SAE profile is available for this model and layer.",
+                },
+            )
+        if featureIndex >= profile.width:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "sae_feature_out_of_range",
+                    "message": f"Feature index must be below {profile.width}.",
+                },
+            )
+        info = neuronpedia_feature_info(
+            model_name=profile.model_name,
+            layer=profile.layer,
+            sae_id=profile.sae_id,
+            feature_index=featureIndex,
+        )
+        return SAEFeatureInfoResponse(
+            modelName=profile.model_name,
+            layer=profile.layer,
+            featureIndex=featureIndex,
+            label=str(info["label"]),
+            source=str(info["source"]),
+            url=info.get("url"),
+            positiveTokens=list(info.get("positiveTokens", [])),
+            negativeTokens=list(info.get("negativeTokens", [])),
+        )
+
     @app.post("/api/intervention/preflight", response_model=InterventionPreflightResponse)
     def intervention_preflight(
         payload: InterventionPreflightRequest,
@@ -877,8 +1100,12 @@ def create_app(
                 },
             )
         try:
+            if payload.mode == "sae_feature" and intervention_tokenizer_loader is None:
+                _require_sae_base_model_snapshot(payload.modelName)
             tokenizer = load_intervention_tokenizer(payload.modelName)
             return _intervention_preflight(payload, tokenizer, allowed_models=allowed_models)
+        except HTTPException:
+            raise
         except (OSError, TypeError, ValueError) as exc:
             raise HTTPException(
                 status_code=422,
@@ -1130,8 +1357,7 @@ def create_app(
             head_count = _artifact_attention_head_count(payload.run, payload.layers[0])
             if payload.head is None or (head_count is not None and payload.head >= head_count):
                 detail = (
-                    f"Head must be between 0 and {head_count - 1} for layer "
-                    f"{payload.layers[0]}."
+                    f"Head must be between 0 and {head_count - 1} for layer {payload.layers[0]}."
                     if head_count is not None
                     else "Attention-head patching requires a non-negative head index."
                 )
@@ -1184,7 +1410,9 @@ def create_app(
                 detail={"code": "run_too_large", "message": "Run exceeds the compact job limit."},
             )
         try:
-            payload = _hydrate_workspace_job_payload(payload, root=root, max_file_bytes=max_file_bytes)
+            payload = _hydrate_workspace_job_payload(
+                payload, root=root, max_file_bytes=max_file_bytes
+            )
             _require_sample_metadata(payload.run, index=0)
             if payload.run["modelName"] not in allowed_models:
                 raise HTTPException(
@@ -1213,11 +1441,19 @@ def create_app(
                 activationReduce=payload.activationReduce,
                 neuron=payload.neuron,
                 availableNeurons=[
-                    int(item.get("neuron")) for item in payload.run.get("mlpNeurons", [])
-                    if isinstance(item, dict) and isinstance(item.get("neuron"), int)
+                    int(item.get("neuron"))
+                    for item in payload.run.get("mlpNeurons", [])
+                    if isinstance(item, dict)
+                    and isinstance(item.get("neuron"), int)
                     and int(item.get("layer", -1)) == payload.layer
                 ],
+                saeRelease=payload.saeRelease,
+                saeId=payload.saeId,
+                featureIndex=payload.featureIndex,
+                saeOperation=payload.saeOperation,
             )
+            if payload.mode == "sae_feature" and intervention_tokenizer_loader is None:
+                _require_sae_base_model_snapshot(payload.run["modelName"])
             tokenizer = load_intervention_tokenizer(payload.run["modelName"])
             preflight = _intervention_preflight(
                 preflight_request,
@@ -1548,6 +1784,24 @@ def _manager_for_job(managers: tuple[ExplorerJobManager, ...], job_id: str) -> E
     raise KeyError(job_id)
 
 
+def _local_dataset_test_runner(*, allowed_models: tuple[str, ...]) -> JobRunner:
+    def run(
+        payload: DatasetTestRequest,
+        cancel_event: threading.Event,
+        progress: JobProgress,
+    ) -> dict[str, Any]:
+        from SafeLens.dataset_eval import run_dataset_test
+
+        return run_dataset_test(
+            payload,
+            cancel_event,
+            progress,
+            allowed_models=allowed_models,
+        )
+
+    return run
+
+
 def _explorer_worker(name: str) -> tuple[Path, Path]:
     repository_root = Path(__file__).resolve().parents[2]
     source_worker = repository_root / "scripts" / name
@@ -1584,9 +1838,7 @@ def _subprocess_prompt_runner(*, root: Path) -> PromptRunner:
                 {
                     "prompt": payload.prompt,
                     "template": payload.template,
-                    "messages": [
-                        message.model_dump(mode="json") for message in payload.messages
-                    ],
+                    "messages": [message.model_dump(mode="json") for message in payload.messages],
                 },
                 ensure_ascii=False,
             ),
@@ -1881,8 +2133,7 @@ def _jlens_preflight(
         "Configure a lens artifact and a relative checkpoint filename.": lens_configured,
         artifact_error or "The local lens artifact is readable.": artifact_error is None,
         f"Layer L{payload.layer} is not fitted in this local lens.": (
-            (not artifact_checked and registered_profile is None)
-            or payload.layer in fitted_layers
+            (not artifact_checked and registered_profile is None) or payload.layer in fitted_layers
         ),
         "The local lens width does not match the source model.": (
             lens_d_model is None or payload.dModel is None or lens_d_model == payload.dModel
@@ -1910,18 +2161,58 @@ def _jlens_preflight(
 @lru_cache(maxsize=4)
 def _default_patching_tokenizer_loader(model_name: str) -> Any:
     from transformers import AutoTokenizer
+
     from SafeLens.explorer_model import (
         DEFAULT_EXPLORER_MODEL_CACHE,
-        complete_hf_snapshot,
+        resolve_explorer_pretrained_path,
     )
 
-    snapshot = complete_hf_snapshot(model_name, DEFAULT_EXPLORER_MODEL_CACHE)
-    return AutoTokenizer.from_pretrained(
-        str(snapshot) if snapshot is not None else model_name,
+    pretrained_path, local_files_only, _source = resolve_explorer_pretrained_path(
+        model_name,
         cache_dir=DEFAULT_EXPLORER_MODEL_CACHE,
-        local_files_only=snapshot is not None,
+    )
+    return AutoTokenizer.from_pretrained(
+        pretrained_path,
+        cache_dir=DEFAULT_EXPLORER_MODEL_CACHE,
+        local_files_only=local_files_only,
         trust_remote_code=False,
     )
+
+
+def _require_sae_base_model_snapshot(model_name: str) -> None:
+    """Resolve the base model before an SAE job enters the worker queue."""
+    from SafeLens.explorer_model import (
+        DEFAULT_EXPLORER_MODEL_CACHE,
+        resolve_explorer_pretrained_path,
+    )
+
+    try:
+        pretrained_path, local_files_only, source = resolve_explorer_pretrained_path(
+            model_name,
+            cache_dir=DEFAULT_EXPLORER_MODEL_CACHE,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "sae_base_model_missing",
+                "message": (
+                    f"Gemma base model {model_name} could not be resolved from the configured "
+                    f"local provider: {exc}"
+                ),
+            },
+        ) from exc
+    if not local_files_only or not Path(pretrained_path).is_dir():
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "sae_base_model_missing",
+                "message": (
+                    f"Gemma base model {model_name} is not available as a complete local "
+                    f"snapshot (resolved provider: {source})."
+                ),
+            },
+        )
 
 
 def _patching_preflight(
@@ -2026,19 +2317,50 @@ def _intervention_preflight(
     *,
     allowed_models: tuple[str, ...],
 ) -> InterventionPreflightResponse:
+    from SafeLens.sae_profiles import get_sae_profile
+
     model_allowed = payload.modelName in allowed_models
+    sae_profile = (
+        get_sae_profile(
+            model_name=payload.modelName,
+            release=payload.saeRelease or "",
+            sae_id=payload.saeId or "",
+        )
+        if payload.mode == "sae_feature"
+        else None
+    )
+    sae_profile_valid = payload.mode != "sae_feature" or sae_profile is not None
     source_layer = payload.sourceLayer if payload.sourceLayer is not None else payload.layer
     inject_layer = payload.injectLayer if payload.injectLayer is not None else payload.layer
     source_layer_available = source_layer in payload.availableLayers
     inject_layer_available = inject_layer in payload.availableLayers
-    layer_available = source_layer_available and inject_layer_available
-    component_supported = payload.component in {"resid_post", "attn_out", "mlp_out"}
+    layer_available = source_layer_available and inject_layer_available and (
+        sae_profile is None
+        or (source_layer == sae_profile.layer and inject_layer == sae_profile.layer)
+    )
+    component_supported = payload.component in {"resid_post", "attn_out", "mlp_out"} and (
+        sae_profile is None or payload.component == sae_profile.component
+    )
     position_range_valid = (
         0 <= payload.positionStart < payload.positionEnd <= payload.promptTokenCount
     )
-    references_differ = payload.mode == "neuron" or payload.positivePrompts != payload.negativePrompts
-    feature_available = payload.mode == "direction" or (
-        payload.neuron is not None and payload.neuron in payload.availableNeurons
+    references_differ = (
+        payload.mode != "direction" or payload.positivePrompts != payload.negativePrompts
+    )
+    if payload.mode == "neuron":
+        feature_available = (
+            payload.neuron is not None and payload.neuron in payload.availableNeurons
+        )
+    elif payload.mode == "sae_feature":
+        feature_available = (
+            sae_profile is not None
+            and payload.featureIndex is not None
+            and payload.featureIndex < sae_profile.width
+        )
+    else:
+        feature_available = True
+    sae_runtime_available = (
+        payload.mode != "sae_feature" or importlib.util.find_spec("sae_lens") is not None
     )
     try:
         vocab_size = int(len(tokenizer))
@@ -2055,7 +2377,7 @@ def _intervention_preflight(
         if target_token_valid
         else ""
     )
-    checks = {
+    checks: dict[str, bool] = {
         "model is not enabled for local jobs": model_allowed,
         f"source layer L{source_layer} is not available in the source Run": source_layer_available,
         f"inject layer L{inject_layer} is not available in the source Run": inject_layer_available,
@@ -2063,8 +2385,17 @@ def _intervention_preflight(
         "position range must stay inside the source prompt": position_range_valid,
         "target token is outside the tokenizer vocabulary": target_token_valid,
         "desired and undesired references are identical": references_differ,
-        "selected MLP neuron is not available in the source run": feature_available,
     }
+    if payload.mode == "neuron":
+        checks["selected MLP neuron is not available in the source run"] = feature_available
+    elif payload.mode == "sae_feature":
+        checks["model, release, and SAE ID are not an enabled Gemma Scope profile"] = (
+            sae_profile_valid
+        )
+        checks["SAE feature index is outside the selected dictionary"] = feature_available
+        checks["SAE Lens is unavailable; install SafeLens with the `sae` extra"] = (
+            sae_runtime_available
+        )
     failures = [message for message, passed in checks.items() if not passed]
     can_submit = not failures
     return InterventionPreflightResponse(
@@ -2076,13 +2407,16 @@ def _intervention_preflight(
         targetTokenValid=target_token_valid,
         referencesDiffer=references_differ,
         featureAvailable=feature_available,
+        saeProfileValid=sae_profile_valid,
+        saeRuntimeAvailable=sae_runtime_available,
         targetTokenId=payload.targetTokenId,
         targetTokenText=target_text,
         positionStart=payload.positionStart,
         positionEnd=payload.positionEnd,
         canSubmit=can_submit,
         reason=(
-            "Intervention references, source/inject layers, activation target, and objective are ready."
+            "Intervention references, source/inject layers, activation target, "
+            "and objective are ready."
             if can_submit
             else "; ".join(failures)
         ),
@@ -2373,6 +2707,8 @@ def _subprocess_intervention_runner(*, root: Path) -> JobRunner:
             )
             if payload.mode == "neuron":
                 progress(24, "neuron-intervention", "Preparing the selected MLP neuron hook.")
+            elif payload.mode == "sae_feature":
+                progress(24, "sae-feature", "Loading the validated Gemma Scope SAE feature.")
             else:
                 progress(24, "steering-vector", "Building the chat-aligned contrastive direction.")
             stdout, stderr = _communicate_cancellable(process, cancel_event)

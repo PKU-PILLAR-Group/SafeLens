@@ -91,8 +91,26 @@ distilbert-base-uncased, t5-small, hubert-base-ls960, wav2vec2-base
 
 ## Generic Transformers Backends
 
+## Gemma Scope 2 SAE intervention
+
+The Local Explorer has an explicit Gemma Scope 2 SAE profile for
+`google/gemma-3-270m-it`. It uses the `gemma-scope-2-270m-it-res` SAELens
+release on the `resid_post` site at layers 5, 9, 12, and 15 (the initial UI
+checkpoint is the 16k, L0-small variant). This profile requires the matching
+Gemma base model and the optional `sae` dependency; Gemma Scope dictionaries
+must not be used with Qwen or another base model.
+
 The `huggingface`, `modelscope`, and `local` sources can load many
 Transformers-compatible models beyond the explicit lists above.
+
+### Local Explorer provider selection
+
+Explorer workers use a complete local snapshot first. When the model is
+`google/gemma-3-270m-it` or `google/gemma-3-12b-it` and the ModelScope package
+is installed, `SAFELENS_EXPLORER_MODEL_SOURCE=auto` selects ModelScope instead
+of starting a Hugging Face download. Set the variable to `huggingface` or
+`modelscope` to force a provider. ModelScope snapshots are stored in
+`MODELSCOPE_CACHE` (or `SAFELENS_EXPLORER_MODELSCOPE_CACHE`).
 
 Use these when:
 

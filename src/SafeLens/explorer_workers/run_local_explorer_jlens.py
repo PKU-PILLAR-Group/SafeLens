@@ -7,6 +7,8 @@ import os
 from pathlib import Path
 from typing import Any
 
+from SafeLens.explorer_model import resolve_explorer_pretrained_path
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run an exact Jacobian Lens readout.")
@@ -44,19 +46,21 @@ def _run_jlens(run: dict[str, Any], request: dict[str, Any], *, run_id: str) -> 
         "SAFELENS_EXPLORER_MODEL_CACHE",
         ".cache/safelens/local-explorer-real-flow",
     )
-    local_snapshot = _complete_hf_snapshot(model_name, cache_dir)
-    model_source = str(local_snapshot) if local_snapshot is not None else model_name
+    model_source, local_files_only, _model_provider = resolve_explorer_pretrained_path(
+        model_name,
+        cache_dir=cache_dir,
+    )
     tokenizer = AutoTokenizer.from_pretrained(
         model_source,
         cache_dir=cache_dir,
-        local_files_only=local_snapshot is not None,
+        local_files_only=local_files_only,
         trust_remote_code=False,
     )
     model = AutoModelForCausalLM.from_pretrained(
         model_source,
         cache_dir=cache_dir,
         dtype=dtype,
-        local_files_only=local_snapshot is not None,
+        local_files_only=local_files_only,
         low_cpu_mem_usage=device != "cpu",
         trust_remote_code=False,
     )

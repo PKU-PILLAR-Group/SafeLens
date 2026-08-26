@@ -108,6 +108,7 @@ test("shows built-in steering preset suggestions and inserts them on click", asy
   await expect(page.getByText("Activation cache ready")).toBeVisible();
 
   await page.getByRole("button", { name: /Steer/ }).click();
+  await page.getByRole("button", { name: "Advanced settings" }).click();
   const toward = page.getByLabel("Steering desired behavior");
   await toward.click();
   const suggestions = page.getByRole("listbox", { name: "Steer toward preset suggestions" });
@@ -140,6 +141,7 @@ test("saves a custom steering preset and reuses it", async ({ page }) => {
   await expect(page.getByText("Activation cache ready")).toBeVisible();
 
   await page.getByRole("button", { name: /Steer/ }).click();
+  await page.getByRole("button", { name: "Advanced settings" }).click();
   const toward = page.getByLabel("Steering desired behavior");
   await toward.fill("Always answer in one word.");
   await page.getByRole("button", { name: /Save current Steer toward/ }).click();
@@ -153,6 +155,7 @@ test("saves a custom steering preset and reuses it", async ({ page }) => {
   await page.reload();
   await page.locator(".chat-history-open").first().click();
   await page.getByRole("button", { name: /Steer/ }).click();
+  await page.getByRole("button", { name: "Advanced settings" }).click();
   const towardAfterReload = page.getByLabel("Steering desired behavior");
   await towardAfterReload.fill("one");
   await expect(page.getByRole("listbox", { name: "Steer toward preset suggestions" }).getByRole("option", { name: /One word/ })).toBeVisible();

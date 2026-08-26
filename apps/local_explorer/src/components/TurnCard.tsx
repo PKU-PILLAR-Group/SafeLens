@@ -61,12 +61,12 @@ export function TurnCard({
         const source = parent as Record<string, unknown>;
         const belongsToTurn = source.runId === turn.run?.runId && source.sampleId === turn.run?.sampleId;
         if (!belongsToTurn) return false;
-        if (analysisOpen === "steering") return Boolean(candidate.intervention && candidate.intervention.mode !== "neuron");
+        if (analysisOpen === "steering") return candidate.intervention?.mode === "direction";
         if (analysisOpen === "patching") return Boolean(candidate.patching);
         if (analysisOpen === "attribution") return candidate.attributionMethods.some(
               (method) => method.id === "integrated_gradients" && method.available
             );
-        if (analysisOpen === "feature") return candidate.intervention?.mode === "neuron";
+        if (analysisOpen === "feature") return candidate.intervention?.mode === "sae_feature";
         if (analysisOpen === "explanation") {
           return candidate.nla.some((row) => row.status === "available") || candidate.jLens.length > 0;
         }
@@ -113,7 +113,7 @@ export function TurnCard({
               aria-pressed={analysisOpen === "feature"}
               onClick={() => onToggleAnalysis("feature")}
             >
-              <Activity size={16} /> Neuron
+              <Activity size={16} /> SAE
             </button>
             <button
               type="button"

@@ -11,6 +11,49 @@ from SafeLens.core.base import ModelLoadConfig, PipelineConfig
 from SafeLens.utils import HuggingFaceModelWrapper, build_model_wrapper
 
 DEFAULT_EXPLORER_MODEL_CACHE = ".cache/safelens/local-explorer-real-flow"
+DEFAULT_MODELSCOPE_MODEL_CACHE = ".cache/safelens/modelscope"
+
+# ModelScope mirrors the public Gemma 3 checkpoints under the same model IDs.
+# Keep this table small and explicit so an unrelated Hugging Face model is not
+# silently redirected to a provider with different revisions or files.
+MODELSCOPE_MODEL_IDS: dict[str, str] = {
+    "google/gemma-3-270m-it": "google/gemma-3-270m-it",
+    "google/gemma-3-12b-it": "google/gemma-3-12b-it",
+}
+
+
+def explorer_model_source(model_id: str) -> str:
+    """Resolve the provider used by local Explorer workers.
+
+    ``auto`` keeps complete local snapshots offline and uses ModelScope for
+    the Gemma profiles that are commonly unavailable from Hugging Face in the
+    deployment environment. Set ``SAFELENS_EXPLORER_MODEL_SOURCE`` to
+    ``huggingface`` or ``modelscope`` to force a provider.
+    """
+    configured = os.environ.get("SAFELENS_EXPLORER_MODEL_SOURCE", "auto").strip().lower()
+    if configured in {"hf", "huggingface"}:
+        return "huggingface"
+    if configured in {"ms", "modelscope"}:
+        return "modelscope"
+    if configured not in {"", "auto", "local"}:
+        raise ValueError(
+            "SAFELENS_EXPLORER_MODEL_SOURCE must be one of auto, huggingface, modelscope."
+        )
+    if configured == "local":
+        return "local"
+    if model_id in MODELSCOPE_MODEL_IDS:
+        try:
+            import modelscope  # noqa: F401
+        except ImportError:
+            pass
+        else:
+            return "modelscope"
+    return "huggingface"
+
+
+def explorer_modelscope_id(model_id: str) -> str:
+    """Return the ModelScope repository ID for a supported Explorer model."""
+    return MODELSCOPE_MODEL_IDS.get(model_id, model_id)
 
 
 def explorer_hf_model_config(
@@ -25,6 +68,19 @@ def explorer_hf_model_config(
         "float32" if device == "cpu" else "bfloat16",
     )
     local_snapshot = complete_hf_snapshot(model_id, cache_dir)
+    source = "local" if local_snapshot is not None else explorer_model_source(model_id)
+    if source == "local" and local_snapshot is None:
+        raise FileNotFoundError(
+            f"No complete local snapshot for {model_id!r} in {cache_dir!r}."
+        )
+    provider_cache = cache_dir
+    model_name = model_id
+    if source == "modelscope":
+        provider_cache = os.environ.get(
+            "SAFELENS_EXPLORER_MODELSCOPE_CACHE",
+            os.environ.get("MODELSCOPE_CACHE", DEFAULT_MODELSCOPE_MODEL_CACHE),
+        )
+        model_name = explorer_modelscope_id(model_id)
     load_kwargs: dict[str, Any] = {"low_cpu_mem_usage": device != "cpu"}
     tokenizer_kwargs: dict[str, Any] = {}
     if local_snapshot is not None:
@@ -33,12 +89,12 @@ def explorer_hf_model_config(
     return PipelineConfig.model_validate(
         {
             "model": {
-                "source": "local" if local_snapshot is not None else "huggingface",
-                "name": model_id,
+                "source": source,
+                "name": model_name,
                 "local_dir": str(local_snapshot) if local_snapshot is not None else None,
                 "device": device,
                 "dtype": dtype,
-                "cache_dir": cache_dir,
+                "cache_dir": provider_cache,
                 "trust_remote_code": False,
                 "load_kwargs": load_kwargs,
                 "tokenizer_kwargs": tokenizer_kwargs,
@@ -58,6 +114,54 @@ def load_explorer_hf_model(
         raise TypeError(f"expected HuggingFaceModelWrapper, got {type(wrapper).__name__}")
     wrapper.load_model()
     return wrapper
+
+
+def resolve_explorer_pretrained_path(
+    model_id: str,
+    *,
+    cache_dir: str = DEFAULT_EXPLORER_MODEL_CACHE,
+) -> tuple[str, bool, str]:
+    """Resolve a Transformers path for workers that do not use SafeLens wrappers.
+
+    Returns ``(path, local_files_only, source)``. ModelScope snapshots are
+    materialized before handing the path to a raw Transformers/J-Lens loader,
+    so those loaders never fall back to Hugging Face implicitly.
+    """
+    config = explorer_hf_model_config(model_id, cache_dir=cache_dir)
+    if config.source == "local":
+        if not config.local_dir:
+            raise FileNotFoundError(f"No local snapshot configured for {model_id!r}.")
+        return config.local_dir, True, config.source
+    if config.source == "modelscope":
+        local_snapshot = complete_modelscope_snapshot(config.name, config.cache_dir)
+        if local_snapshot is not None:
+            return str(local_snapshot), True, config.source
+        try:
+            from modelscope import snapshot_download
+        except ImportError as exc:
+            raise ImportError(
+                "ModelScope is required for this Explorer model. "
+                "Install SafeLens with the 'modelscope' extra."
+            ) from exc
+        path = snapshot_download(
+            model_id=config.name,
+            cache_dir=config.cache_dir,
+            revision=config.revision,
+        )
+        return str(path), True, config.source
+    return config.name, False, config.source
+
+
+def complete_modelscope_snapshot(model_id: str, cache_dir: str) -> Path | None:
+    """Return a complete Transformers snapshot in the standard ModelScope cache layout."""
+    snapshot = Path(cache_dir) / model_id
+    required_metadata = (snapshot / "config.json", snapshot / "tokenizer_config.json")
+    if not all(path.is_file() for path in required_metadata):
+        return None
+    weights = _snapshot_weight_files(snapshot)
+    if not weights or not all(path.is_file() and path.stat().st_size > 0 for path in weights):
+        return None
+    return snapshot
 
 
 def complete_hf_snapshot(model_id: str, cache_dir: str) -> Path | None:

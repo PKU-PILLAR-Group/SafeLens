@@ -4,7 +4,6 @@ from __future__ import annotations
 import argparse
 import json
 import math
-import os
 import random
 import sys
 from pathlib import Path
@@ -15,7 +14,10 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from SafeLens.core.base import PipelineConfig
+from SafeLens.explorer_model import (
+    explorer_hf_model_config,
+    explorer_model_source,
+)
 from SafeLens.nla import list_nla_profiles
 from SafeLens.utils import HuggingFaceModelWrapper, build_model_wrapper
 
@@ -190,34 +192,13 @@ def _prepare_generation_prompt(
 
 
 def _load_wrapper(model_id: str, cache_dir: str) -> HuggingFaceModelWrapper:
-    device = os.environ.get("SAFELENS_EXPLORER_JOB_DEVICE", "cpu")
-    dtype = os.environ.get(
-        "SAFELENS_EXPLORER_JOB_DTYPE",
-        "float32" if device == "cpu" else "bfloat16",
-    )
-    local_snapshot = _complete_hf_snapshot(model_id, cache_dir)
-    load_kwargs = {"low_cpu_mem_usage": device != "cpu"}
-    tokenizer_kwargs: dict[str, Any] = {}
-    if local_snapshot is not None:
-        load_kwargs["local_files_only"] = True
-        tokenizer_kwargs["local_files_only"] = True
-    config = PipelineConfig.model_validate(
-        {
-            "model": {
-                "source": "local" if local_snapshot is not None else "huggingface",
-                "name": model_id,
-                "local_dir": str(local_snapshot) if local_snapshot is not None else None,
-                "device": device,
-                "dtype": dtype,
-                "cache_dir": cache_dir,
-                "load_kwargs": load_kwargs,
-                "tokenizer_kwargs": tokenizer_kwargs,
-            }
-        }
-    )
-    wrapper = build_model_wrapper(config.model)
+    config = explorer_hf_model_config(model_id, cache_dir=cache_dir)
+    wrapper = build_model_wrapper(config)
     if not isinstance(wrapper, HuggingFaceModelWrapper):
         raise TypeError(f"expected HuggingFaceModelWrapper, got {type(wrapper).__name__}")
+    # Preserve the resolved provider for artifact provenance without making
+    # the run builder reconstruct cache paths after the model is loaded.
+    wrapper._safelens_model_source = config.source  # type: ignore[attr-defined]
     wrapper.load_model()
     return wrapper
 
@@ -344,7 +325,11 @@ def _build_run(
     return {
         "runId": run_id,
         "modelName": wrapper.name,
-        "modelSource": "huggingface",
+        "modelSource": getattr(
+            wrapper,
+            "_safelens_model_source",
+            explorer_model_source(str(wrapper.name)),
+        ),
         "sampleId": sample_id,
         "prompt": prompt,
         "tokens": [
@@ -478,6 +463,7 @@ def _build_run(
                 ),
             },
             "generation": {
+                "outputFormat": "continuation_only",
                 "seed": seed,
                 "maxNewTokens": max_new_tokens,
                 "temperature": temperature,
@@ -847,7 +833,9 @@ def _attention_head_coverage(
         for layer, count in available_by_layer.items()
     }
     return {
-        "complete": all(stored_by_layer[layer] == count for layer, count in available_by_layer.items()),
+        "complete": all(
+            stored_by_layer[layer] == count for layer, count in available_by_layer.items()
+        ),
         "availableHeadCount": sum(available_by_layer.values()),
         "availableByLayer": available_by_layer,
         "storedByLayer": stored_by_layer,

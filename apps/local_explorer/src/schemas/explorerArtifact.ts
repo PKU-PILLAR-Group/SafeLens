@@ -201,15 +201,28 @@ const interventionOutputSchema = z.object({
 });
 
 const interventionExperimentSchema = z.object({
-  mode: z.enum(["direction", "neuron"]).default("direction"),
+  mode: z.enum(["direction", "neuron", "sae_feature"]).default("direction"),
   feature: z.object({
-    kind: z.literal("mlp_neuron"),
+    kind: z.enum(["mlp_neuron", "sae_feature"]),
     id: z.string().min(1),
     label: z.string().min(1),
     layer: z.number().int().nonnegative(),
-    neuron: z.number().int().nonnegative(),
+    neuron: z.number().int().nonnegative().optional(),
+    featureIndex: z.number().int().nonnegative().optional(),
     baselineActivation: z.number().finite(),
-    operation: z.enum(["suppress", "reduce", "enhance", "invert"])
+    meanActivation: z.number().finite().optional(),
+    activeTokenCount: z.number().int().nonnegative().optional(),
+    operation: z.enum(["suppress", "reduce", "enhance", "invert", "add", "ablate"]),
+    release: z.string().min(1).optional(),
+    saeId: z.string().min(1).optional(),
+    width: z.number().int().positive().optional(),
+    architecture: z.literal("jump_relu").optional(),
+    source: z.string().min(1).optional(),
+    conceptLabel: z.string().min(1).optional(),
+    conceptSource: z.enum(["neuronpedia", "index"]).optional(),
+    conceptUrl: z.string().url().optional(),
+    positiveTokens: z.array(z.string()).optional(),
+    negativeTokens: z.array(z.string()).optional()
   }).optional(),
   vector: z.object({
     algorithmVersion: z.string().min(1).optional(),
@@ -260,6 +273,7 @@ const interventionExperimentSchema = z.object({
     topChangedTokenId: z.number().int().nonnegative().optional(),
     topChangedTokenDelta: z.number().finite().optional(),
     directionProjectionDelta: z.number().finite().optional(),
+    featureActivationDelta: z.number().finite().optional(),
     effectStatus: z.enum(["changed", "no_change"]).optional(),
     probeScore: z.number().finite().nullable(),
     probeReason: z.string().min(1)

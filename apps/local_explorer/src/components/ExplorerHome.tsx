@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   BrainCircuit,
+  Database,
   MessageSquareText,
   PanelLeftOpen,
   Paperclip,
@@ -33,6 +34,7 @@ interface ExplorerHomeProps {
   records: RunRecord[];
   activeRecord: RunRecord & { run: ExplorerRun };
   remoteState: RemoteRunState;
+  onOpenDatasetTest: () => void;
   onSelectConversation: (key: string) => void;
   onRunReady: (run: ExplorerRun, job: { id: string; kind: "prompt-run" | "attribution" | "intervention" | "patching" | "nla" | "jlens" }) => void;
   onRemoveRuns: (keys: string[]) => void;
@@ -42,6 +44,7 @@ export function ExplorerHome({
   records,
   activeRecord,
   remoteState,
+  onOpenDatasetTest,
   onSelectConversation,
   onRunReady,
   onRemoveRuns
@@ -240,9 +243,12 @@ export function ExplorerHome({
         <button className="chat-history-toggle" aria-label="Open chat history" title="Chat history" onClick={() => setHistoryOpen(true)}>
           <PanelLeftOpen size={18} />
         </button>
-        <span className={`chat-home-status ${remoteState.status}`}>
-          <i />{remoteState.status === "ready" ? "Local workspace" : "Local mode"}
-        </span>
+        <nav className="chat-home-nav" aria-label="SafeLens modes">
+          <button onClick={onOpenDatasetTest}><Database size={16} /> Dataset test</button>
+          <span className={`chat-home-status ${remoteState.status}`}>
+            <i />{remoteState.status === "ready" ? "Local workspace" : "Local mode"}
+          </span>
+        </nav>
       </header>
 
       <div className="chat-home-body">

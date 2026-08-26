@@ -46,6 +46,7 @@ import { OverviewEvidenceGraph } from "./components/OverviewEvidenceGraph";
 import { QuickActionsDialog } from "./components/QuickActionsDialog";
 import { ActionableEmptyState } from "./components/ActionableEmptyState";
 import { ExplorerHome } from "./components/ExplorerHome";
+import { DatasetTestScreen } from "./components/DatasetTestScreen";
 import {
   LayerSelector,
   SelectionWorkbench,
@@ -149,7 +150,7 @@ function preloadCompareDrawer() {
 const ExplorerRunContext = createContext<ExplorerRun>(realRun);
 type EvidenceFilter = "top" | "neighborhood" | "all";
 type WorkspaceLayout = "focus" | "dense";
-type AppScreen = "home" | "explorer";
+type AppScreen = "home" | "explorer" | "dataset-test";
 type ContextNotice = {
   id: number;
   kind: "run" | "selection";
@@ -178,7 +179,9 @@ function initialWorkspaceLayout(): WorkspaceLayout {
 }
 
 function screenFromLocation(): AppScreen {
-  if (window.location.pathname.replace(/\/+$/, "") === "/explorer") return "explorer";
+  const path = window.location.pathname.replace(/\/+$/, "");
+  if (path === "/dataset-test") return "dataset-test";
+  if (path === "/explorer") return "explorer";
   const params = new URLSearchParams(window.location.search);
   const explorerKeys = [
     "view", "mode", "run", "sample", "token", "layer", "head", "neuron", "track", "metric"
@@ -267,6 +270,11 @@ function App() {
     setScreen("home");
   }
 
+  function openDatasetTest() {
+    window.history.pushState(null, "", "/dataset-test");
+    setScreen("dataset-test");
+  }
+
   return (
     <ExplorerRunContext.Provider value={run}>
       {screen === "home" ? (
@@ -274,6 +282,7 @@ function App() {
           records={library.records}
           activeRecord={library.activeRecord}
           remoteState={library.remoteState}
+          onOpenDatasetTest={openDatasetTest}
           onSelectConversation={(key) => library.selectRun(key, undefined, "none")}
           onRunReady={(generatedRun, job) => library.addGeneratedRun(
             generatedRun,
@@ -288,6 +297,8 @@ function App() {
           )}
           onRemoveRuns={library.removeRuns}
         />
+      ) : screen === "dataset-test" ? (
+        <DatasetTestScreen onOpenChat={openHome} />
       ) : (
         <ExplorerWorkspace
           key={library.activeRecord.key}

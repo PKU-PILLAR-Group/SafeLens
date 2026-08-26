@@ -340,15 +340,28 @@ export interface InterventionOutput {
 }
 
 export interface InterventionExperiment {
-  mode: "direction" | "neuron";
+  mode: "direction" | "neuron" | "sae_feature";
   feature?: {
-    kind: "mlp_neuron";
+    kind: "mlp_neuron" | "sae_feature";
     id: string;
     label: string;
     layer: number;
-    neuron: number;
+    neuron?: number;
+    featureIndex?: number;
     baselineActivation: number;
-    operation: "suppress" | "reduce" | "enhance" | "invert";
+    meanActivation?: number;
+    activeTokenCount?: number;
+    operation: "suppress" | "reduce" | "enhance" | "invert" | "add" | "ablate";
+    release?: string;
+    saeId?: string;
+    width?: number;
+    architecture?: "jump_relu";
+    source?: string;
+    conceptLabel?: string;
+    conceptSource?: "neuronpedia" | "index";
+    conceptUrl?: string;
+    positiveTokens?: string[];
+    negativeTokens?: string[];
   };
   vector: {
     algorithmVersion?: string;
@@ -399,6 +412,7 @@ export interface InterventionExperiment {
     topChangedTokenId?: number;
     topChangedTokenDelta?: number;
     directionProjectionDelta?: number;
+    featureActivationDelta?: number;
     effectStatus?: "changed" | "no_change";
     probeScore: number | null;
     probeReason: string;

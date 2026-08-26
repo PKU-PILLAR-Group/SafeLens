@@ -512,6 +512,128 @@ const promptOptionsSchema = z.object({
 
 export type PromptOptions = z.infer<typeof promptOptionsSchema>;
 
+const datasetMetricSchema = z.object({
+  name: z.string().min(1),
+  shortName: z.string().min(1),
+  definition: z.string().min(1),
+  threshold: z.number().min(0).max(1)
+});
+
+const datasetSampleSchema = z.object({
+  id: z.string().min(1),
+  category: z.string().min(1),
+  prompt: z.string().nullable().optional(),
+  cleanPrompt: z.string().nullable().optional(),
+  corruptedPrompt: z.string().nullable().optional(),
+  desiredPrompt: z.string().nullable().optional(),
+  undesiredPrompt: z.string().nullable().optional(),
+  targetText: z.string().nullable().optional(),
+  expected: z.string().min(1)
+});
+
+const datasetDefinitionSchema = z.object({
+  id: z.string().min(1),
+  name: z.string().min(1),
+  version: z.string().min(1),
+  task: z.string().min(1),
+  description: z.string().min(1),
+  source: z.string().min(1),
+  metric: datasetMetricSchema,
+  samples: z.array(datasetSampleSchema).min(1)
+});
+
+const datasetAlgorithmSchema = z.object({
+  id: z.enum(["steering", "patching"]),
+  name: z.string().min(1),
+  kind: z.literal("optimization"),
+  description: z.string().min(1),
+  paperTitle: z.string().min(1),
+  paperUrl: z.string().url(),
+  implementation: z.string().min(1),
+  supportedDatasetIds: z.array(z.string().min(1)).min(1)
+});
+
+const datasetCatalogSchema = z.object({
+  datasets: z.array(datasetDefinitionSchema).min(1),
+  algorithms: z.array(datasetAlgorithmSchema).min(1)
+});
+
+const datasetTestRowSchema = z.object({
+  sampleId: z.string().min(1),
+  category: z.string().min(1),
+  prompt: z.string(),
+  status: z.enum(["complete", "error"]),
+  passed: z.boolean(),
+  detail: z.string(),
+  original: z.string().optional(),
+  steered: z.string().optional(),
+  patched: z.string().optional(),
+  diagnostics: z.record(z.string(), z.unknown()).optional()
+});
+
+const datasetTestResultSchema = z.object({
+  dataset: z.object({
+    id: z.string(), name: z.string(), version: z.string(), sampleCount: z.number().int()
+  }),
+  algorithm: z.object({
+    id: z.enum(["steering", "patching"]),
+    name: z.string(),
+    implementation: z.string()
+  }),
+  execution: z.object({
+    mode: z.string().optional(),
+    source: z.literal("real-local-model"),
+    model: z.string(),
+    modelSource: z.string().optional(),
+    revision: z.string().optional(),
+    device: z.string().optional(),
+    dtype: z.string().optional(),
+    seed: z.number().int().optional(),
+    layer: z.number().int().optional(),
+    requestedLayer: z.number().int().optional(),
+    component: z.string().optional(),
+    maxNewTokens: z.number().int().optional()
+  }),
+  metric: datasetMetricSchema.extend({
+    passed: z.number().int().nonnegative(),
+    completed: z.number().int().nonnegative(),
+    errors: z.number().int().nonnegative(),
+    accuracy: z.number().min(0).max(1),
+    meetsThreshold: z.boolean()
+  }),
+  rows: z.array(datasetTestRowSchema)
+});
+
+export const datasetTestJobSchema = z.object({
+  id: z.string().min(1),
+  kind: z.literal("dataset-test"),
+  status: z.enum(["idle", "loading", "ready", "error", "cancelled"]),
+  stage: z.string(),
+  progress: z.number().int().min(0).max(100),
+  detail: z.string(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+  request: z.object({
+    datasetId: z.string(),
+    algorithmId: z.enum(["steering", "patching"]),
+    model: z.string(),
+    sampleIds: z.array(z.string()),
+    layer: z.number().int(),
+    strength: z.number(),
+    seed: z.number().int(),
+    maxNewTokens: z.number().int()
+  }),
+  result: datasetTestResultSchema.nullable(),
+  error: z.string().nullable()
+});
+
+export type DatasetCatalog = z.infer<typeof datasetCatalogSchema>;
+export type DatasetDefinition = z.infer<typeof datasetDefinitionSchema>;
+export type DatasetAlgorithm = z.infer<typeof datasetAlgorithmSchema>;
+export type DatasetTestJob = z.infer<typeof datasetTestJobSchema>;
+export type DatasetTestResult = z.infer<typeof datasetTestResultSchema>;
+export type DatasetTestInput = DatasetTestJob["request"];
+
 const tokenizeResponseSchema = z.object({
   modelName: z.string().min(1),
   text: z.string(),
@@ -759,7 +881,7 @@ export interface PatchingRunInput {
 }
 
 export const interventionPreflightSchema = z.object({
-  mode: z.enum(["direction", "neuron"]).default("direction"),
+  mode: z.enum(["direction", "neuron", "sae_feature"]).default("direction"),
   modelAllowed: z.boolean(),
   layerAvailable: z.boolean(),
   componentSupported: z.boolean(),
@@ -767,6 +889,8 @@ export const interventionPreflightSchema = z.object({
   targetTokenValid: z.boolean(),
   referencesDiffer: z.boolean(),
   featureAvailable: z.boolean().default(true),
+  saeProfileValid: z.boolean().default(true),
+  saeRuntimeAvailable: z.boolean().default(true),
   targetTokenId: z.number().int().nonnegative(),
   targetTokenText: z.string(),
   positionStart: z.number().int().nonnegative(),
@@ -777,7 +901,7 @@ export const interventionPreflightSchema = z.object({
 
 export type InterventionPreflight = z.infer<typeof interventionPreflightSchema>;
 export interface InterventionPreflightInput {
-  mode?: "direction" | "neuron";
+  mode?: "direction" | "neuron" | "sae_feature";
   modelName: string;
   promptTokenCount: number;
   availableLayers: number[];
@@ -795,7 +919,39 @@ export interface InterventionPreflightInput {
   activationReduce?: "last_token" | "mean";
   neuron?: number;
   availableNeurons?: number[];
+  saeRelease?: string;
+  saeId?: string;
+  featureIndex?: number;
+  saeOperation?: "add" | "ablate";
 }
+
+const saeProfileSchema = z.object({
+  id: z.string().min(1),
+  label: z.string().min(1),
+  modelName: z.string().min(1),
+  release: z.string().min(1),
+  saeId: z.string().min(1),
+  layer: z.number().int().nonnegative(),
+  component: z.literal("resid_post"),
+  width: z.number().int().positive(),
+  architecture: z.literal("jump_relu"),
+  source: z.string().min(1)
+});
+
+export type SAEProfile = z.infer<typeof saeProfileSchema>;
+
+const saeFeatureInfoSchema = z.object({
+  modelName: z.string().min(1),
+  layer: z.number().int().nonnegative(),
+  featureIndex: z.number().int().nonnegative(),
+  label: z.string().min(1),
+  source: z.enum(["neuronpedia", "index"]),
+  url: z.string().url().nullable().optional(),
+  positiveTokens: z.array(z.string()).default([]),
+  negativeTokens: z.array(z.string()).default([])
+});
+
+export type SAEFeatureInfo = z.infer<typeof saeFeatureInfoSchema>;
 
 export const interventionJobSchema = z.object({
   id: z.string().min(1),
@@ -807,7 +963,7 @@ export const interventionJobSchema = z.object({
   createdAt: z.string(),
   updatedAt: z.string(),
   request: z.object({
-    mode: z.enum(["direction", "neuron"]).default("direction"),
+    mode: z.enum(["direction", "neuron", "sae_feature"]).default("direction"),
     desiredPrompt: z.string(),
     undesiredPrompt: z.string(),
     positivePrompts: z.array(z.string()).min(1).optional(),
@@ -825,6 +981,10 @@ export const interventionJobSchema = z.object({
     maxNewTokens: z.number().int().positive(),
     temperature: z.number().nonnegative(),
     neuron: z.number().int().nonnegative().nullish().transform((value) => value ?? undefined),
+    saeRelease: z.string().min(1).nullish().transform((value) => value ?? undefined),
+    saeId: z.string().min(1).nullish().transform((value) => value ?? undefined),
+    featureIndex: z.number().int().nonnegative().nullish().transform((value) => value ?? undefined),
+    saeOperation: z.enum(["add", "ablate"]).nullish().transform((value) => value ?? undefined),
     sourceRun: z.object({ runId: z.string(), sampleId: z.string(), modelName: z.string() }),
     preflight: interventionPreflightSchema
   }),
@@ -834,7 +994,7 @@ export const interventionJobSchema = z.object({
 
 export type InterventionJob = z.infer<typeof interventionJobSchema>;
 export interface InterventionRunInput {
-  mode?: "direction" | "neuron";
+  mode?: "direction" | "neuron" | "sae_feature";
   run: ExplorerRun;
   desiredPrompt?: string;
   undesiredPrompt?: string;
@@ -853,6 +1013,10 @@ export interface InterventionRunInput {
   maxNewTokens: number;
   temperature: number;
   neuron?: number;
+  saeRelease?: string;
+  saeId?: string;
+  featureIndex?: number;
+  saeOperation?: "add" | "ablate";
 }
 
 export async function submitPromptJob(input: PromptRunInput): Promise<PromptJob> {
@@ -884,6 +1048,51 @@ export async function fetchPromptOptions(signal?: AbortSignal): Promise<PromptOp
     );
   }
   return parsed.data;
+}
+
+export async function fetchDatasetCatalog(signal?: AbortSignal): Promise<DatasetCatalog> {
+  const response = await fetch(`${API_BASE}/datasets`, {
+    signal,
+    headers: { Accept: "application/json" },
+    cache: "no-store"
+  });
+  if (!response.ok) throw await jobResponseError(response, "dataset_catalog_error");
+  const parsed = datasetCatalogSchema.safeParse(await response.json());
+  if (!parsed.success) {
+    throw new ExplorerApiError(
+      "invalid_dataset_catalog",
+      `Dataset catalog failed validation: ${parsed.error.issues[0]?.message ?? "unknown error"}`
+    );
+  }
+  return parsed.data;
+}
+
+export async function submitDatasetTestJob(input: DatasetTestInput): Promise<DatasetTestJob> {
+  const response = await fetch(`${API_BASE}/jobs/dataset-test`, {
+    method: "POST",
+    headers: { Accept: "application/json", "Content-Type": "application/json" },
+    body: JSON.stringify(input)
+  });
+  if (!response.ok) throw await jobResponseError(response, "dataset_test_submit_error");
+  return parseDatasetTestJob(await response.json());
+}
+
+export async function fetchDatasetTestJob(jobId: string): Promise<DatasetTestJob> {
+  const response = await fetch(`${API_BASE}/jobs/${encodeURIComponent(jobId)}`, {
+    headers: { Accept: "application/json" },
+    cache: "no-store"
+  });
+  if (!response.ok) throw await jobResponseError(response, "dataset_test_status_error");
+  return parseDatasetTestJob(await response.json());
+}
+
+export async function cancelDatasetTestJob(jobId: string): Promise<DatasetTestJob> {
+  const response = await fetch(`${API_BASE}/jobs/${encodeURIComponent(jobId)}`, {
+    method: "DELETE",
+    headers: { Accept: "application/json" }
+  });
+  if (!response.ok) throw await jobResponseError(response, "dataset_test_cancel_error");
+  return parseDatasetTestJob(await response.json());
 }
 
 export async function fetchTokenizedResponse(
@@ -1095,6 +1304,52 @@ export async function fetchInterventionPreflight(
   return parsed.data;
 }
 
+export async function fetchSAEProfiles(
+  modelName: string,
+  signal?: AbortSignal
+): Promise<SAEProfile[]> {
+  const params = new URLSearchParams({ modelName });
+  const response = await fetch(`${API_BASE}/intervention/sae-profiles?${params}`, {
+    signal,
+    headers: { Accept: "application/json" },
+    cache: "no-store"
+  });
+  if (!response.ok) {
+    throw new ExplorerApiError("sae_profiles_error", await responseDetail(response));
+  }
+  const parsed = z.array(saeProfileSchema).safeParse(await response.json());
+  if (!parsed.success) {
+    throw new ExplorerApiError("invalid_sae_profiles", parsed.error.message);
+  }
+  return parsed.data;
+}
+
+export async function fetchSAEFeatureInfo(
+  modelName: string,
+  layer: number,
+  featureIndex: number,
+  signal?: AbortSignal
+): Promise<SAEFeatureInfo> {
+  const params = new URLSearchParams({
+    modelName,
+    layer: String(layer),
+    featureIndex: String(featureIndex)
+  });
+  const response = await fetch(`${API_BASE}/intervention/sae-feature-info?${params}`, {
+    signal,
+    headers: { Accept: "application/json" },
+    cache: "no-store"
+  });
+  if (!response.ok) {
+    throw new ExplorerApiError("sae_feature_info_error", await responseDetail(response));
+  }
+  const parsed = saeFeatureInfoSchema.safeParse(await response.json());
+  if (!parsed.success) {
+    throw new ExplorerApiError("invalid_sae_feature_info", parsed.error.message);
+  }
+  return parsed.data;
+}
+
 export async function submitInterventionJob(input: InterventionRunInput): Promise<InterventionJob> {
   const response = await fetch(`${API_BASE}/jobs/intervention`, {
     method: "POST",
@@ -1172,6 +1427,17 @@ function parseInterventionJob(input: unknown): InterventionJob {
     throw new ExplorerApiError(
       "invalid_intervention_job",
       `Intervention job response failed validation: ${parsed.error.message}`
+    );
+  }
+  return parsed.data;
+}
+
+function parseDatasetTestJob(input: unknown): DatasetTestJob {
+  const parsed = datasetTestJobSchema.safeParse(input);
+  if (!parsed.success) {
+    throw new ExplorerApiError(
+      "invalid_dataset_test_job",
+      `Dataset test job failed validation: ${parsed.error.issues[0]?.message ?? "unknown error"}`
     );
   }
   return parsed.data;

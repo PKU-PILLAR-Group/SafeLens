@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import os
 import threading
@@ -10,13 +11,62 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from SafeLens.explorer_api import (
+    InterventionPreflightRequest,
     PromptMessage,
+    _intervention_preflight,
     _read_artifact_cached,
     _read_physical_block_cached,
     _render_prompt,
+    _require_sae_base_model_snapshot,
     create_app,
 )
 from SafeLens.explorer_chunks import build_explorer_sidecar
+from SafeLens.sae_profiles import list_sae_profiles
+
+
+def test_sae_base_model_preflight_accepts_modelscope_snapshot(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    snapshot = tmp_path / "google" / "gemma-3-270m-it"
+    snapshot.mkdir(parents=True)
+    monkeypatch.setattr(
+        "SafeLens.explorer_model.resolve_explorer_pretrained_path",
+        lambda model_name, cache_dir: (str(snapshot), True, "modelscope"),
+    )
+
+    _require_sae_base_model_snapshot("google/gemma-3-270m-it")
+
+
+def test_sae_feature_info_endpoint_exposes_concept_metadata(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "SafeLens.explorer_sae.neuronpedia_feature_info",
+        lambda **kwargs: {
+            "label": "descriptive adjectives",
+            "source": "neuronpedia",
+            "url": "https://www.neuronpedia.org/api/feature/example",
+            "positiveTokens": [" enough"],
+            "negativeTokens": [" Own"],
+        },
+    )
+    client = TestClient(create_app(tmp_path))
+
+    response = client.get(
+        "/api/intervention/sae-feature-info",
+        params={"modelName": "google/gemma-3-270m-it", "layer": 9, "featureIndex": 2},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "modelName": "google/gemma-3-270m-it",
+        "layer": 9,
+        "featureIndex": 2,
+        "label": "descriptive adjectives",
+        "source": "neuronpedia",
+        "url": "https://www.neuronpedia.org/api/feature/example",
+        "positiveTokens": [" enough"],
+        "negativeTokens": [" Own"],
+    }
 
 
 def _sample(*, run_id: str = "run-a", sample_id: str = "sample-a") -> dict[str, object]:
@@ -71,6 +121,7 @@ def test_explorer_api_indexes_and_serves_exact_samples(tmp_path: Path) -> None:
         "jLensJobsEnabled": True,
         "patchingJobsEnabled": True,
         "interventionJobsEnabled": True,
+        "datasetTestJobsEnabled": True,
         "rootExists": True,
         "artifactCount": 1,
     }
@@ -94,6 +145,95 @@ def test_explorer_api_indexes_and_serves_exact_samples(tmp_path: Path) -> None:
     assert sample.headers["cache-control"] == "no-store"
     assert sample.headers["etag"].startswith('"')
     assert sample.headers["x-safelens-artifact"]
+
+
+def test_dataset_catalog_exposes_versioned_samples_and_paper_sources(tmp_path: Path) -> None:
+    client = TestClient(create_app(tmp_path))
+
+    response = client.get("/api/datasets")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert {item["id"] for item in payload["datasets"]} == {
+        "safelens-steering-v1",
+        "safelens-patching-v1",
+    }
+    assert {item["id"] for item in payload["algorithms"]} == {"steering", "patching"}
+    assert all(item["samples"] for item in payload["datasets"])
+    assert all(item["paperUrl"].startswith("https://arxiv.org/") for item in payload["algorithms"])
+
+
+def test_dataset_job_validates_and_reports_real_execution_result(tmp_path: Path) -> None:
+    received: list[object] = []
+
+    def runner(request, _cancel_event, progress):
+        received.append(request)
+        progress(50, "sample", "Testing steer-01.")
+        return {
+            "dataset": {
+                "id": request.datasetId,
+                "name": "SafeLens Steering Regression v1",
+                "version": "1.0.0",
+                "sampleCount": 1,
+            },
+            "algorithm": {
+                "id": request.algorithmId,
+                "name": "Residual steering",
+                "implementation": "contrastive_mean_difference",
+            },
+            "execution": {"source": "real-local-model", "model": request.model},
+            "metric": {
+                "name": "Steering effect accuracy",
+                "shortName": "causal effect rate",
+                "definition": "fixture",
+                "threshold": 0.6,
+                "passed": 1,
+                "completed": 1,
+                "errors": 0,
+                "accuracy": 1.0,
+                "meetsThreshold": True,
+            },
+            "rows": [],
+        }
+
+    client = TestClient(
+        create_app(
+            tmp_path,
+            dataset_test_runner=runner,
+            allowed_models=("test/model",),
+        )
+    )
+    response = client.post(
+        "/api/jobs/dataset-test",
+        json={
+            "datasetId": "safelens-steering-v1",
+            "algorithmId": "steering",
+            "model": "test/model",
+            "sampleIds": ["steer-01"],
+            "layer": 1,
+            "strength": 1.5,
+            "seed": 7,
+            "maxNewTokens": 8,
+        },
+    )
+
+    assert response.status_code == 202
+    job = _wait_for_job(client, response.json()["id"], "ready")
+    assert job["kind"] == "dataset-test"
+    assert job["result"]["execution"]["source"] == "real-local-model"
+    assert job["result"]["metric"]["accuracy"] == 1.0
+    assert received and received[0].sampleIds == ["steer-01"]
+
+    incompatible = client.post(
+        "/api/jobs/dataset-test",
+        json={
+            "datasetId": "safelens-patching-v1",
+            "algorithmId": "steering",
+            "model": "test/model",
+        },
+    )
+    assert incompatible.status_code == 422
+    assert incompatible.json()["detail"]["code"] == "incompatible_dataset_algorithm"
 
 
 def test_explorer_api_serves_metadata_and_range_filtered_chunks(tmp_path: Path) -> None:
@@ -477,10 +617,7 @@ def test_chat_prompt_renders_prior_turns_in_order() -> None:
     )
 
     assert rendered == (
-        "User: First question?\n"
-        "Assistant: First answer.\n"
-        "User: What follows?\n"
-        "Assistant:"
+        "User: First question?\nAssistant: First answer.\nUser: What follows?\nAssistant:"
     )
 
 
@@ -504,6 +641,7 @@ def test_prompt_options_include_registered_nla_base_models(tmp_path: Path) -> No
         "Qwen/Qwen2.5-7B-Instruct",
         "sshleifer/tiny-gpt2",
         "google/gemma-3-12b-it",
+        "google/gemma-3-270m-it",
     ]
     assert response.json()["maxNewTokens"] == 512
 
@@ -1260,7 +1398,9 @@ def test_intervention_preflight_checks_layer_range_target_and_references(tmp_pat
     assert blocked["referencesDiffer"] is False
 
 
-def test_intervention_preflight_accepts_prompt_batches_and_activation_reduction(tmp_path: Path) -> None:
+def test_intervention_preflight_accepts_prompt_batches_and_activation_reduction(
+    tmp_path: Path,
+) -> None:
     client = TestClient(
         create_app(
             tmp_path,
@@ -1323,6 +1463,74 @@ def test_neuron_intervention_preflight_requires_a_real_cached_neuron(tmp_path: P
     assert blocked.status_code == 200
     assert blocked.json()["canSubmit"] is False
     assert blocked.json()["featureAvailable"] is False
+
+
+def test_gemma_scope_profiles_and_sae_preflight_are_exact(monkeypatch) -> None:
+    original_find_spec = importlib.util.find_spec
+    monkeypatch.setattr(
+        importlib.util,
+        "find_spec",
+        lambda name: None if name == "sae_lens" else original_find_spec(name),
+    )
+    profiles = [
+        profile.to_api() for profile in list_sae_profiles(model_name="google/gemma-3-270m-it")
+    ]
+    layer_12 = next(profile for profile in profiles if profile["layer"] == 12)
+    assert layer_12 == {
+        "id": "gemma-scope-2-270m-it-resid-post-l12-16k-small",
+        "label": "Gemma Scope 2 · L12 · residual · 16k · L0 small",
+        "modelName": "google/gemma-3-270m-it",
+        "release": "gemma-scope-2-270m-it-res",
+        "saeId": "layer_12_width_16k_l0_small",
+        "layer": 12,
+        "component": "resid_post",
+        "width": 16_384,
+        "architecture": "jump_relu",
+        "source": "google/gemma-scope-2-270m-it",
+    }
+    request = {
+        "mode": "sae_feature",
+        "modelName": "google/gemma-3-270m-it",
+        "promptTokenCount": 2,
+        "availableLayers": list(range(18)),
+        "layer": 12,
+        "component": "resid_post",
+        "positionStart": 0,
+        "positionEnd": 2,
+        "targetTokenId": 42,
+        "desiredPrompt": "Enhance selected SAE feature",
+        "undesiredPrompt": "Suppress selected SAE feature",
+        "saeRelease": layer_12["release"],
+        "saeId": layer_12["saeId"],
+        "featureIndex": 123,
+        "saeOperation": "add",
+    }
+    ready = _intervention_preflight(
+        InterventionPreflightRequest.model_validate(request),
+        _PatchingTokenizer(),
+        allowed_models=("google/gemma-3-270m-it",),
+    )
+    assert ready.saeProfileValid is True
+    assert ready.featureAvailable is True
+    assert ready.saeRuntimeAvailable is False
+    assert ready.canSubmit is False
+
+    mismatched = _intervention_preflight(
+        InterventionPreflightRequest.model_validate(
+            {**request, "saeId": "layer_12_width_16k_l0_medium"}
+        ),
+        _PatchingTokenizer(),
+        allowed_models=("google/gemma-3-270m-it",),
+    )
+    assert mismatched.saeProfileValid is False
+    assert mismatched.featureAvailable is False
+
+    outside = _intervention_preflight(
+        InterventionPreflightRequest.model_validate({**request, "featureIndex": 16_384}),
+        _PatchingTokenizer(),
+        allowed_models=("google/gemma-3-270m-it",),
+    )
+    assert outside.featureAvailable is False
 
 
 def test_intervention_job_queues_only_after_authoritative_preflight(tmp_path: Path) -> None:

@@ -153,6 +153,64 @@ def test_direction_hook_skips_prefill_then_applies_raw_contrast_during_generatio
     )
 
 
+def test_sae_feature_hook_adds_one_decoded_feature_on_selected_prompt_tokens() -> None:
+    torch = pytest.importorskip("torch")
+
+    class FakeSAE:
+        W_dec = torch.eye(2)
+
+        def encode(self, activation):
+            return activation
+
+        def decode(self, features):
+            return features
+
+    hook = MODULE._make_sae_feature_hook(
+        sae=FakeSAE(),
+        feature_index=1,
+        operation="add",
+        scale=3.0,
+        position=(1, 3),
+        prompt_token_count=3,
+    )
+    activation = torch.tensor([[[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]])
+
+    patched = hook(activation=activation)
+
+    assert torch.equal(
+        patched,
+        torch.tensor([[[1.0, 2.0], [3.0, 7.0], [5.0, 9.0]]]),
+    )
+    assert torch.equal(hook(activation=torch.zeros((1, 1, 2))), torch.zeros((1, 1, 2)))
+
+
+def test_sae_feature_hook_ablates_encoded_feature_without_replacing_reconstruction() -> None:
+    torch = pytest.importorskip("torch")
+
+    class FakeSAE:
+        W_dec = torch.eye(2)
+
+        def encode(self, activation):
+            return activation
+
+        def decode(self, features):
+            return features
+
+    hook = MODULE._make_sae_feature_hook(
+        sae=FakeSAE(),
+        feature_index=0,
+        operation="ablate",
+        scale=20.0,
+        position=(0, 1),
+        prompt_token_count=2,
+    )
+    activation = torch.tensor([[[4.0, 2.0], [7.0, 5.0]]])
+
+    patched = hook(activation=activation)
+
+    assert torch.equal(patched, torch.tensor([[[0.0, 2.0], [7.0, 5.0]]]))
+
+
 def test_reference_prompt_uses_native_chat_template_when_available() -> None:
     class Tokenizer:
         def apply_chat_template(self, messages, *, tokenize, add_generation_prompt):
