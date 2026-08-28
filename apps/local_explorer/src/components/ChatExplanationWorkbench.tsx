@@ -58,6 +58,7 @@ export function ChatExplanationWorkbench({
   const [preflightError, setPreflightError] = useState<string | null>(null);
   const [preflightLoading, setPreflightLoading] = useState(false);
   const [confirmGatedAccess, setConfirmGatedAccess] = useState(false);
+  const [nlaMaxNewTokens, setNlaMaxNewTokens] = useState(256);
   const [jLensSource, setJLensSource] = useState("");
   const [jLensFilename, setJLensFilename] = useState("lens.pt");
   const [jLensRevision, setJLensRevision] = useState("main");
@@ -218,7 +219,7 @@ export function ChatExplanationWorkbench({
       profile: selectedProfile.name,
       positions: [selectedToken],
       revision: "main",
-      maxNewTokens: 96,
+      maxNewTokens: nlaMaxNewTokens,
       loadReconstructor: true,
       confirmGatedAccess
     });
@@ -317,7 +318,9 @@ export function ChatExplanationWorkbench({
           running={nlaRunning}
           canRun={canRunNla}
           confirmGatedAccess={confirmGatedAccess}
+          maxNewTokens={nlaMaxNewTokens}
           onConfirmGatedAccess={setConfirmGatedAccess}
+          onMaxNewTokensChange={setNlaMaxNewTokens}
           onRun={submitNla}
           onCancel={() => void nlaRunner.cancel()}
         />
@@ -355,7 +358,9 @@ function NlaOutput({
   running,
   canRun,
   confirmGatedAccess,
+  maxNewTokens,
   onConfirmGatedAccess,
+  onMaxNewTokensChange,
   onRun,
   onCancel
 }: {
@@ -369,7 +374,9 @@ function NlaOutput({
   running: boolean;
   canRun: boolean;
   confirmGatedAccess: boolean;
+  maxNewTokens: number;
   onConfirmGatedAccess: (value: boolean) => void;
+  onMaxNewTokensChange: (value: number) => void;
   onRun: () => void;
   onCancel: () => void;
 }) {
@@ -380,12 +387,21 @@ function NlaOutput({
       <div className="chat-explanation-provenance">
         <span><small>Profile</small><b>{profile?.name ?? row?.profile ?? "not registered"}</b></span>
         <span><small>Component</small><b>{row?.component ?? profile?.component ?? "resid_post"}</b></span>
-        <span><small>Evidence</small><b>{available ? "AV + AR" : "not computed"}</b></span>
+        <span><small>Evidence</small><b>{available ? row.generation?.complete ? "AV + AR · complete" : "AV + AR · legacy" : "not computed"}</b></span>
       </div>
 
       {available ? (
         <article className="chat-nla-result">
           <header><CheckCircle2 size={17} /><span>What this activation represents</span></header>
+          {row.generation?.complete ? (
+            <small className="chat-nla-generation-state complete">
+              Complete · {row.generation.generatedTokenCount} / {row.generation.requestedMaxNewTokens} tokens
+            </small>
+          ) : (
+            <small className="chat-nla-generation-state legacy">
+              Legacy artifact · completion was not recorded
+            </small>
+          )}
           <p>{row.explanation}</p>
           <dl>
             <div><dt>Cosine</dt><dd>{formatMetric(row.cosine)}</dd></div>
@@ -416,18 +432,28 @@ function NlaOutput({
         </label>
       )}
 
-      {!available && (
-        <div className="chat-nla-actions">
-          <span aria-live="polite" className={error ? "failed" : ""}>
-            {running ? <LoaderCircle size={15} /> : error ? <AlertCircle size={15} /> : <CheckCircle2 size={15} />}
-            {running ? `${progress ?? 0}% · ${preflight?.reason ?? "Generating explanation"}` : error ?? (preflightLoading ? "Checking NLA compatibility" : compatibilityReason)}
-          </span>
-          <button type="button" disabled={!canRun && !running} onClick={running ? onCancel : onRun}>
-            {running ? <Square size={14} /> : <Send size={14} />}
-            {running ? "Cancel" : "Run NLA"}
-          </button>
-        </div>
-      )}
+      <div className="chat-nla-actions">
+        <span aria-live="polite" className={error ? "failed" : ""}>
+          {running ? <LoaderCircle size={15} /> : error ? <AlertCircle size={15} /> : <CheckCircle2 size={15} />}
+          {running ? `${progress ?? 0}% · ${preflight?.reason ?? "Generating explanation"}` : error ?? (preflightLoading ? "Checking NLA compatibility" : available ? "Exact explanation loaded" : compatibilityReason)}
+        </span>
+        <label className="chat-nla-token-budget">
+          <span>Max tokens</span>
+          <input
+            aria-label="NLA explanation tokens"
+            type="number"
+            min={8}
+            max={512}
+            value={maxNewTokens}
+            disabled={running}
+            onChange={(event) => onMaxNewTokensChange(clampInteger(event.target.value, 8, 512))}
+          />
+        </label>
+        <button type="button" disabled={!canRun && !running} onClick={running ? onCancel : onRun}>
+          {running ? <Square size={14} /> : <Send size={14} />}
+          {running ? "Cancel" : available ? "Regenerate NLA" : "Run NLA"}
+        </button>
+      </div>
     </div>
   );
 }
@@ -603,4 +629,11 @@ function formatMetric(value: number) {
 
 function formatProbability(value: number) {
   return value < 0.001 ? value.toExponential(2) : `${(value * 100).toFixed(2)}%`;
+}
+
+function clampInteger(value: string, minimum: number, maximum: number) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed)
+    ? Math.max(minimum, Math.min(maximum, Math.round(parsed)))
+    : minimum;
 }

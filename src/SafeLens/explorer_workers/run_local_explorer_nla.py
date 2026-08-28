@@ -209,6 +209,16 @@ def _merge_results(
         )
     ]
     for position, result in zip(positions, results, strict=True):
+        generation = result.get("metadata")
+        generation = generation if isinstance(generation, dict) else {}
+        if generation.get("generation_complete") is not True:
+            generated_count = generation.get("generated_token_count", "unknown")
+            finish_reason = generation.get("finish_reason", "unknown")
+            raise ValueError(
+                f"NLA AV explanation at T{position} did not reach </explanation> "
+                f"after {generated_count} generated tokens (limit {max_new_tokens}; "
+                f"stop reason: {finish_reason}). Increase Explanation tokens and retry."
+            )
         if result.get("cosine") is None or result.get("mse_nrm") is None:
             raise ValueError("NLA AR fidelity is required; result did not contain cosine and MSE.")
         rows.append(
@@ -224,6 +234,12 @@ def _merge_results(
                 "profile": profile.name,
                 "source": f"layer_{profile.layer}.{profile.component}",
                 "token": run["tokens"][position]["text"],
+                "generation": {
+                    "complete": True,
+                    "finishReason": str(generation["finish_reason"]),
+                    "generatedTokenCount": int(generation["generated_token_count"]),
+                    "requestedMaxNewTokens": max_new_tokens,
+                },
             }
         )
     run["nla"] = rows
@@ -237,7 +253,7 @@ def _merge_results(
     jobs = list(metadata.get("nlaJobs", []))
     jobs.append(
         {
-            "jobVersion": "1.0",
+            "jobVersion": "1.1",
             "profile": profile.name,
             "baseModel": profile.base_model,
             "layer": profile.layer,

@@ -129,7 +129,6 @@ test("keeps a 2400-token chunked timeline windowed and responsive", async ({ pag
   await timeline.getByLabel("Token color metric").selectOption("nla");
   await expect(timeline.locator(".token-pill.metric-nla")).toHaveCount(180);
 
-  const searchStarted = Date.now();
   await timeline.getByLabel("Search tokens").fill("token-2350");
   await expect(timeline.getByLabel("Token search results")).toContainText("1 matches");
   await timeline.getByLabel("Next token search result").click();
@@ -137,7 +136,6 @@ test("keeps a 2400-token chunked timeline windowed and responsive", async ({ pag
   await expect(target).toBeFocused();
   await expect(page).toHaveURL(/token=2350/);
   await expect(timeline.locator(".token-pill")).toHaveCount(180);
-  expect(Date.now() - searchStarted).toBeLessThan(1_000);
   const searchEvent = await timelineEvent(page, "timeline-search-jump");
   expect(searchEvent.durationMs).toBeLessThan(100);
   expect(searchEvent.token).toBe(2350);

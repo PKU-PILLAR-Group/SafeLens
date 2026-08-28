@@ -14,12 +14,12 @@ import sys
 import threading
 import uuid
 import webbrowser
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable, Iterator
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, TypeVar
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -85,20 +85,6 @@ class RunIndexResponse(BaseModel):
     diagnostics: list[ArtifactDiagnostic]
 
 
-CHUNK_COMPONENTS = (
-    "residualCells",
-    "logitLens",
-    "jLens",
-    "attentionHeads",
-    "attentionCells",
-    "mlpNeurons",
-    "mlpCells",
-    "attributionTracks",
-    "attributionMethods",
-    "nla",
-    "patching",
-    "intervention",
-)
 ChunkComponent = Literal[
     "residualCells",
     "logitLens",
@@ -113,6 +99,21 @@ ChunkComponent = Literal[
     "patching",
     "intervention",
 ]
+CHUNK_COMPONENTS: tuple[ChunkComponent, ...] = (
+    "residualCells",
+    "logitLens",
+    "jLens",
+    "attentionHeads",
+    "attentionCells",
+    "mlpNeurons",
+    "mlpCells",
+    "attributionTracks",
+    "attributionMethods",
+    "nla",
+    "patching",
+    "intervention",
+)
+ModelT = TypeVar("ModelT", bound=BaseModel)
 
 
 class ChunkDescriptor(BaseModel):
@@ -305,7 +306,7 @@ class NLARunRequest(BaseModel):
     profile: str = Field(min_length=1)
     positions: list[int] = Field(min_length=1, max_length=8)
     revision: str = Field(default="main", min_length=1, max_length=128)
-    maxNewTokens: int = Field(default=96, ge=8, le=256)
+    maxNewTokens: int = Field(default=256, ge=8, le=512)
     loadReconstructor: bool = True
     confirmGatedAccess: bool = False
 
@@ -500,7 +501,7 @@ class InterventionRunRequest(BaseModel):
     sourceLayer: int | None = Field(default=None, ge=0)
     injectLayer: int | None = Field(default=None, ge=0)
     component: Literal["resid_post", "attn_out", "mlp_out"]
-    scale: float = Field(ge=-20.0, le=20.0)
+    scale: float = Field(ge=-1_000.0, le=1_000.0)
     positionStart: int = Field(ge=0)
     positionEnd: int = Field(ge=1)
     targetTokenId: int = Field(ge=0)
@@ -515,6 +516,8 @@ class InterventionRunRequest(BaseModel):
 
     @model_validator(mode="after")
     def normalize_references(self) -> InterventionRunRequest:
+        if self.mode != "sae_feature" and abs(self.scale) > 20:
+            raise ValueError("direction and neuron intervention scale must be between -20 and 20")
         self.positivePrompts = _clean_intervention_prompts(
             self.positivePrompts or ([self.desiredPrompt] if self.desiredPrompt else []),
             "positivePrompts",
@@ -528,6 +531,17 @@ class InterventionRunRequest(BaseModel):
         return self
 
 
+class SAEFeatureDiscoveryRequest(BaseModel):
+    run: dict[str, Any]
+    layer: int = Field(ge=0)
+    component: Literal["resid_post"] = "resid_post"
+    saeRelease: str = Field(min_length=1, max_length=200)
+    saeId: str = Field(min_length=1, max_length=200)
+    positionStart: int = Field(ge=0)
+    positionEnd: int = Field(ge=1)
+    limit: int = Field(default=8, ge=1, le=20)
+
+
 class JobSnapshot(BaseModel):
     id: str
     kind: Literal[
@@ -537,6 +551,7 @@ class JobSnapshot(BaseModel):
         "jlens",
         "patching",
         "intervention",
+        "sae-discovery",
         "dataset-test",
     ]
     status: Literal["idle", "loading", "ready", "error", "cancelled"]
@@ -593,6 +608,7 @@ class ExplorerJobManager:
             "jlens",
             "patching",
             "intervention",
+            "sae-discovery",
             "dataset-test",
         ],
         ready_detail: str,
@@ -758,14 +774,17 @@ def create_app(
     patching_tokenizer_loader: Callable[[str], Any] | None = None,
     intervention_runner: JobRunner | None = None,
     intervention_tokenizer_loader: Callable[[str], Any] | None = None,
+    sae_discovery_runner: JobRunner | None = None,
     dataset_test_runner: JobRunner | None = None,
     allowed_models: tuple[str, ...] | None = None,
 ) -> FastAPI:
     """Create a localhost-oriented API constrained to one artifact root."""
     if allowed_models is None:
         allowed_models = _default_allowed_models()
-    configured_root = artifact_root or os.environ.get(
-        "SAFELENS_EXPLORER_ARTIFACT_ROOT", DEFAULT_ARTIFACT_ROOT
+    configured_root = (
+        artifact_root
+        or os.environ.get("SAFELENS_EXPLORER_ARTIFACT_ROOT")
+        or DEFAULT_ARTIFACT_ROOT
     )
     root = Path(configured_root).expanduser().resolve()
     app = FastAPI(
@@ -820,6 +839,12 @@ def create_app(
         ready_detail="Intervention comparison is ready in a derived Explorer run.",
         error_detail="Intervention failed. Inspect the vector references, range, and diagnostic.",
     )
+    sae_discovery_manager = ExplorerJobManager(
+        sae_discovery_runner or _subprocess_sae_discovery_runner(root=root),
+        kind="sae-discovery",
+        ready_detail="Active SAE features are ready for selection.",
+        error_detail="SAE feature discovery failed. Inspect the checkpoint and token range.",
+    )
     dataset_manager = ExplorerJobManager(
         dataset_test_runner or _local_dataset_test_runner(allowed_models=allowed_models),
         kind="dataset-test",
@@ -833,6 +858,7 @@ def create_app(
         jlens_manager,
         patching_manager,
         intervention_manager,
+        sae_discovery_manager,
         dataset_manager,
     )
     load_patching_tokenizer = patching_tokenizer_loader or _default_patching_tokenizer_loader
@@ -1081,7 +1107,7 @@ def create_app(
             layer=profile.layer,
             featureIndex=featureIndex,
             label=str(info["label"]),
-            source=str(info["source"]),
+            source="neuronpedia" if info.get("source") == "neuronpedia" else "index",
             url=info.get("url"),
             positiveTokens=list(info.get("positiveTokens", [])),
             negativeTokens=list(info.get("negativeTokens", [])),
@@ -1441,7 +1467,7 @@ def create_app(
                 activationReduce=payload.activationReduce,
                 neuron=payload.neuron,
                 availableNeurons=[
-                    int(item.get("neuron"))
+                    int(item["neuron"])
                     for item in payload.run.get("mlpNeurons", [])
                     if isinstance(item, dict)
                     and isinstance(item.get("neuron"), int)
@@ -1493,6 +1519,63 @@ def create_app(
             },
         )
 
+    @app.post("/api/jobs/sae-discovery", response_model=JobSnapshot, status_code=202)
+    def submit_sae_discovery(payload: SAEFeatureDiscoveryRequest) -> JobSnapshot:
+        from SafeLens.sae_profiles import get_sae_profile
+
+        encoded_size = len(json.dumps(payload.run).encode("utf-8"))
+        if encoded_size > max_file_bytes:
+            raise HTTPException(
+                status_code=413,
+                detail={"code": "run_too_large", "message": "Run exceeds the compact job limit."},
+            )
+        try:
+            payload = _hydrate_workspace_job_payload(
+                payload, root=root, max_file_bytes=max_file_bytes
+            )
+            _require_sample_metadata(payload.run, index=0)
+            profile = get_sae_profile(
+                model_name=str(payload.run["modelName"]),
+                release=payload.saeRelease,
+                sae_id=payload.saeId,
+            )
+            if profile is None:
+                raise ValueError(
+                    "Model, release, and SAE ID are not an enabled Gemma Scope profile."
+                )
+            if payload.layer != profile.layer or payload.component != profile.component:
+                raise ValueError("Gemma Scope profile does not match the requested layer and site.")
+            if payload.layer not in payload.run["layers"]:
+                raise ValueError(f"Layer L{payload.layer} is not available in the source run.")
+            token_count = len(payload.run["tokens"])
+            if not 0 <= payload.positionStart < payload.positionEnd <= token_count:
+                raise ValueError("Feature discovery range must stay inside the source prompt.")
+            if sae_discovery_runner is None:
+                _require_sae_base_model_snapshot(str(payload.run["modelName"]))
+        except HTTPException:
+            raise
+        except (ArtifactReadError, KeyError, OSError, TypeError, ValueError) as exc:
+            code = (
+                exc.code
+                if isinstance(exc, ArtifactReadError)
+                else "invalid_sae_discovery_request"
+            )
+            raise HTTPException(
+                status_code=422,
+                detail={"code": code, "message": str(exc)},
+            ) from exc
+        return sae_discovery_manager.submit(
+            payload,
+            public_request={
+                **payload.model_dump(exclude={"run"}),
+                "sourceRun": {
+                    "runId": payload.run["runId"],
+                    "sampleId": payload.run["sampleId"],
+                    "modelName": payload.run["modelName"],
+                },
+            },
+        )
+
     @app.get("/api/jobs/{job_id}", response_model=JobSnapshot)
     def get_job(job_id: str) -> JobSnapshot:
         try:
@@ -1514,7 +1597,7 @@ def create_app(
         except KeyError as exc:
             raise HTTPException(status_code=404, detail={"code": "job_not_found"}) from exc
 
-        async def stream():
+        async def stream() -> AsyncIterator[str]:
             previous = ""
             while not await request.is_disconnected():
                 snapshot = manager.get(job_id)
@@ -2022,6 +2105,7 @@ def _nla_preflight(payload: NLAPreflightRequest) -> NLAPreflightResponse:
     token_configured = bool(os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN"))
     structural = model_matches and layer_available and d_model_matches
     authorization_required = structural and profile.gated and not token_configured
+    status: Literal["compatible", "incompatible", "authorization_required"]
     if not structural:
         failures = []
         if not model_matches:
@@ -2300,8 +2384,8 @@ def _artifact_attention_head_count(run: dict[str, Any], layer: int) -> int | Non
     heads = run.get("attentionHeads")
     if not isinstance(heads, list):
         return None
-    indices = [
-        item.get("head")
+    indices: list[int] = [
+        item["head"]
         for item in heads
         if isinstance(item, dict)
         and item.get("layer") == layer
@@ -2749,6 +2833,72 @@ def _subprocess_intervention_runner(*, root: Path) -> JobRunner:
     return run
 
 
+def _subprocess_sae_discovery_runner(*, root: Path) -> JobRunner:
+    script, working_directory = _explorer_worker("run_local_explorer_sae_discovery.py")
+
+    def run(
+        payload: SAEFeatureDiscoveryRequest,
+        cancel_event: threading.Event,
+        progress: JobProgress,
+    ) -> dict[str, Any]:
+        job_suffix = uuid.uuid4().hex[:10]
+        output_dir = root / ".jobs"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        input_path = output_dir / f"{job_suffix}.sae-discovery-input.json"
+        result_path = output_dir / f"{job_suffix}.sae-discovery-result.json"
+        input_path.write_text(
+            json.dumps(
+                {
+                    "run": payload.run,
+                    "request": payload.model_dump(exclude={"run"}),
+                }
+            ),
+            encoding="utf-8",
+        )
+        command = [
+            sys.executable,
+            str(script),
+            "--input",
+            str(input_path),
+            "--output",
+            str(result_path),
+        ]
+        progress(8, "base-model", f"Loading {payload.run['modelName']} for SAE discovery.")
+        try:
+            process = subprocess.Popen(
+                command,
+                cwd=working_directory,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            progress(35, "sae-encode", "Encoding the selected tokens with Gemma Scope SAE.")
+            stdout, stderr = _communicate_cancellable(process, cancel_event)
+            _require_not_cancelled(cancel_event)
+            if process.returncode != 0:
+                diagnostic = (stderr or stdout or "SAE discovery subprocess failed").strip()
+                raise RuntimeError(diagnostic[-2_000:])
+            progress(90, "feature-metadata", "Validating active features and concept metadata.")
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+            candidates = result.get("candidates")
+            if not isinstance(candidates, list):
+                raise ValueError("SAE discovery worker did not return a candidate list.")
+            if any(
+                not isinstance(candidate, dict)
+                or not isinstance(candidate.get("featureIndex"), int)
+                or not isinstance(candidate.get("maxActivation"), (int, float))
+                for candidate in candidates
+            ):
+                raise ValueError("SAE discovery returned an invalid candidate row.")
+            _require_not_cancelled(cancel_event)
+            return result
+        finally:
+            input_path.unlink(missing_ok=True)
+            result_path.unlink(missing_ok=True)
+
+    return run
+
+
 def _communicate_cancellable(
     process: subprocess.Popen[str], cancel_event: threading.Event
 ) -> tuple[str, str]:
@@ -2952,7 +3102,7 @@ def _read_manifest_cached(path_text: str, _modified_ns: int, _size_bytes: int) -
     return payload
 
 
-def _manifest_candidates(root: Path):
+def _manifest_candidates(root: Path) -> Iterator[Path]:
     if not root.is_dir():
         return
     for candidate in root.rglob("*.explorer.manifest.json"):
@@ -2966,7 +3116,7 @@ def _manifest_candidates(root: Path):
         yield resolved
 
 
-def _artifact_candidates(root: Path):
+def _artifact_candidates(root: Path) -> Iterator[Path]:
     if not root.is_dir():
         return
     for candidate in root.rglob("*.explorer.json"):
@@ -3035,9 +3185,10 @@ def _sample_summary(
     modified_at: str,
     size_bytes: int,
 ) -> RemoteRunSummary:
-    prompt = sample.get("prompt")
+    prompt = _sample_user_prompt(sample)
     prompt_preview = " ".join(prompt.split())[:160] if isinstance(prompt, str) else None
-    metadata = sample.get("metadata") if isinstance(sample.get("metadata"), dict) else {}
+    metadata_value = sample.get("metadata")
+    metadata: dict[str, Any] = metadata_value if isinstance(metadata_value, dict) else {}
     parent = metadata.get("parentRun")
     parent_run = (
         RemoteParentRun(runId=parent["runId"], sampleId=parent["sampleId"])
@@ -3068,6 +3219,32 @@ def _sample_summary(
             else None
         ),
     )
+
+
+def _sample_user_prompt(sample: dict[str, Any]) -> str | None:
+    metadata = sample.get("metadata")
+    if isinstance(metadata, dict):
+        prompt_runner = metadata.get("promptRunner")
+        if isinstance(prompt_runner, dict):
+            user_prompt = prompt_runner.get("userPrompt")
+            if isinstance(user_prompt, str) and user_prompt.strip():
+                return user_prompt.strip()
+
+    prompt = sample.get("prompt")
+    if not isinstance(prompt, str):
+        return None
+    patterns = (
+        r"<\|im_start\|>user\n(.*?)<\|im_end\|>",
+        r"<start_of_turn>user\n(.*?)<end_of_turn>",
+        r"(?:^|\n)User:\s*(.*?)(?=\nAssistant:|\Z)",
+    )
+    for pattern in patterns:
+        matches = re.findall(pattern, prompt, flags=re.DOTALL)
+        if matches:
+            candidate = matches[-1].strip()
+            if candidate:
+                return candidate
+    return prompt.strip() or None
 
 
 def _find_indexed_sample(
@@ -3221,11 +3398,11 @@ _JOB_RUN_IDENTITY_FIELDS = (
 
 
 def _hydrate_workspace_job_payload(
-    payload: BaseModel,
+    payload: ModelT,
     *,
     root: Path,
     max_file_bytes: int,
-) -> BaseModel:
+) -> ModelT:
     run = getattr(payload, "run", None)
     if not isinstance(run, dict) or not _job_run_needs_hydration(run):
         return payload

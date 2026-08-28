@@ -36,6 +36,12 @@ export interface NLARow {
   profile?: string | null;
   source?: string;
   token?: string;
+  generation?: {
+    complete: boolean;
+    finishReason: "end_tag" | "eos" | "length" | "unknown";
+    generatedTokenCount: number;
+    requestedMaxNewTokens: number;
+  };
 }
 
 export interface NLAProfileCompatibility {

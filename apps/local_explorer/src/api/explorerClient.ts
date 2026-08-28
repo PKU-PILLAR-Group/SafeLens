@@ -953,6 +953,72 @@ const saeFeatureInfoSchema = z.object({
 
 export type SAEFeatureInfo = z.infer<typeof saeFeatureInfoSchema>;
 
+const saeFeatureCandidateSchema = z.object({
+  featureIndex: z.number().int().nonnegative(),
+  label: z.string().min(1),
+  source: z.enum(["neuronpedia", "index"]),
+  url: z.string().url().nullable().optional(),
+  positiveTokens: z.array(z.string()).default([]),
+  negativeTokens: z.array(z.string()).default([]),
+  maxActivation: z.number().nonnegative(),
+  meanActivation: z.number(),
+  activeTokenCount: z.number().int().nonnegative(),
+  peakTokenIndex: z.number().int().nonnegative(),
+  peakTokenText: z.string(),
+  recommendedDelta: z.number().positive()
+});
+
+const saeFeatureDiscoveryResultSchema = z.object({
+  runId: z.string().min(1),
+  sampleId: z.string().min(1),
+  modelName: z.string().min(1),
+  layer: z.number().int().nonnegative(),
+  component: z.literal("resid_post"),
+  release: z.string().min(1),
+  saeId: z.string().min(1),
+  positionStart: z.number().int().nonnegative(),
+  positionEnd: z.number().int().positive(),
+  candidates: z.array(saeFeatureCandidateSchema).max(20)
+});
+
+export type SAEFeatureCandidate = z.infer<typeof saeFeatureCandidateSchema>;
+export type SAEFeatureDiscoveryResult = z.infer<typeof saeFeatureDiscoveryResultSchema>;
+
+export const saeFeatureDiscoveryJobSchema = z.object({
+  id: z.string().min(1),
+  kind: z.literal("sae-discovery"),
+  status: z.enum(["idle", "loading", "ready", "error", "cancelled"]),
+  stage: z.string(),
+  progress: z.number().int().min(0).max(100),
+  detail: z.string(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+  request: z.object({
+    layer: z.number().int().nonnegative(),
+    component: z.literal("resid_post"),
+    saeRelease: z.string().min(1),
+    saeId: z.string().min(1),
+    positionStart: z.number().int().nonnegative(),
+    positionEnd: z.number().int().positive(),
+    limit: z.number().int().min(1).max(20),
+    sourceRun: z.object({ runId: z.string(), sampleId: z.string(), modelName: z.string() })
+  }),
+  result: saeFeatureDiscoveryResultSchema.nullable(),
+  error: z.string().nullable()
+});
+
+export type SAEFeatureDiscoveryJob = z.infer<typeof saeFeatureDiscoveryJobSchema>;
+export interface SAEFeatureDiscoveryInput {
+  run: ExplorerRun;
+  layer: number;
+  component: "resid_post";
+  saeRelease: string;
+  saeId: string;
+  positionStart: number;
+  positionEnd: number;
+  limit: number;
+}
+
 export const interventionJobSchema = z.object({
   id: z.string().min(1),
   kind: z.literal("intervention"),
@@ -1350,6 +1416,29 @@ export async function fetchSAEFeatureInfo(
   return parsed.data;
 }
 
+export async function submitSAEFeatureDiscoveryJob(
+  input: SAEFeatureDiscoveryInput
+): Promise<SAEFeatureDiscoveryJob> {
+  const response = await fetch(`${API_BASE}/jobs/sae-discovery`, {
+    method: "POST",
+    headers: { Accept: "application/json", "Content-Type": "application/json" },
+    body: JSON.stringify(input)
+  });
+  if (!response.ok) throw await jobResponseError(response, "sae_discovery_submit_error");
+  return parseSAEFeatureDiscoveryJob(await response.json());
+}
+
+export async function cancelSAEFeatureDiscoveryJob(
+  jobId: string
+): Promise<SAEFeatureDiscoveryJob> {
+  const response = await fetch(`${API_BASE}/jobs/${encodeURIComponent(jobId)}`, {
+    method: "DELETE",
+    headers: { Accept: "application/json" }
+  });
+  if (!response.ok) throw await jobResponseError(response, "sae_discovery_cancel_error");
+  return parseSAEFeatureDiscoveryJob(await response.json());
+}
+
 export async function submitInterventionJob(input: InterventionRunInput): Promise<InterventionJob> {
   const response = await fetch(`${API_BASE}/jobs/intervention`, {
     method: "POST",
@@ -1427,6 +1516,17 @@ function parseInterventionJob(input: unknown): InterventionJob {
     throw new ExplorerApiError(
       "invalid_intervention_job",
       `Intervention job response failed validation: ${parsed.error.message}`
+    );
+  }
+  return parsed.data;
+}
+
+function parseSAEFeatureDiscoveryJob(input: unknown): SAEFeatureDiscoveryJob {
+  const parsed = saeFeatureDiscoveryJobSchema.safeParse(input);
+  if (!parsed.success) {
+    throw new ExplorerApiError(
+      "invalid_sae_discovery_job",
+      `SAE feature discovery job failed validation: ${parsed.error.message}`
     );
   }
   return parsed.data;

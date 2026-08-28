@@ -8,6 +8,7 @@ import json
 import math
 import random
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -45,8 +46,8 @@ def main() -> None:
 
         mode = str(request.get("mode", "direction"))
         requested_layer = int(request["layer"])
-        source_layer = int(request.get("sourceLayer", requested_layer))
-        inject_layer = int(request.get("injectLayer", requested_layer))
+        source_layer = _optional_layer(request.get("sourceLayer"), requested_layer)
+        inject_layer = _optional_layer(request.get("injectLayer"), requested_layer)
         source_activation_name = f"layer_{source_layer}.{request['component']}"
         inject_activation_name = f"layer_{inject_layer}.{request['component']}"
         activation_name = inject_activation_name
@@ -69,15 +70,16 @@ def main() -> None:
             inject_activation_name = source_activation_name
             activation_name = inject_activation_name
             factor = float(request["scale"])
+            baseline_activation = selected.get(
+                "maxAbsoluteActivation", selected.get("activation", 0.0)
+            )
             feature = {
                 "kind": "mlp_neuron",
                 "id": str(selected.get("id", f"L{request['layer']}N{request['neuron']}")),
                 "label": str(selected.get("label", "MLP neuron")),
                 "layer": int(request["layer"]),
                 "neuron": int(request["neuron"]),
-                "baselineActivation": float(
-                    selected.get("maxAbsoluteActivation", selected.get("activation", 0.0))
-                ),
+                "baselineActivation": float(baseline_activation or 0.0),
                 "operation": _neuron_operation(factor),
             }
         elif mode == "sae_feature":
@@ -474,7 +476,7 @@ def _make_sae_feature_hook(
     scale: float,
     position: tuple[int, int],
     prompt_token_count: int,
-):
+) -> Callable[..., Any]:
     import torch
 
     if operation not in {"add", "ablate"}:
@@ -684,7 +686,9 @@ def _run_condition(
         "do_sample": temperature > 0,
         "pad_token_id": wrapper.tokenizer.eos_token_id,
         "prepend_bos": False,
-        "return_type": "tokens",
+        "return_type": "model_output",
+        "return_dict_in_generate": True,
+        "output_scores": True,
         "use_cache": True,
     }
     if temperature > 0:
@@ -694,10 +698,11 @@ def _run_condition(
         hook_name, hook_fn = generation_hook
         handle = wrapper.add_hook(hook_name, hook_fn)
     try:
-        generated = wrapper.generate(prompt, **generation_kwargs)
+        generated_output = wrapper.generate(prompt, **generation_kwargs)
     finally:
         if handle is not None:
             handle.remove()
+    generated = getattr(generated_output, "sequences", generated_output)
     generated_ids = _flat_token_ids(generated)
     continuation_ids = generated_ids[prompt_token_count:]
     continuation_text = str(
@@ -723,7 +728,10 @@ def _run_condition(
         "targetLogit": round(target_logit, 10),
         "lexicalRisk": _lexical_risk(continuation_text),
     }
-    return result, logits[0, -1, :].float().detach().cpu()
+    return result, _generation_score_matrix(
+        generated_output,
+        fallback=logits[0, -1, :].float().detach().cpu(),
+    )
 
 
 def _make_neuron_hook(
@@ -732,7 +740,7 @@ def _make_neuron_hook(
     factor: float,
     position: tuple[int, int],
     prompt_token_count: int | None = None,
-):
+) -> Callable[..., Any]:
     def hook(activation: Any = None, **kwargs: Any) -> Any:
         value = kwargs.get("activation", activation)
         if value is None or not hasattr(value, "clone") or getattr(value, "ndim", 0) < 2:
@@ -755,7 +763,7 @@ def _make_generation_direction_hook(
     *,
     vector: Any,
     scale: float,
-):
+) -> Callable[..., Any]:
     state = {"is_first_forward": True}
 
     def hook(activation: Any = None, **kwargs: Any) -> Any:
@@ -788,21 +796,54 @@ def _neuron_operation(factor: float) -> str:
 
 
 def _logit_delta_summary(original: Any, steered: Any) -> dict[str, Any]:
+    if original.shape[-1] != steered.shape[-1]:
+        raise ValueError("Original and steered generation scores have different vocabularies.")
+    if original.ndim > 1 or steered.ndim > 1:
+        original = original.reshape(-1, original.shape[-1])
+        steered = steered.reshape(-1, steered.shape[-1])
+        shared_steps = min(original.shape[0], steered.shape[0])
+        original = original[:shared_steps]
+        steered = steered[:shared_steps]
     signed_delta = steered.float() - original.float()
     delta = signed_delta.abs()
     maximum = float(delta.max().item()) if delta.numel() else 0.0
-    top_index = int(delta.argmax().item()) if delta.numel() else 0
+    top_flat_index = int(delta.argmax().item()) if delta.numel() else 0
+    vocabulary_size = int(delta.shape[-1]) if delta.ndim else 0
+    top_index = top_flat_index % vocabulary_size if vocabulary_size else 0
+    changed_vocabulary_logits = (
+        int((delta > 1e-6).any(dim=0).sum().item())
+        if delta.ndim > 1
+        else int((delta > 1e-6).sum().item())
+    )
     return {
         "maxAbsLogit": round(maximum, 10),
         "meanAbsLogit": round(float(delta.mean().item()) if delta.numel() else 0.0, 10),
-        "changedVocabularyLogits": int((delta > 1e-6).sum().item()),
+        "changedVocabularyLogits": changed_vocabulary_logits,
         "topChangedTokenId": top_index,
         "topChangedTokenDelta": round(
-            float(signed_delta[top_index].item()) if signed_delta.numel() else 0.0,
+            float(signed_delta.reshape(-1)[top_flat_index].item())
+            if signed_delta.numel()
+            else 0.0,
             10,
         ),
         "effectStatus": "changed" if maximum > 1e-6 else "no_change",
     }
+
+
+def _generation_score_matrix(generated_output: Any, *, fallback: Any) -> Any:
+    import torch
+
+    scores = getattr(generated_output, "scores", None)
+    if not scores:
+        return fallback
+    return torch.stack(
+        [score[0].float().detach().cpu() for score in scores],
+        dim=0,
+    )
+
+
+def _optional_layer(value: Any, fallback: int) -> int:
+    return fallback if value is None else int(value)
 
 
 def _first_divergence_index(left: list[int], right: list[int]) -> int | None:
@@ -867,7 +908,7 @@ def _merge_intervention_result(
     source_run = {"runId": run["runId"], "sampleId": run["sampleId"]}
     run["intervention"] = comparison
     provenance = run.setdefault("metricProvenance", {})
-    mode = comparison.get("mode")
+    mode = str(comparison.get("mode", "direction"))
     method_label = {
         "neuron": "MLP post-activation neuron scaling",
         "sae_feature": "Gemma Scope SAE feature intervention",

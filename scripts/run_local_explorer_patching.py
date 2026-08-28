@@ -8,13 +8,14 @@ import math
 import os
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
+from SafeLens.core.hooks import ActivationCache
 from SafeLens.core.patching import PatchSpec, run_activation_patch
 from SafeLens.explorer_model import load_explorer_hf_model
 from SafeLens.utils import HuggingFaceModelWrapper
@@ -50,11 +51,12 @@ def main() -> None:
         positions = [int(position) for position in request["positions"]]
         target_token_id = int(request["targetTokenId"])
         activation_names = [f"layer_{layer}.{component}" for layer in layers]
-        clean_logits, clean_cache = wrapper.run_with_cache(
+        clean_logits, clean_cache_value = wrapper.run_with_cache(
             {"input_ids": clean_tokens},
             layers=activation_names,
             return_type="logits",
         )
+        clean_cache = cast(ActivationCache, clean_cache_value)
         corrupted_logits, _ = wrapper.run_with_cache(
             {"input_ids": corrupted_tokens},
             layers=[],
@@ -152,7 +154,9 @@ def _complete_hf_snapshot(model_id: str, cache_dir: str) -> Path | None:
         return None
     revision = reference.read_text(encoding="utf-8").strip()
     snapshot = repository / "snapshots" / revision
-    if not (snapshot / "config.json").is_file() or not (snapshot / "tokenizer_config.json").is_file():
+    if not (snapshot / "config.json").is_file() or not (
+        snapshot / "tokenizer_config.json"
+    ).is_file():
         return None
     weight_files: list[Path] = []
     for index_name in ("model.safetensors.index.json", "pytorch_model.bin.index.json"):
@@ -168,8 +172,12 @@ def _complete_hf_snapshot(model_id: str, cache_dir: str) -> Path | None:
             return None
         weight_files.extend(snapshot / name for name in sorted(filenames))
     if not weight_files:
-        weight_files = list(snapshot.glob("*.safetensors")) + list(snapshot.glob("pytorch_model*.bin"))
-    if not weight_files or not all(path.is_file() and path.stat().st_size > 0 for path in weight_files):
+        weight_files = list(snapshot.glob("*.safetensors")) + list(
+            snapshot.glob("pytorch_model*.bin")
+        )
+    if not weight_files or not all(
+        path.is_file() and path.stat().st_size > 0 for path in weight_files
+    ):
         return None
     return snapshot
 

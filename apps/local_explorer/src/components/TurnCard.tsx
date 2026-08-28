@@ -17,7 +17,7 @@ import type { ExplorerRun } from "../types";
 import { generatedResponseText } from "../generatedResponse";
 import { ChatAnalysisWorkbench } from "./ChatAnalysisWorkbench";
 
-export type AnalysisId = "steering" | "attribution" | "patching" | "feature" | "explanation" | "attention";
+export type AnalysisId = "steering" | "attribution" | "patching" | "neuron" | "feature" | "explanation" | "attention";
 
 export interface TurnView {
   id: string;
@@ -66,6 +66,7 @@ export function TurnCard({
         if (analysisOpen === "attribution") return candidate.attributionMethods.some(
               (method) => method.id === "integrated_gradients" && method.available
             );
+        if (analysisOpen === "neuron") return candidate.intervention?.mode === "neuron";
         if (analysisOpen === "feature") return candidate.intervention?.mode === "sae_feature";
         if (analysisOpen === "explanation") {
           return candidate.nla.some((row) => row.status === "available") || candidate.jLens.length > 0;
@@ -107,6 +108,14 @@ export function TurnCard({
       {turn.run && showAnalysisControls && (
         <>
           <div className="chat-turn-explore-bar" aria-label="Explore this run">
+            <button
+              type="button"
+              className={analysisOpen === "neuron" ? "active" : ""}
+              aria-pressed={analysisOpen === "neuron"}
+              onClick={() => onToggleAnalysis("neuron")}
+            >
+              <Activity size={16} /> Neuron
+            </button>
             <button
               type="button"
               className={analysisOpen === "feature" ? "active" : ""}

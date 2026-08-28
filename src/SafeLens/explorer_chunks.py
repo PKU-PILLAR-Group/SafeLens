@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import uuid
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -261,7 +262,7 @@ def _position_rows(value: Any, start: int, end: int) -> list[dict[str, Any]]:
     ]
 
 
-def _ranges(token_count: int, block_size: int):
+def _ranges(token_count: int, block_size: int) -> Iterator[tuple[int, int]]:
     for start in range(0, token_count, block_size):
         yield start, min(token_count, start + block_size)
 

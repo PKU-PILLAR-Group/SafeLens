@@ -133,7 +133,8 @@ def resolve_explorer_pretrained_path(
             raise FileNotFoundError(f"No local snapshot configured for {model_id!r}.")
         return config.local_dir, True, config.source
     if config.source == "modelscope":
-        local_snapshot = complete_modelscope_snapshot(config.name, config.cache_dir)
+        provider_cache = config.cache_dir or DEFAULT_MODELSCOPE_MODEL_CACHE
+        local_snapshot = complete_modelscope_snapshot(config.name, provider_cache)
         if local_snapshot is not None:
             return str(local_snapshot), True, config.source
         try:

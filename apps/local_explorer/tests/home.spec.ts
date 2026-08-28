@@ -108,6 +108,74 @@ const steeringRun = {
   }
 };
 
+const gemmaRun: ExplorerRun = {
+  ...generatedRun,
+  runId: "chat-gemma-source",
+  modelName: "google/gemma-3-270m-it",
+  modelSource: "modelscope",
+  layers: [0, 1, 5, 9, 12, 15],
+  metadata: {
+    ...generatedRun.metadata,
+    promptRunner: {
+      jobVersion: "1.0",
+      template: "chat",
+      model: "google/gemma-3-270m-it",
+      seed: 0,
+      maxNewTokens: 64,
+      temperature: 0
+    }
+  }
+};
+
+const saeDerivedRun: ExplorerRun = {
+  ...gemmaRun,
+  runId: "chat-gemma-sae-derived",
+  intervention: {
+    ...steeringRun.intervention,
+    mode: "sae_feature",
+    feature: {
+      kind: "sae_feature",
+      id: "F8439",
+      label: "SAE feature F8439",
+      layer: 12,
+      featureIndex: 8439,
+      baselineActivation: 402.25,
+      meanActivation: 48.3,
+      activeTokenCount: 2,
+      operation: "add",
+      release: "gemma-scope-2-270m-it-res",
+      saeId: "layer_12_width_16k_l0_small",
+      width: 16_384,
+      architecture: "jump_relu",
+      source: "google/gemma-scope-2-270m-it",
+      conceptLabel: "descriptive sentence structure",
+      conceptSource: "neuronpedia",
+      conceptUrl: "https://www.neuronpedia.org/gemma-3-270m-it/12-gemmascope-res-16k/8439",
+      positiveTokens: [" sentence", " description"],
+      negativeTokens: []
+    },
+    layer: 12,
+    scale: 850,
+    positionStart: gemmaRun.tokens.length - 1,
+    positionEnd: gemmaRun.tokens.length,
+    maxNewTokens: 96,
+    original: { ...steeringRun.intervention.original, text: "Original Gemma response." },
+    steered: { ...steeringRun.intervention.steered, text: "Feature-amplified Gemma response." },
+    deltas: {
+      ...steeringRun.intervention.deltas,
+      targetLogit: 7.25,
+      tokenEditDistance: 8,
+      generationChanged: true,
+      maxAbsLogit: 48.75,
+      meanAbsLogit: 0.91,
+      changedVocabularyLogits: 12_000,
+      featureActivationDelta: 850,
+      effectStatus: "changed"
+    },
+    sourceRun: { runId: gemmaRun.runId, sampleId: gemmaRun.sampleId }
+  }
+};
+
 const nlaSourceRun: ExplorerRun = {
   ...generatedRun,
   runId: "chat-nla-source",
@@ -158,7 +226,13 @@ const nlaDerivedRun: ExplorerRun = {
     cosine: 0.91,
     mse: 0.04,
     fve: 0.84,
-    status: "available"
+    status: "available",
+    generation: {
+      complete: true,
+      finishReason: "end_tag",
+      generatedTokenCount: 74,
+      requestedMaxNewTokens: 256
+    }
   }]
 };
 
@@ -253,6 +327,9 @@ async function prepareHome(page: Page) {
   });
   await page.route("**/api/intervention/preflight", async (route) => {
     const request = route.request().postDataJSON();
+    const referencesDiffer = Array.isArray(request.positivePrompts) && Array.isArray(request.negativePrompts)
+      ? JSON.stringify(request.positivePrompts) !== JSON.stringify(request.negativePrompts)
+      : request.desiredPrompt !== request.undesiredPrompt;
     await route.fulfill({
       json: {
         modelAllowed: true,
@@ -260,12 +337,12 @@ async function prepareHome(page: Page) {
         componentSupported: true,
         positionRangeValid: true,
         targetTokenValid: true,
-        referencesDiffer: request.desiredPrompt !== request.undesiredPrompt,
+        referencesDiffer,
         targetTokenId: request.targetTokenId,
         targetTokenText: "target",
         positionStart: request.positionStart,
         positionEnd: request.positionEnd,
-        canSubmit: request.desiredPrompt !== request.undesiredPrompt,
+        canSubmit: referencesDiffer,
         reason: "Steering inputs are ready."
       }
     });
@@ -524,6 +601,165 @@ async function mockReadySteeringJob(page: Page) {
   return () => submitted;
 }
 
+async function mockReadySAEFeatureFlow(page: Page) {
+  const profile = {
+    id: "gemma-scope-2-270m-it-resid-post-l12-16k-small",
+    label: "Gemma Scope 2 · L12 · residual · 16k · L0 small",
+    modelName: gemmaRun.modelName,
+    release: "gemma-scope-2-270m-it-res",
+    saeId: "layer_12_width_16k_l0_small",
+    layer: 12,
+    component: "resid_post",
+    width: 16_384,
+    architecture: "jump_relu",
+    source: "google/gemma-scope-2-270m-it"
+  };
+  const candidate = {
+    featureIndex: 8439,
+    label: "descriptive sentence structure",
+    source: "neuronpedia",
+    url: "https://www.neuronpedia.org/gemma-3-270m-it/12-gemmascope-res-16k/8439",
+    positiveTokens: [" sentence", " description"],
+    negativeTokens: [],
+    maxActivation: 402.25,
+    meanActivation: 48.3,
+    activeTokenCount: 2,
+    peakTokenIndex: 2,
+    peakTokenText: " model",
+    recommendedDelta: 850
+  };
+  let submitted: Record<string, unknown> | undefined;
+  await page.route("**/api/intervention/sae-profiles?*", async (route) => {
+    await route.fulfill({ json: [profile] });
+  });
+  await page.route("**/api/intervention/sae-feature-info?*", async (route) => {
+    const featureIndex = Number(new URL(route.request().url()).searchParams.get("featureIndex"));
+    await route.fulfill({
+      json: {
+        modelName: gemmaRun.modelName,
+        layer: 12,
+        featureIndex,
+        label: featureIndex === candidate.featureIndex ? candidate.label : `Feature ${featureIndex}`,
+        source: featureIndex === candidate.featureIndex ? "neuronpedia" : "index",
+        url: featureIndex === candidate.featureIndex ? candidate.url : null,
+        positiveTokens: featureIndex === candidate.featureIndex ? candidate.positiveTokens : [],
+        negativeTokens: []
+      }
+    });
+  });
+  await page.route("**/api/jobs/sae-discovery", async (route) => {
+    const input = route.request().postDataJSON() as Record<string, unknown>;
+    const request = {
+      ...input,
+      run: undefined,
+      sourceRun: { runId: gemmaRun.runId, sampleId: gemmaRun.sampleId, modelName: gemmaRun.modelName }
+    };
+    delete request.run;
+    await route.fulfill({ status: 202, json: derivedJob("sae-discovery-home-job", "sae-discovery", request, null, "idle") });
+  });
+  await page.route("**/api/jobs/sae-discovery-home-job/events", async (route) => {
+    const request = {
+      layer: 12,
+      component: "resid_post",
+      saeRelease: profile.release,
+      saeId: profile.saeId,
+      positionStart: 0,
+      positionEnd: gemmaRun.tokens.length,
+      limit: 12,
+      sourceRun: { runId: gemmaRun.runId, sampleId: gemmaRun.sampleId, modelName: gemmaRun.modelName }
+    };
+    const result = {
+      runId: gemmaRun.runId,
+      sampleId: gemmaRun.sampleId,
+      modelName: gemmaRun.modelName,
+      layer: 12,
+      component: "resid_post",
+      release: profile.release,
+      saeId: profile.saeId,
+      positionStart: 0,
+      positionEnd: gemmaRun.tokens.length,
+      candidates: [candidate]
+    };
+    await route.fulfill({
+      status: 200,
+      contentType: "text/event-stream",
+      body: `event: job\ndata: ${JSON.stringify(derivedJob("sae-discovery-home-job", "sae-discovery", request, result, "ready"))}\n\n`
+    });
+  });
+  await page.route("**/api/jobs/intervention", async (route) => {
+    submitted = route.request().postDataJSON();
+    const request = {
+      ...submitted,
+      sourceRun: { runId: gemmaRun.runId, sampleId: gemmaRun.sampleId, modelName: gemmaRun.modelName },
+      preflight: {
+        mode: "sae_feature",
+        modelAllowed: true,
+        layerAvailable: true,
+        componentSupported: true,
+        positionRangeValid: true,
+        targetTokenValid: true,
+        referencesDiffer: true,
+        featureAvailable: true,
+        saeProfileValid: true,
+        saeRuntimeAvailable: true,
+        targetTokenId: submitted?.targetTokenId,
+        targetTokenText: "target",
+        positionStart: submitted?.positionStart,
+        positionEnd: submitted?.positionEnd,
+        canSubmit: true,
+        reason: "SAE feature intervention is ready."
+      }
+    };
+    await route.fulfill({ status: 202, json: derivedJob("sae-intervention-home-job", "intervention", request, null, "idle") });
+  });
+  await page.route("**/api/jobs/sae-intervention-home-job/events", async (route) => {
+    const request = {
+      mode: "sae_feature",
+      desiredPrompt: "Enhance selected SAE feature",
+      undesiredPrompt: "Suppress selected SAE feature",
+      activationReduce: "last_token",
+      layer: 12,
+      component: "resid_post",
+      scale: 850,
+      positionStart: gemmaRun.tokens.length - 1,
+      positionEnd: gemmaRun.tokens.length,
+      targetTokenId: gemmaRun.logitLens[0]?.targetTokenId ?? 0,
+      seed: 0,
+      maxNewTokens: 96,
+      temperature: 0,
+      saeRelease: profile.release,
+      saeId: profile.saeId,
+      featureIndex: candidate.featureIndex,
+      saeOperation: "add",
+      sourceRun: { runId: gemmaRun.runId, sampleId: gemmaRun.sampleId, modelName: gemmaRun.modelName },
+      preflight: {
+        mode: "sae_feature",
+        modelAllowed: true,
+        layerAvailable: true,
+        componentSupported: true,
+        positionRangeValid: true,
+        targetTokenValid: true,
+        referencesDiffer: true,
+        featureAvailable: true,
+        saeProfileValid: true,
+        saeRuntimeAvailable: true,
+        targetTokenId: gemmaRun.logitLens[0]?.targetTokenId ?? 0,
+        targetTokenText: "target",
+        positionStart: gemmaRun.tokens.length - 1,
+        positionEnd: gemmaRun.tokens.length,
+        canSubmit: true,
+        reason: "SAE feature intervention is ready."
+      }
+    };
+    await route.fulfill({
+      status: 200,
+      contentType: "text/event-stream",
+      body: `event: job\ndata: ${JSON.stringify(derivedJob("sae-intervention-home-job", "intervention", request, saeDerivedRun, "ready"))}\n\n`
+    });
+  });
+  return () => submitted;
+}
+
 async function mockReadyNlaJob(page: Page) {
   const preflight = {
     profile: "qwen2.5-7b-l20",
@@ -580,7 +816,7 @@ async function mockReadyNlaJob(page: Page) {
       profile: "qwen2.5-7b-l20",
       positions: [2],
       revision: "main",
-      maxNewTokens: 96,
+      maxNewTokens: 256,
       loadReconstructor: true,
       confirmGatedAccess: false,
       sourceRun: { runId: nlaSourceRun.runId, sampleId: nlaSourceRun.sampleId, modelName: nlaSourceRun.modelName },
@@ -742,7 +978,7 @@ function patchingRequest(submitted: Record<string, unknown>) {
 
 function derivedJob(
   id: string,
-  kind: "attribution" | "intervention" | "patching" | "nla" | "jlens",
+  kind: "attribution" | "intervention" | "patching" | "nla" | "jlens" | "sae-discovery",
   request: Record<string, unknown>,
   result: unknown,
   status: "idle" | "ready"
@@ -791,7 +1027,7 @@ test("runs the real prompt-job protocol and keeps the conversation above two foc
 
   await expect(page.locator(".chat-user-message")).toHaveText(generatedRun.prompt);
   await expect(page.locator(".chat-assistant-message")).toContainText("strongest residual alignment");
-  await expect(page.locator(".chat-turn-explore-bar > button")).toHaveCount(6);
+  await expect(page.locator(".chat-turn-explore-bar > button")).toHaveCount(7);
   await expect(page.getByRole("button", { name: /Neuron/ })).toBeVisible();
   await expect(page.getByRole("button", { name: /Steer/ })).toBeVisible();
   await expect(page.getByRole("button", { name: /Attribute/ })).toBeVisible();
@@ -845,10 +1081,32 @@ test("switches between steering and input attribution inside the current chat", 
   await runReadyAnalysis(page);
 
   await page.getByRole("button", { name: /Steer/ }).click();
-  await expect(page.getByLabel("Steering output tokens")).toHaveValue("64");
-  await expect(page.getByRole("heading", { name: "Steering" })).toBeVisible();
-  await expect(page.getByLabel("Steering desired behavior")).toBeVisible();
+  await expect(page.getByLabel("Steering workbench")).toBeVisible();
   await expect(page.getByLabel("Steering strength")).toHaveValue("1");
+  await page.getByRole("button", { name: "Advanced settings" }).click();
+  await expect(page.getByLabel("Steering output tokens")).toHaveValue("128");
+  await expect(page.getByLabel("Steering desired behavior")).toBeVisible();
+  const savePreset = page.getByRole("button", {
+    name: "Save current Steer toward text as a preset"
+  });
+  const savePresetBox = await savePreset.boundingBox();
+  expect(savePresetBox).not.toBeNull();
+  expect(savePresetBox!.width).toBeGreaterThan(90);
+  const workbenchBox = await page.getByLabel("Steering workbench").boundingBox();
+  const composerBox = await page.getByLabel("Run a SafeLens analysis").boundingBox();
+  expect(workbenchBox).not.toBeNull();
+  expect(composerBox).not.toBeNull();
+  expect(composerBox!.y).toBeGreaterThanOrEqual(workbenchBox!.y + workbenchBox!.height - 1);
+  await page.setViewportSize({ width: 390, height: 844 });
+  const mobileWorkbenchBox = await page.getByLabel("Steering workbench").boundingBox();
+  const mobileComposerBox = await page.getByLabel("Run a SafeLens analysis").boundingBox();
+  expect(mobileWorkbenchBox).not.toBeNull();
+  expect(mobileComposerBox).not.toBeNull();
+  expect(mobileComposerBox!.y).toBeGreaterThanOrEqual(
+    mobileWorkbenchBox!.y + mobileWorkbenchBox!.height - 1
+  );
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
+  await page.setViewportSize({ width: 1280, height: 720 });
 
   await page.getByRole("button", { name: /Attribute/ }).click();
   await expect(page.getByRole("heading", { name: "Input attribution" })).toBeVisible();
@@ -906,6 +1164,7 @@ test("runs exact NLA for the selected layer and token and renders the derived ex
   await page.getByRole("button", { name: /Explain/ }).click();
   await expect(page.getByLabel("Explanation layer")).toHaveValue("20");
   await expect(page.getByRole("radio", { name: "Token 2 Compare" })).toHaveAttribute("aria-checked", "true");
+  await expect(page.getByLabel("NLA explanation tokens")).toHaveValue("256");
   await expect(page.getByRole("button", { name: "Run NLA" })).toBeEnabled();
   await page.getByRole("button", { name: "Run NLA" }).click();
 
@@ -916,7 +1175,7 @@ test("runs exact NLA for the selected layer and token and renders the derived ex
     profile: "qwen2.5-7b-l20",
     positions: [2],
     revision: "main",
-    maxNewTokens: 96,
+    maxNewTokens: 256,
     loadReconstructor: true,
     confirmGatedAccess: false
   });
@@ -1136,6 +1395,8 @@ test("runs steering from Chat and compares original with steered generation", as
   await runReadyAnalysis(page);
 
   await page.getByRole("button", { name: /Steer/ }).click();
+  await page.getByRole("button", { name: "Advanced settings" }).click();
+  await expect(page.getByLabel("Steering output tokens")).toHaveValue("128");
   await expect(page.getByRole("button", { name: "Run steering" })).toBeEnabled();
   await page.getByRole("button", { name: "Run steering" }).click();
 
@@ -1155,7 +1416,7 @@ test("runs steering from Chat and compares original with steered generation", as
     positionStart: 0,
     positionEnd: generatedRun.tokens.length,
     seed: 0,
-    maxNewTokens: 64,
+    maxNewTokens: 128,
     temperature: 0
   });
 });
@@ -1172,6 +1433,49 @@ test("opens real MLP neuron intervention from Chat", async ({ page }) => {
   await expect(page.getByLabel("Neuron activation factor")).toHaveValue("0");
   await expect(page.getByRole("button", { name: "Suppress", exact: true })).toHaveAttribute("aria-pressed", "true");
   await expect(page.getByRole("button", { name: "Run neuron intervention" })).toBeEnabled();
+});
+
+test("discovers active SAE features and runs a scale-aware intervention from Chat", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await prepareHome(page);
+  await mockReadyPromptJob(page, gemmaRun);
+  const submitted = await mockReadySAEFeatureFlow(page);
+  await page.goto("/");
+  await runReadyAnalysis(page);
+
+  await page.getByRole("button", { name: /SAE/ }).click();
+  await expect(page.getByRole("heading", { name: "Gemma Scope SAE" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Output boundary" })).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByLabel("SAE output tokens")).toHaveValue("64");
+  await page.getByRole("button", { name: "Find active features" }).click();
+
+  const candidate = page.getByLabel("SAE feature candidates").getByRole("radio", { name: /F8439/ });
+  await expect(candidate).toContainText("descriptive sentence structure");
+  await expect(candidate).toContainText("Suggested +850.000");
+  await candidate.click();
+  await expect(page.getByLabel("SAE feature index")).toHaveValue("8439");
+  await expect(page.getByLabel("SAE feature delta value")).toHaveValue("850");
+  await expect(page.getByText("sentence · description")).toBeVisible();
+  await page.getByRole("button", { name: "Ablate feature" }).click();
+  await expect(page.getByLabel("SAE intervention token range").getByRole("button").nth(2)).toHaveAttribute("aria-pressed", "true");
+  await page.getByRole("button", { name: "Add activation" }).click();
+  await expect(page.getByRole("button", { name: "Output boundary" })).toHaveAttribute("aria-pressed", "true");
+  await page.getByLabel("SAE output tokens").fill("96");
+  await page.getByRole("button", { name: "Run SAE intervention" }).click();
+
+  await expect(page.getByLabel("Steering comparison")).toContainText("Original Gemma response.");
+  await expect(page.getByLabel("Steering comparison")).toContainText("Feature-amplified Gemma response.");
+  expect(submitted()).toMatchObject({
+    mode: "sae_feature",
+    layer: 12,
+    featureIndex: 8439,
+    scale: 850,
+    positionStart: gemmaRun.tokens.length - 1,
+    positionEnd: gemmaRun.tokens.length,
+    maxNewTokens: 96,
+    saeOperation: "add"
+  });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
 });
 
 test("keeps clean/corrupt patching and single attention-head selection in Chat", async ({ page }) => {

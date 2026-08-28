@@ -15,10 +15,11 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, cast
 
-import yaml
+import yaml  # type: ignore[import-untyped]
 
 INJECT_PLACEHOLDER = "<INJECT>"
 EXPLANATION_RE = re.compile(r"<explanation>\s*(.*?)\s*</explanation>", re.DOTALL)
+EXPLANATION_END_TAG = "</explanation>"
 SCALE_SQRT_D = "sqrt_d_model"
 _FINAL_LAYER_NORM_ATTRS = ("norm", "final_layernorm", "ln_f")
 
@@ -75,6 +76,9 @@ class NLAActorOutput:
     raw_text: str
     prompt_token_count: int
     activation_norm: float
+    generated_token_count: int
+    generation_complete: bool
+    finish_reason: str
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -495,8 +499,10 @@ class NLAActivationVerbalizer:
         inputs = self.build_inputs(activation, prompt=prompt)
         inputs_embeds = inputs["inputs_embeds"].to(model_device)
         attention_mask = inputs["attention_mask"].to(model_device)
-        generation_kwargs.setdefault("max_new_tokens", 200)
+        generation_kwargs.setdefault("max_new_tokens", 256)
         generation_kwargs.setdefault("do_sample", False)
+        max_new_tokens = int(generation_kwargs["max_new_tokens"])
+        _append_nla_stopping_criterion(generation_kwargs, self.tokenizer)
         if getattr(self.tokenizer, "pad_token_id", None) is None:
             eos_token_id = getattr(self.tokenizer, "eos_token_id", None)
             if eos_token_id is not None:
@@ -518,11 +524,23 @@ class NLAActivationVerbalizer:
             )
         raw_text = self.tokenizer.decode(generated_ids, skip_special_tokens=False)
         explanation = extract_nla_explanation(raw_text) if extract_explanation else raw_text.strip()
+        generation_complete, finish_reason = _nla_generation_status(
+            raw_text,
+            generated_ids,
+            max_new_tokens=max_new_tokens,
+            eos_token_id=generation_kwargs.get(
+                "eos_token_id",
+                getattr(self.tokenizer, "eos_token_id", None),
+            ),
+        )
         return NLAActorOutput(
             explanation=explanation,
             raw_text=raw_text,
             prompt_token_count=int(inputs["prompt_token_count"]),
             activation_norm=float(inputs["activation_norm"]),
+            generated_token_count=len(generated_ids),
+            generation_complete=generation_complete,
+            finish_reason=finish_reason,
         )
 
     def generate(self, activation: Any, **generation_kwargs: Any) -> str:
@@ -743,11 +761,14 @@ class NLAClient:
         actor_output = self.verbalizer.explain(activation, prompt=prompt, **generation_kwargs)
         mse_nrm = None
         cosine = None
-        if self.reconstructor is not None:
+        if self.reconstructor is not None and actor_output.generation_complete:
             mse_nrm, cosine = self.reconstructor.score(actor_output.explanation, activation)
         profile = self.profile
         result_metadata = dict(metadata or {})
         result_metadata["prompt_token_count"] = actor_output.prompt_token_count
+        result_metadata["generated_token_count"] = actor_output.generated_token_count
+        result_metadata["generation_complete"] = actor_output.generation_complete
+        result_metadata["finish_reason"] = actor_output.finish_reason
         return NLAResult(
             explanation=actor_output.explanation,
             raw_text=actor_output.raw_text,
@@ -858,6 +879,56 @@ def extract_nla_explanation(text: str) -> str:
     if "</explanation>" in cleaned:
         cleaned = cleaned.split("</explanation>", 1)[0]
     return cleaned.strip()
+
+
+def _append_nla_stopping_criterion(
+    generation_kwargs: dict[str, Any],
+    tokenizer: Any,
+) -> None:
+    """Stop generation as soon as the AV output contract is complete."""
+
+    transformers = _require_transformers()
+
+    # StoppingCriteriaList only requires callable criteria; avoiding a direct
+    # optional-class inheritance keeps this runtime compatible with all
+    # supported Transformers versions and with static type checking.
+    class _StopAfterExplanation:
+        def __call__(self, input_ids: Any, scores: Any, **kwargs: Any) -> Any:
+            del scores, kwargs
+            complete = [
+                EXPLANATION_END_TAG
+                in tokenizer.decode(row.detach().cpu().tolist(), skip_special_tokens=False)
+                for row in input_ids
+            ]
+            return input_ids.new_tensor(complete, dtype=_require_torch().bool)
+
+    existing = generation_kwargs.get("stopping_criteria")
+    criteria = list(existing) if existing is not None else []
+    criteria.append(_StopAfterExplanation())
+    generation_kwargs["stopping_criteria"] = transformers.StoppingCriteriaList(criteria)
+
+
+def _nla_generation_status(
+    raw_text: str,
+    generated_ids: Sequence[int],
+    *,
+    max_new_tokens: int,
+    eos_token_id: int | Sequence[int] | None,
+) -> tuple[bool, str]:
+    """Return whether the AV contract completed and why decoding stopped."""
+
+    if EXPLANATION_END_TAG in raw_text:
+        return True, "end_tag"
+    eos_ids = (
+        {int(eos_token_id)}
+        if isinstance(eos_token_id, int)
+        else {int(token_id) for token_id in eos_token_id or ()}
+    )
+    if generated_ids and int(generated_ids[-1]) in eos_ids:
+        return False, "eos"
+    if len(generated_ids) >= max_new_tokens:
+        return False, "length"
+    return False, "unknown"
 
 
 def _resolve_target_scale(raw: Any, d_model: int) -> float | None:

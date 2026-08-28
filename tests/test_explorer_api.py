@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 
 from SafeLens.explorer_api import (
     InterventionPreflightRequest,
+    NLARunRequest,
     PromptMessage,
     _intervention_preflight,
     _read_artifact_cached,
@@ -102,6 +103,19 @@ def _wait_for_job(client: TestClient, job_id: str, status: str) -> dict[str, obj
     raise AssertionError(f"job {job_id} did not reach {status}")
 
 
+def test_nla_run_request_uses_a_larger_configurable_generation_budget() -> None:
+    default_request = NLARunRequest(run={}, profile="qwen", positions=[0])
+    maximum_request = NLARunRequest(
+        run={},
+        profile="qwen",
+        positions=[0],
+        maxNewTokens=512,
+    )
+
+    assert default_request.maxNewTokens == 256
+    assert maximum_request.maxNewTokens == 512
+
+
 def test_explorer_api_indexes_and_serves_exact_samples(tmp_path: Path) -> None:
     _write_artifact(
         tmp_path,
@@ -145,6 +159,36 @@ def test_explorer_api_indexes_and_serves_exact_samples(tmp_path: Path) -> None:
     assert sample.headers["cache-control"] == "no-store"
     assert sample.headers["etag"].startswith('"')
     assert sample.headers["x-safelens-artifact"]
+
+
+def test_run_index_uses_original_user_prompt_instead_of_chat_template(tmp_path: Path) -> None:
+    with_metadata = _sample(run_id="metadata-run")
+    with_metadata["prompt"] = "<|im_start|>user\nRendered text<|im_end|>"
+    with_metadata["metadata"] = {
+        "promptRunner": {"userPrompt": "Original user question"}
+    }
+    legacy_qwen = _sample(run_id="legacy-qwen")
+    legacy_qwen["prompt"] = (
+        "<|im_start|>system\nSystem<|im_end|>\n"
+        "<|im_start|>user\nFirst question<|im_end|>\n"
+        "<|im_start|>assistant\nFirst answer<|im_end|>\n"
+        "<|im_start|>user\nLatest question<|im_end|>\n"
+        "<|im_start|>assistant\n"
+    )
+    legacy_gemma = _sample(run_id="legacy-gemma")
+    legacy_gemma["prompt"] = (
+        "<bos><start_of_turn>user\nGemma question<end_of_turn>\n"
+        "<start_of_turn>model\n"
+    )
+    _write_artifact(tmp_path, "prompts.explorer.json", [with_metadata, legacy_qwen, legacy_gemma])
+
+    rows = TestClient(create_app(tmp_path)).get("/api/runs").json()["runs"]
+
+    assert {row["runId"]: row["promptPreview"] for row in rows} == {
+        "metadata-run": "Original user question",
+        "legacy-qwen": "Latest question",
+        "legacy-gemma": "Gemma question",
+    }
 
 
 def test_dataset_catalog_exposes_versioned_samples_and_paper_sources(tmp_path: Path) -> None:
@@ -1611,6 +1655,93 @@ def test_intervention_job_queues_only_after_authoritative_preflight(tmp_path: Pa
     )
     assert invalid.status_code == 409
     assert invalid.json()["detail"]["code"] == "intervention_preflight_failed"
+
+
+def test_sae_discovery_job_returns_ranked_features_without_exposing_source_run(
+    tmp_path: Path,
+) -> None:
+    source = _sample()
+    source.update(
+        {
+            "modelName": "google/gemma-3-270m-it",
+            "prompt": "<start_of_turn>user\nhello<end_of_turn>",
+            "tokens": [
+                {"index": 0, "text": "<start_of_turn>", "tokenId": 1},
+                {"index": 1, "text": "user", "tokenId": 2},
+                {"index": 2, "text": "hello", "tokenId": 3},
+                {"index": 3, "text": "<end_of_turn>", "tokenId": 4},
+            ],
+            "layers": [5, 9, 12, 15],
+        }
+    )
+
+    def runner(payload, cancel_event, progress):
+        assert payload.layer == 9
+        assert payload.positionStart == 2
+        assert payload.positionEnd == 3
+        assert payload.limit == 12
+        assert not cancel_event.is_set()
+        progress(70, "feature-metadata", "Resolving feature concepts.")
+        return {
+            "runId": payload.run["runId"],
+            "sampleId": payload.run["sampleId"],
+            "modelName": payload.run["modelName"],
+            "layer": payload.layer,
+            "component": payload.component,
+            "release": payload.saeRelease,
+            "saeId": payload.saeId,
+            "positionStart": payload.positionStart,
+            "positionEnd": payload.positionEnd,
+            "candidates": [
+                {
+                    "featureIndex": 8439,
+                    "label": "descriptive sentence structure",
+                    "source": "neuronpedia",
+                    "url": "https://www.neuronpedia.org/gemma-3-270m-it/9-gemmascope-res-16k/8439",
+                    "positiveTokens": [" sentence"],
+                    "negativeTokens": [],
+                    "maxActivation": 402.25,
+                    "meanActivation": 402.25,
+                    "activeTokenCount": 1,
+                    "peakTokenIndex": 2,
+                    "peakTokenText": "hello",
+                    "recommendedDelta": 850.0,
+                }
+            ],
+        }
+
+    client = TestClient(create_app(tmp_path, sae_discovery_runner=runner))
+    request = {
+        "run": source,
+        "layer": 9,
+        "component": "resid_post",
+        "saeRelease": "gemma-scope-2-270m-it-res",
+        "saeId": "layer_9_width_16k_l0_small",
+        "positionStart": 2,
+        "positionEnd": 3,
+        "limit": 12,
+    }
+
+    response = client.post("/api/jobs/sae-discovery", json=request)
+
+    assert response.status_code == 202
+    assert response.json()["kind"] == "sae-discovery"
+    assert "run" not in response.json()["request"]
+    assert response.json()["request"]["sourceRun"] == {
+        "runId": "run-a",
+        "sampleId": "sample-a",
+        "modelName": "google/gemma-3-270m-it",
+    }
+    snapshot = _wait_for_job(client, response.json()["id"], "ready")
+    assert snapshot["result"]["candidates"][0]["featureIndex"] == 8439
+    assert snapshot["result"]["candidates"][0]["recommendedDelta"] == 850.0
+
+    mismatch = client.post(
+        "/api/jobs/sae-discovery",
+        json={**request, "layer": 12},
+    )
+    assert mismatch.status_code == 422
+    assert mismatch.json()["detail"]["code"] == "invalid_sae_discovery_request"
 
 
 def test_explorer_api_reports_invalid_artifacts_without_hiding_valid_runs(

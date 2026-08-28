@@ -64,7 +64,7 @@ def _run_jlens(run: dict[str, Any], request: dict[str, Any], *, run_id: str) -> 
         low_cpu_mem_usage=device != "cpu",
         trust_remote_code=False,
     )
-    model.to(device)
+    model.to(device)  # type: ignore[arg-type]
     lens_model = jlens.from_hf(model, tokenizer, force_bos=False)
     lens = _load_lens(
         jlens,

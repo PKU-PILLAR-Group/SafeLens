@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   Bot,
   ChevronLeft,
@@ -80,6 +80,10 @@ export function TokenTimeline({
   );
   const { mode, metric, query } = timeline;
   const rootRef = useRef<HTMLElement>(null);
+  const pendingFocusRef = useRef<{
+    start: number;
+    onFocused?: () => void;
+  } | null>(null);
   const items = useMemo(() => timelineItems(run.tokens, mode), [mode, run.tokens]);
   const tokenMetrics = useMemo(
     () => buildTokenMetrics(run, selectedLayer, metric),
@@ -143,18 +147,33 @@ export function TokenTimeline({
     return () => media.removeEventListener("change", update);
   }, []);
 
+  useLayoutEffect(() => {
+    const pending = pendingFocusRef.current;
+    if (!pending) return;
+    const target = rootRef.current
+      ?.querySelector<HTMLButtonElement>(`[data-timeline-start="${pending.start}"]`);
+    if (!target) return;
+    target.focus();
+    pendingFocusRef.current = null;
+    pending.onFocused?.();
+  }, [selectedToken, windowStart]);
+
   function focusItem(item: TimelineItem, onFocused?: () => void) {
     const target = item.tokens.some((token) => token.index === selectedToken)
       ? selectedToken
       : item.tokens[0]?.index;
     if (target === undefined) return;
+    pendingFocusRef.current = { start: item.start, onFocused };
     setSelectedToken(target);
-    window.requestAnimationFrame(() => {
-      rootRef.current
-        ?.querySelector<HTMLButtonElement>(`[data-timeline-start="${item.start}"]`)
-        ?.focus();
-      onFocused?.();
-    });
+    if (target === selectedToken) {
+      const visibleTarget = rootRef.current
+        ?.querySelector<HTMLButtonElement>(`[data-timeline-start="${item.start}"]`);
+      if (visibleTarget) {
+        visibleTarget.focus();
+        pendingFocusRef.current = null;
+        onFocused?.();
+      }
+    }
   }
 
   function moveSearch(direction: -1 | 1) {

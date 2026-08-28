@@ -7,7 +7,7 @@ import math
 import random
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
@@ -243,7 +243,8 @@ def _build_run(
     n_layers = int(wrapper.cfg.n_layers or 1)
     layers = list(range(n_layers))
     cache_layers = _cache_layers(layers)
-    output, cache = wrapper.run_with_cache({"input_ids": tokens}, layers=cache_layers)
+    output, cache_value = wrapper.run_with_cache({"input_ids": tokens}, layers=cache_layers)
+    cache = cast(dict[str, Any], cache_value)
 
     residual_keys = [f"layer_{layer}.resid_post" for layer in layers]
     final_resid = cache[residual_keys[-1]][0].float()

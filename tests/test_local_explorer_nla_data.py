@@ -129,6 +129,11 @@ def test_merge_nla_results_replaces_only_exact_profile_positions() -> None:
             "cosine": 0.9,
             "mse_nrm": 0.05,
             "activation_norm": 12.0,
+            "metadata": {
+                "generation_complete": True,
+                "generated_token_count": 47,
+                "finish_reason": "end_tag",
+            },
         }
     ]
 
@@ -150,6 +155,12 @@ def test_merge_nla_results_replaces_only_exact_profile_positions() -> None:
     assert exact["cosine"] == 0.9
     assert exact["mse"] == 0.05
     assert exact["profile"] == profile.name
+    assert exact["generation"] == {
+        "complete": True,
+        "finishReason": "end_tag",
+        "generatedTokenCount": 47,
+        "requestedMaxNewTokens": 64,
+    }
     assert untouched["status"] == "unavailable"
     assert derived["nlaCompatibility"]["profiles"][0]["status"] == "compatible"
     job = derived["metadata"]["nlaJobs"][0]
@@ -157,6 +168,7 @@ def test_merge_nla_results_replaces_only_exact_profile_positions() -> None:
     assert job["actorRevision"] == "actor-sha"
     assert job["reconstructorRevision"] == "ar-sha"
     assert job["trustRemoteCode"] is False
+    assert job["jobVersion"] == "1.1"
     assert derived["metadata"]["parentRun"] == {
         "runId": "source-run",
         "sampleId": "sample-a",
@@ -182,6 +194,11 @@ def test_merge_nla_results_requires_ar_fidelity() -> None:
                     "cosine": None,
                     "mse_nrm": None,
                     "activation_norm": 12.0,
+                    "metadata": {
+                        "generation_complete": True,
+                        "generated_token_count": 47,
+                        "finish_reason": "end_tag",
+                    },
                 }
             ],
             profile=profile,
@@ -191,4 +208,39 @@ def test_merge_nla_results_requires_ar_fidelity() -> None:
             reconstructor_checkpoint=None,
             run_id="derived-run",
             max_new_tokens=64,
+        )
+
+
+def test_merge_nla_results_rejects_a_truncated_actor_explanation() -> None:
+    profile = get_nla_profile("qwen2.5-7b-l20")
+    run = {
+        "runId": "source-run",
+        "sampleId": "sample-a",
+        "tokens": [{"index": 0, "text": "A"}],
+        "nla": [],
+        "nlaCompatibility": {"profiles": [{"name": profile.name}]},
+        "metadata": {},
+    }
+
+    with pytest.raises(ValueError, match=r"T0 did not reach </explanation>.*limit 96"):
+        MODULE._merge_results(
+            run,
+            [{
+                "explanation": "unfinished thought",
+                "cosine": None,
+                "mse_nrm": None,
+                "activation_norm": 12.0,
+                "metadata": {
+                    "generation_complete": False,
+                    "generated_token_count": 96,
+                    "finish_reason": "length",
+                },
+            }],
+            profile=profile,
+            positions=[0],
+            revision="main",
+            actor_checkpoint=None,
+            reconstructor_checkpoint=None,
+            run_id="derived-run",
+            max_new_tokens=96,
         )

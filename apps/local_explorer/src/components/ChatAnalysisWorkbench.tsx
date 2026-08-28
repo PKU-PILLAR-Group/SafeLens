@@ -34,12 +34,14 @@ import {
   type PatchingJob,
   type PatchingPreflight,
   type RemoteRunSummary,
+  type SAEFeatureCandidate,
   type SAEFeatureInfo,
   type SAEProfile
 } from "../api/explorerClient";
 import { useAttributionRunner } from "../state/useAttributionRunner";
 import { useInterventionRunner } from "../state/useInterventionRunner";
 import { usePatchingRunner } from "../state/usePatchingRunner";
+import { useSAEFeatureDiscovery } from "../state/useSAEFeatureDiscovery";
 import { HYBRID_STEERING_BATCHES } from "../state/steeringHybridPresets";
 import { pairedSteeringPreset, type SteeringPreset } from "../state/steeringPresets";
 import type {
@@ -56,7 +58,7 @@ import { PresetSuggestTextarea } from "./PresetSuggestTextarea";
 import { ResponseTokenPicker } from "./ResponseTokenPicker";
 
 interface ChatAnalysisWorkbenchProps {
-  mode: "steering" | "attribution" | "patching" | "feature" | "explanation" | "attention";
+  mode: "steering" | "attribution" | "patching" | "neuron" | "feature" | "explanation" | "attention";
   run: ExplorerRun;
   remoteSummary?: RemoteRunSummary;
   savedRun?: ExplorerRun;
@@ -74,6 +76,9 @@ export function ChatAnalysisWorkbench({ mode, run, remoteSummary, savedRun, sugg
   if (mode === "patching") {
     return <PatchingWorkbench run={run} savedRun={savedRun} onRunReady={onRunReady} />;
   }
+  if (mode === "neuron") {
+    return <NeuronInterventionWorkbench run={run} savedRun={savedRun} onRunReady={onRunReady} />;
+  }
   if (mode === "feature") {
     return <FeatureInterventionWorkbench run={run} savedRun={savedRun} onRunReady={onRunReady} />;
   }
@@ -81,6 +86,150 @@ export function ChatAnalysisWorkbench({ mode, run, remoteSummary, savedRun, sugg
     return <ChatExplanationWorkbench run={run} savedRun={savedRun} onRunReady={onRunReady} />;
   }
   return <ChatAttentionWorkbench run={run} remoteSummary={remoteSummary} />;
+}
+
+function NeuronInterventionWorkbench({
+  run,
+  savedRun,
+  onRunReady
+}: Omit<ChatAnalysisWorkbenchProps, "mode">) {
+  const prior = savedRun?.intervention?.mode === "neuron" ? savedRun.intervention : undefined;
+  const featureLayers = useMemo(
+    () => [...new Set(run.mlpNeurons.map((item) => item.layer))].sort((a, b) => a - b),
+    [run.mlpNeurons]
+  );
+  const [layer, setLayer] = useState(
+    prior?.feature?.layer ?? featureLayers[featureLayers.length - 1] ?? run.layers[run.layers.length - 1] ?? 0
+  );
+  const neurons = useMemo(
+    () => run.mlpNeurons
+      .filter((item) => item.layer === layer)
+      .sort((a, b) => b.maxAbsoluteActivation - a.maxAbsoluteActivation),
+    [layer, run.mlpNeurons]
+  );
+  const [neuron, setNeuron] = useState(prior?.feature?.neuron ?? neurons[0]?.neuron ?? 0);
+  const [scale, setScale] = useState(prior?.scale ?? 0);
+  const [positionStart, setPositionStart] = useState(prior?.positionStart ?? 0);
+  const [positionEnd, setPositionEnd] = useState(prior?.positionEnd ?? run.tokens.length);
+  const targetOptions = useMemo(() => steeringTargetOptions(run), [run]);
+  const [targetTokenId, setTargetTokenId] = useState(
+    prior?.targetTokenId ?? targetOptions[0]?.tokenId ?? 0
+  );
+  const [preflight, setPreflight] = useState<InterventionPreflight | null>(null);
+  const [preflightError, setPreflightError] = useState<string | null>(null);
+  const [result, setResult] = useState<ExplorerRun | null>(
+    savedRun?.intervention?.mode === "neuron" ? savedRun : null
+  );
+  const handleReady = useCallback((derived: ExplorerRun, job: InterventionJob) => {
+    setResult(derived);
+    onRunReady(derived, job);
+  }, [onRunReady]);
+  const runner = useInterventionRunner(handleReady);
+  const running = runner.submitting || runner.job?.status === "idle" || runner.job?.status === "loading";
+  const selectedNeuron = neurons.find((item) => item.neuron === neuron) ?? neurons[0];
+
+  useEffect(() => {
+    if (!neurons.some((item) => item.neuron === neuron)) setNeuron(neurons[0]?.neuron ?? 0);
+  }, [neuron, neurons]);
+
+  useEffect(() => {
+    if (!featureLayers.includes(layer) && featureLayers.length) {
+      setLayer(featureLayers[featureLayers.length - 1]);
+    }
+  }, [featureLayers, layer]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setPreflight(null);
+    setPreflightError(null);
+    const timer = window.setTimeout(() => {
+      void fetchInterventionPreflight({
+        mode: "neuron",
+        modelName: run.modelName,
+        promptTokenCount: run.tokens.length,
+        availableLayers: run.layers,
+        layer,
+        component: "mlp_out",
+        positionStart,
+        positionEnd,
+        targetTokenId,
+        neuron,
+        availableNeurons: neurons.map((item) => item.neuron),
+        desiredPrompt: "Enhance selected MLP neuron",
+        undesiredPrompt: "Suppress selected MLP neuron"
+      }, controller.signal).then(setPreflight).catch((error) => {
+        if (!controller.signal.aborted) {
+          setPreflightError(error instanceof Error ? error.message : "Neuron preflight failed.");
+        }
+      });
+    }, 180);
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [layer, neuron, neurons, positionEnd, positionStart, run.layers, run.modelName, run.tokens.length, targetTokenId]);
+
+  function setRange(start: number, end: number) {
+    const nextStart = Math.max(0, Math.min(run.tokens.length - 1, start));
+    setPositionStart(nextStart);
+    setPositionEnd(Math.max(nextStart + 1, Math.min(run.tokens.length, end)));
+  }
+
+  function submit() {
+    if (!preflight?.canSubmit || running || !selectedNeuron) return;
+    setResult(null);
+    const input: InterventionRunInput = {
+      run,
+      mode: "neuron",
+      desiredPrompt: "Enhance selected MLP neuron",
+      undesiredPrompt: "Suppress selected MLP neuron",
+      layer,
+      component: "mlp_out",
+      neuron,
+      scale,
+      positionStart,
+      positionEnd,
+      targetTokenId,
+      seed: 0,
+      maxNewTokens: 16,
+      temperature: 0
+    };
+    void runner.submit(input);
+  }
+
+  if (featureLayers.length === 0) {
+    return (
+      <section className="chat-analysis-workbench chat-feature-workbench" aria-label="MLP neuron intervention workbench">
+        <header className="chat-workbench-heading">
+          <span><Activity size={17} /></span>
+          <div><h2>Neuron intervention</h2><p>This run does not expose MLP neuron activations.</p></div>
+        </header>
+      </section>
+    );
+  }
+
+  return (
+    <section className="chat-analysis-workbench chat-feature-workbench" aria-label="MLP neuron intervention workbench">
+      <header className="chat-workbench-heading">
+        <span><Activity size={17} /></span>
+        <div><h2>Neuron intervention</h2><p>Scale one real MLP post-activation and compare the model output</p></div>
+        <StatusDot ready={Boolean(preflight?.canSubmit)} pending={!preflight && !preflightError} />
+      </header>
+      <div className="chat-feature-controls">
+        <label><span>Layer</span><select aria-label="Neuron intervention layer" value={layer} disabled={running} onChange={(event) => setLayer(Number(event.target.value))}>{featureLayers.map((item) => <option key={item} value={item}>L{item}</option>)}</select></label>
+        <label><span>MLP neuron</span><select aria-label="MLP neuron" value={neuron} disabled={running} onChange={(event) => setNeuron(Number(event.target.value))}>{neurons.map((item) => <option key={item.neuron} value={item.neuron}>N{item.neuron} · {item.label}</option>)}</select></label>
+        <label><span>Tracked output token</span><select aria-label="Neuron tracked output token" value={targetTokenId} disabled={running} onChange={(event) => setTargetTokenId(Number(event.target.value))}>{targetOptions.map((option) => <option key={option.tokenId} value={option.tokenId}>{visibleToken(option.tokenText)} · #{option.tokenId}</option>)}</select></label>
+        <label className="chat-feature-strength"><span>Activation factor <b>{scale.toFixed(1)}</b></span><input aria-label="Neuron activation factor" type="range" min={-2} max={4} step={0.1} value={scale} disabled={running} onChange={(event) => setScale(Number(event.target.value))} /></label>
+      </div>
+      <div className="chat-feature-operations" role="group" aria-label="Neuron intervention operation">
+        {[{ label: "Suppress", value: 0 }, { label: "Reduce", value: 0.25 }, { label: "Enhance", value: 2 }, { label: "Invert", value: -1 }].map((item) => <button key={item.label} type="button" className={Math.abs(scale - item.value) < 1e-6 ? "active" : ""} aria-pressed={Math.abs(scale - item.value) < 1e-6} disabled={running} onClick={() => setScale(item.value)}>{item.label}</button>)}
+      </div>
+      <div className="chat-token-range"><header><span>Apply to</span><div><button className={positionStart === 0 && positionEnd === run.tokens.length ? "active" : ""} aria-pressed={positionStart === 0 && positionEnd === run.tokens.length} disabled={running} onClick={() => setRange(0, run.tokens.length)}>Entire input</button><button className={positionStart === run.tokens.length - 1 && positionEnd === run.tokens.length ? "active" : ""} aria-pressed={positionStart === run.tokens.length - 1 && positionEnd === run.tokens.length} disabled={running} onClick={() => setRange(run.tokens.length - 1, run.tokens.length)}>Last token</button></div><small>T{positionStart}–T{positionEnd - 1}</small></header><div aria-label="Neuron intervention token range">{run.tokens.map((token) => <button key={token.index} className={token.index >= positionStart && token.index < positionEnd ? "active" : ""} aria-pressed={token.index >= positionStart && token.index < positionEnd} disabled={running} onClick={() => setRange(token.index, token.index + 1)}>{visibleToken(token.text)}</button>)}</div></div>
+      <div className="chat-feature-selected"><strong>{selectedNeuron?.id}</strong><span>{selectedNeuron?.label}</span><small>peak activation {selectedNeuron?.maxAbsoluteActivation.toFixed(4)} · factor {scale.toFixed(1)}</small></div>
+      <WorkbenchActions running={running} disabled={!preflight?.canSubmit || !selectedNeuron} runLabel="Run neuron intervention" status={runner.error?.message ?? preflightError ?? preflight?.reason} progress={runner.job?.progress} onRun={submit} onCancel={() => void runner.cancel()} onReset={runner.reset} failed={Boolean(runner.error)} />
+      {result?.intervention && <SteeringResult experiment={result.intervention} />}
+    </section>
+  );
 }
 
 function PatchingWorkbench({
@@ -334,14 +483,18 @@ function FeatureInterventionWorkbench({
   const [operation, setOperation] = useState<"add" | "ablate">(
     prior?.feature?.operation === "ablate" ? "ablate" : "add"
   );
-  const [scale, setScale] = useState(prior?.scale ?? 5);
-  const [positionStart, setPositionStart] = useState(prior?.positionStart ?? 0);
+  const outputBoundary = Math.max(0, run.tokens.length - 1);
+  const discoveryRange = useMemo(() => saeUserTokenRange(run), [run]);
+  const [scale, setScale] = useState(prior?.scale ?? 100);
+  const [positionStart, setPositionStart] = useState(prior?.positionStart ?? outputBoundary);
   const [positionEnd, setPositionEnd] = useState(prior?.positionEnd ?? run.tokens.length);
+  const [outputTokens, setOutputTokens] = useState(prior?.maxNewTokens ?? 64);
   const targetOptions = useMemo(() => steeringTargetOptions(run), [run]);
   const [targetTokenId, setTargetTokenId] = useState(prior?.targetTokenId ?? targetOptions[0]?.tokenId ?? 0);
   const [preflight, setPreflight] = useState<InterventionPreflight | null>(null);
   const [preflightError, setPreflightError] = useState<string | null>(null);
   const [featureInfo, setFeatureInfo] = useState<SAEFeatureInfo | null>(null);
+  const [candidates, setCandidates] = useState<SAEFeatureCandidate[]>([]);
   const [result, setResult] = useState<ExplorerRun | null>(
     savedRun?.intervention?.mode === "sae_feature" ? savedRun : null
   );
@@ -350,10 +503,20 @@ function FeatureInterventionWorkbench({
     onRunReady(derived, job);
   }, [onRunReady]);
   const runner = useInterventionRunner(handleReady);
+  const handleDiscoveryReady = useCallback((discoveryResult: { candidates: SAEFeatureCandidate[] }) => {
+    setCandidates(discoveryResult.candidates);
+  }, []);
+  const discovery = useSAEFeatureDiscovery(handleDiscoveryReady);
   const running = runner.submitting || runner.job?.status === "idle" || runner.job?.status === "loading";
+  const discoveryRunning = discovery.running;
   const selectedProfile = profiles.find((profile) => profile.id === profileId)
     ?? profiles.find((profile) => profile.layer === 12)
     ?? profiles[0];
+  const selectedCandidate = candidates.find((candidate) => candidate.featureIndex === featureIndex);
+  const scaleLimit = Math.min(
+    1_000,
+    Math.max(100, Math.ceil(Math.max(Math.abs(scale), selectedCandidate?.recommendedDelta ?? 0) * 1.5 / 50) * 50)
+  );
 
   useEffect(() => {
     const controller = new AbortController();
@@ -365,6 +528,7 @@ function FeatureInterventionWorkbench({
       const priorProfile = next.find((profile) => profile.saeId === prior?.feature?.saeId);
       const defaultProfile = priorProfile ?? next.find((profile) => profile.layer === 12) ?? next[0];
       setProfileId(defaultProfile?.id ?? "");
+      setCandidates([]);
       setProfilesReady(true);
     }).catch((error) => {
       if (!controller.signal.aborted) {
@@ -438,6 +602,63 @@ function FeatureInterventionWorkbench({
     setPositionEnd(Math.max(nextStart + 1, Math.min(run.tokens.length, end)));
   }
 
+  function selectProfile(nextProfileId: string) {
+    setProfileId(nextProfileId);
+    setCandidates([]);
+    discovery.reset();
+    setResult(null);
+  }
+
+  function discoverFeatures() {
+    if (!selectedProfile || discoveryRunning) return;
+    setCandidates([]);
+    void discovery.submit({
+      run,
+      layer: selectedProfile.layer,
+      component: selectedProfile.component,
+      saeRelease: selectedProfile.release,
+      saeId: selectedProfile.saeId,
+      positionStart: discoveryRange.start,
+      positionEnd: discoveryRange.end,
+      limit: 12
+    });
+  }
+
+  function selectCandidate(candidate: SAEFeatureCandidate) {
+    setFeatureIndex(candidate.featureIndex);
+    setFeatureInfo({
+      modelName: run.modelName,
+      layer: selectedProfile?.layer ?? 0,
+      featureIndex: candidate.featureIndex,
+      label: candidate.label,
+      source: candidate.source,
+      url: candidate.url,
+      positiveTokens: candidate.positiveTokens,
+      negativeTokens: candidate.negativeTokens
+    });
+    setOperation("add");
+    setScale(candidate.recommendedDelta);
+    setRange(outputBoundary, run.tokens.length);
+    setResult(null);
+  }
+
+  function applySuggestedScale(multiplier: number) {
+    const basis = selectedCandidate?.recommendedDelta ?? 100;
+    setScale(Math.max(-1_000, Math.min(1_000, Math.round(basis * multiplier))));
+  }
+
+  function selectOperation(nextOperation: "add" | "ablate") {
+    setOperation(nextOperation);
+    if (nextOperation === "add") {
+      setRange(outputBoundary, run.tokens.length);
+    } else if (selectedCandidate) {
+      setRange(selectedCandidate.peakTokenIndex, selectedCandidate.peakTokenIndex + 1);
+    } else {
+      setRange(0, run.tokens.length);
+    }
+    setResult(null);
+  }
+
   function submit() {
     if (!preflight?.canSubmit || running || !selectedProfile) return;
     setResult(null);
@@ -457,7 +678,7 @@ function FeatureInterventionWorkbench({
       positionEnd,
       targetTokenId,
       seed: 0,
-      maxNewTokens: 32,
+      maxNewTokens: outputTokens,
       temperature: 0
     };
     void runner.submit(input);
@@ -479,19 +700,75 @@ function FeatureInterventionWorkbench({
       <header className="chat-workbench-heading">
         <span><Activity size={17} /></span>
         <div><h2>Gemma Scope SAE</h2><p>Sparse feature intervention · residual stream</p></div>
-        <StatusDot ready={Boolean(preflight?.canSubmit)} pending={!preflight && !preflightError} />
+        <StatusDot ready={Boolean(preflight?.canSubmit)} pending={discoveryRunning || (!preflight && !preflightError)} />
       </header>
+      <section className="chat-sae-discovery" aria-label="Active SAE features">
+        <header>
+          <div>
+            <strong>Active features in this prompt</strong>
+            <small>L{selectedProfile?.layer ?? "..."} · user tokens T{discoveryRange.start}–T{discoveryRange.end - 1}</small>
+          </div>
+          <button
+            type="button"
+            className={discoveryRunning ? "pending" : ""}
+            disabled={!selectedProfile || running}
+            onClick={discoveryRunning ? () => void discovery.cancel() : discoverFeatures}
+          >
+            {discoveryRunning ? <Square size={14} /> : <ScanSearch size={15} />}
+            {discoveryRunning ? "Cancel scan" : candidates.length > 0 ? "Scan again" : "Find active features"}
+          </button>
+        </header>
+        {discoveryRunning && (
+          <div className="chat-sae-discovery-progress">
+            <span><i style={{ width: `${discovery.job?.progress ?? 4}%` }} /></span>
+            <small>{discovery.job?.detail ?? "Loading the model and SAE checkpoint..."}</small>
+          </div>
+        )}
+        {discovery.error && <p className="chat-sae-discovery-error"><AlertCircle size={14} />{discovery.error.message}</p>}
+        {candidates.length > 0 && (
+          <div className="chat-sae-candidates" role="radiogroup" aria-label="SAE feature candidates">
+            {candidates.map((candidate) => (
+              <button
+                type="button"
+                role="radio"
+                aria-checked={selectedCandidate?.featureIndex === candidate.featureIndex}
+                className={selectedCandidate?.featureIndex === candidate.featureIndex ? "active" : ""}
+                key={candidate.featureIndex}
+                disabled={running}
+                onClick={() => selectCandidate(candidate)}
+              >
+                <span><b>F{candidate.featureIndex}</b><em>peak {formatActivation(candidate.maxActivation)}</em></span>
+                <strong>{candidate.label}</strong>
+                <small>T{candidate.peakTokenIndex} · {visibleToken(candidate.peakTokenText)} · active on {candidate.activeTokenCount} token{candidate.activeTokenCount === 1 ? "" : "s"}</small>
+                <i>Suggested {signed(candidate.recommendedDelta)}</i>
+              </button>
+            ))}
+          </div>
+        )}
+      </section>
       <div className="chat-feature-controls">
-        <label className="chat-sae-profile"><span>SAE checkpoint</span><select aria-label="SAE checkpoint" value={selectedProfile?.id ?? ""} disabled={running || profiles.length === 0} onChange={(event) => setProfileId(event.target.value)}>{profiles.map((profile) => <option key={profile.id} value={profile.id}>L{profile.layer} · 16k · L0 small</option>)}</select></label>
-        <label><span>Feature</span><input aria-label="SAE feature index" type="number" min={0} max={(selectedProfile?.width ?? 1) - 1} value={featureIndex} disabled={running || !selectedProfile} onChange={(event) => setFeatureIndex(Math.max(0, Number(event.target.value) || 0))} /></label>
+        <label className="chat-sae-profile"><span>SAE checkpoint</span><select aria-label="SAE checkpoint" value={selectedProfile?.id ?? ""} disabled={running || discoveryRunning || profiles.length === 0} onChange={(event) => selectProfile(event.target.value)}>{profiles.map((profile) => <option key={profile.id} value={profile.id}>L{profile.layer} · 16k · L0 small</option>)}</select></label>
+        <label><span>Feature</span><input aria-label="SAE feature index" type="number" min={0} max={(selectedProfile?.width ?? 1) - 1} value={featureIndex} disabled={running || discoveryRunning || !selectedProfile} onChange={(event) => setFeatureIndex(Math.max(0, Math.min((selectedProfile?.width ?? 1) - 1, Number(event.target.value) || 0)))} /></label>
         <label><span>Tracked output token</span><select aria-label="SAE tracked output token" value={targetTokenId} disabled={running} onChange={(event) => setTargetTokenId(Number(event.target.value))}>{targetOptions.map((option) => <option key={option.tokenId} value={option.tokenId}>{visibleToken(option.tokenText)} · #{option.tokenId}</option>)}</select></label>
-        <label className="chat-feature-strength"><span>Feature delta <b>{operation === "ablate" ? "zero" : signed(scale)}</b></span><input aria-label="SAE feature delta" type="range" min={-20} max={20} step={0.5} value={scale} disabled={running || operation === "ablate"} onChange={(event) => setScale(Number(event.target.value))} /></label>
+        <label><span>Output tokens</span><input aria-label="SAE output tokens" type="number" min={1} max={128} value={outputTokens} disabled={running} onChange={(event) => setOutputTokens(Math.max(1, Math.min(128, Number(event.target.value) || 1)))} /></label>
       </div>
-      <div className="chat-feature-operations" role="group" aria-label="SAE feature operation">
-        <button type="button" className={operation === "add" ? "active" : ""} aria-pressed={operation === "add"} disabled={running} onClick={() => setOperation("add")}>Add activation</button>
-        <button type="button" className={operation === "ablate" ? "active" : ""} aria-pressed={operation === "ablate"} disabled={running} onClick={() => setOperation("ablate")}>Ablate feature</button>
+      <div className="chat-feature-adjustment">
+        <div className="chat-feature-operations" role="group" aria-label="SAE feature operation">
+          <button type="button" className={operation === "add" ? "active" : ""} aria-pressed={operation === "add"} disabled={running} onClick={() => selectOperation("add")}>Add activation</button>
+          <button type="button" className={operation === "ablate" ? "active" : ""} aria-pressed={operation === "ablate"} disabled={running} onClick={() => selectOperation("ablate")}>Ablate feature</button>
+        </div>
+        <label className="chat-feature-strength">
+          <span>Feature delta <b>{operation === "ablate" ? "zero" : signed(scale)}</b></span>
+          <input aria-label="SAE feature delta" type="range" min={-scaleLimit} max={scaleLimit} step={5} value={scale} disabled={running || operation === "ablate"} onChange={(event) => setScale(Number(event.target.value))} />
+        </label>
+        <input className="chat-feature-strength-number" aria-label="SAE feature delta value" type="number" min={-1000} max={1000} step={5} value={scale} disabled={running || operation === "ablate"} onChange={(event) => setScale(Math.max(-1000, Math.min(1000, Number(event.target.value) || 0)))} />
+        <div className="chat-feature-strength-presets" role="group" aria-label="SAE strength presets">
+          <button type="button" disabled={running || operation === "ablate"} onClick={() => applySuggestedScale(0.5)}>Subtle</button>
+          <button type="button" disabled={running || operation === "ablate"} onClick={() => applySuggestedScale(1)}>Suggested</button>
+          <button type="button" disabled={running || operation === "ablate"} onClick={() => applySuggestedScale(1.5)}>Strong</button>
+        </div>
       </div>
-      <div className="chat-token-range"><header><span>Apply to</span><div><button className={positionStart === 0 && positionEnd === run.tokens.length ? "active" : ""} aria-pressed={positionStart === 0 && positionEnd === run.tokens.length} disabled={running} onClick={() => setRange(0, run.tokens.length)}>Entire input</button><button className={positionStart === run.tokens.length - 1 && positionEnd === run.tokens.length ? "active" : ""} aria-pressed={positionStart === run.tokens.length - 1 && positionEnd === run.tokens.length} disabled={running} onClick={() => setRange(run.tokens.length - 1, run.tokens.length)}>Last token</button></div><small>T{positionStart}–T{positionEnd - 1}</small></header><div aria-label="SAE intervention token range">{run.tokens.map((token) => <button key={token.index} className={token.index >= positionStart && token.index < positionEnd ? "active" : ""} aria-pressed={token.index >= positionStart && token.index < positionEnd} disabled={running} onClick={() => setRange(token.index, token.index + 1)}>{visibleToken(token.text)}</button>)}</div></div>
+      <div className="chat-token-range"><header><span>Apply to</span><div><button className={positionStart === outputBoundary && positionEnd === run.tokens.length ? "active" : ""} aria-pressed={positionStart === outputBoundary && positionEnd === run.tokens.length} disabled={running} onClick={() => setRange(outputBoundary, run.tokens.length)}>Output boundary</button><button className={positionStart === 0 && positionEnd === run.tokens.length ? "active" : ""} aria-pressed={positionStart === 0 && positionEnd === run.tokens.length} disabled={running} onClick={() => setRange(0, run.tokens.length)}>Entire input</button></div><small>T{positionStart}–T{positionEnd - 1}</small></header><div aria-label="SAE intervention token range">{run.tokens.map((token) => <button key={token.index} className={token.index >= positionStart && token.index < positionEnd ? "active" : ""} aria-pressed={token.index >= positionStart && token.index < positionEnd} disabled={running} onClick={() => setRange(token.index, token.index + 1)}>{visibleToken(token.text)}</button>)}</div></div>
       <div className="chat-feature-selected">
         <div className="chat-feature-selected-id"><strong>F{featureIndex}</strong><span>L{selectedProfile?.layer ?? "..."} · resid_post</span><small>{selectedProfile?.saeId ?? "Loading checkpoint"}</small></div>
         <div className="chat-feature-concept">
@@ -505,6 +782,8 @@ function FeatureInterventionWorkbench({
               <> · <a href={featureCardUrl(featureInfo?.url ?? prior?.feature?.conceptUrl)} target="_blank" rel="noreferrer">Open feature card</a></>
             )}
           </small>
+          {(featureInfo?.positiveTokens.length ?? 0) > 0 && <small className="chat-feature-evidence"><b>Positive</b>{featureInfo?.positiveTokens.slice(0, 6).join(" · ")}</small>}
+          {(featureInfo?.negativeTokens.length ?? 0) > 0 && <small className="chat-feature-evidence"><b>Negative</b>{featureInfo?.negativeTokens.slice(0, 6).join(" · ")}</small>}
         </div>
       </div>
       <WorkbenchActions running={running} disabled={!preflight?.canSubmit || !selectedProfile} runLabel="Run SAE intervention" status={runner.error?.message ?? profileError ?? preflightError ?? preflight?.reason} progress={runner.job?.progress} onRun={submit} onCancel={() => void runner.cancel()} onReset={runner.reset} failed={Boolean(runner.error)} />
@@ -1236,8 +1515,39 @@ function attributionTargetIndex(run: ExplorerRun) {
   return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : undefined;
 }
 
+function saeUserTokenRange(run: ExplorerRun) {
+  const tokens = run.tokens;
+  if (tokens.length === 0) return { start: 0, end: 0 };
+  let roleIndex = -1;
+  for (let index = tokens.length - 1; index >= 0; index -= 1) {
+    if (tokens[index].text.trim().toLowerCase() === "user") {
+      roleIndex = index;
+      break;
+    }
+  }
+  if (roleIndex < 0) return { start: 0, end: tokens.length };
+  let start = roleIndex + 1;
+  while (start < tokens.length && tokens[start].text.trim() === "") start += 1;
+  let end = tokens.length;
+  for (let index = start; index < tokens.length; index += 1) {
+    const text = tokens[index].text.trim().toLowerCase();
+    if (text === "<end_of_turn>" || text === "<|im_end|>" || text === "assistant" || text === "model") {
+      end = index;
+      break;
+    }
+  }
+  while (end > start && tokens[end - 1].text.trim() === "") end -= 1;
+  return start < end ? { start, end } : { start: 0, end: tokens.length };
+}
+
 function visibleToken(value: string) {
   return value.trim() || "space";
+}
+
+function formatActivation(value: number) {
+  if (Math.abs(value) >= 100) return value.toFixed(0);
+  if (Math.abs(value) >= 10) return value.toFixed(1);
+  return value.toFixed(2);
 }
 
 function featureCardUrl(value: string | undefined) {

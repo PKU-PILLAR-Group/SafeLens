@@ -9,7 +9,11 @@ import yaml
 import SafeLens
 from SafeLens.nla import (
     INJECT_PLACEHOLDER,
+    NLAActorOutput,
+    NLAClient,
     NLAResult,
+    _append_nla_stopping_criterion,
+    _nla_generation_status,
     build_nla_prompt_input_ids,
     extract_nla_explanation,
     find_nla_injection_positions,
@@ -109,3 +113,73 @@ def test_nla_profiles_and_top_level_exports() -> None:
 
     with pytest.raises(ValueError, match="unknown NLA profile"):
         get_nla_profile("missing")
+
+
+@pytest.mark.parametrize(
+    ("raw_text", "generated_ids", "maximum", "eos_token_id", "expected"),
+    [
+        ("<explanation>complete</explanation>", [4, 5], 256, 2, (True, "end_tag")),
+        ("<explanation>cut off", [4] * 96, 96, 2, (False, "length")),
+        ("<explanation>ended early", [4, 2], 256, 2, (False, "eos")),
+        ("<explanation>unknown", [4, 5], 256, [2, 3], (False, "unknown")),
+    ],
+)
+def test_nla_generation_status_requires_closing_tag(
+    raw_text: str,
+    generated_ids: list[int],
+    maximum: int,
+    eos_token_id: int | list[int],
+    expected: tuple[bool, str],
+) -> None:
+    assert _nla_generation_status(
+        raw_text,
+        generated_ids,
+        max_new_tokens=maximum,
+        eos_token_id=eos_token_id,
+    ) == expected
+
+
+def test_nla_stopping_criterion_detects_the_complete_contract() -> None:
+    torch = pytest.importorskip("torch")
+
+    class _Tokenizer:
+        @staticmethod
+        def decode(ids: list[int], skip_special_tokens: bool) -> str:
+            assert skip_special_tokens is False
+            return "prefix </explanation>" if 9 in ids else "prefix"
+
+    kwargs: dict[str, Any] = {}
+    _append_nla_stopping_criterion(kwargs, _Tokenizer())
+
+    stopped = kwargs["stopping_criteria"](
+        torch.tensor([[1, 9], [1, 2]], dtype=torch.long),
+        None,
+    )
+    assert stopped.tolist() == [True, False]
+
+
+def test_nla_client_does_not_reconstruct_an_incomplete_explanation() -> None:
+    class _Verbalizer:
+        @staticmethod
+        def explain(_activation: Any, **_kwargs: Any) -> NLAActorOutput:
+            return NLAActorOutput(
+                explanation="unfinished thought",
+                raw_text="<explanation>unfinished thought",
+                prompt_token_count=12,
+                activation_norm=3.0,
+                generated_token_count=96,
+                generation_complete=False,
+                finish_reason="length",
+            )
+
+    class _Reconstructor:
+        @staticmethod
+        def score(_explanation: str, _activation: Any) -> tuple[float, float]:
+            raise AssertionError("incomplete explanations must not be reconstructed")
+
+    result = NLAClient(_Verbalizer(), _Reconstructor()).explain_activation([1.0])  # type: ignore[arg-type]
+
+    assert result.cosine is None
+    assert result.mse_nrm is None
+    assert result.metadata["generation_complete"] is False
+    assert result.metadata["finish_reason"] == "length"

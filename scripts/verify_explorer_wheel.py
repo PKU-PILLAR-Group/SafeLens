@@ -12,6 +12,7 @@ WORKERS = (
     "run_local_explorer_jlens.py",
     "run_local_explorer_patching.py",
     "run_local_explorer_intervention.py",
+    "run_local_explorer_sae_discovery.py",
 )
 ASSET_ROOT = "SafeLens/explorer_web/assets/"
 ASSET_REFERENCE = re.compile(r"[A-Za-z0-9_.-]+\.(?:css|js)")

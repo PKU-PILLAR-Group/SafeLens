@@ -513,7 +513,21 @@ function userPromptForRun(run: ExplorerRun) {
     const value = (promptRunner as Record<string, unknown>).userPrompt;
     if (typeof value === "string" && value.trim()) return value;
   }
-  return run.prompt;
+  return promptTextFromTemplate(run.prompt);
+}
+
+function promptTextFromTemplate(prompt: string) {
+  const patterns = [
+    /<\|im_start\|>user\n(.*?)<\|im_end\|>/gs,
+    /<start_of_turn>user\n(.*?)<end_of_turn>/gs,
+    /(?:^|\n)User:\s*(.*?)(?=\nAssistant:|$)/gs
+  ];
+  for (const pattern of patterns) {
+    const matches = [...prompt.matchAll(pattern)];
+    const value = matches[matches.length - 1]?.[1]?.trim();
+    if (value) return value;
+  }
+  return prompt;
 }
 
 function loadHiddenRunKeys() {

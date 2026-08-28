@@ -27,7 +27,13 @@ const nlaRowSchema = z.object({
   status: z.enum(["available", "unavailable"]).optional(),
   profile: z.string().nullable().optional(),
   source: z.string().optional(),
-  token: z.string().optional()
+  token: z.string().optional(),
+  generation: z.object({
+    complete: z.boolean(),
+    finishReason: z.enum(["end_tag", "eos", "length", "unknown"]),
+    generatedTokenCount: z.number().int().nonnegative(),
+    requestedMaxNewTokens: z.number().int().positive()
+  }).optional()
 });
 
 const nlaCompatibilitySchema = z.object({

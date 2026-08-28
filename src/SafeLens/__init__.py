@@ -179,6 +179,13 @@ from SafeLens.core.utilities import (
     vanilla_addmm,
     warn_if_mps,
 )
+from SafeLens.jlens_profiles import (
+    JLENS_SUPPORTED_PROFILES,
+    QWEN25_7B_INSTRUCT_JLENS,
+    JLensProfile,
+    find_jlens_profile,
+    list_jlens_profiles,
+)
 from SafeLens.nla import (
     INJECT_PLACEHOLDER,
     NLA_SUPPORTED_PROFILES,
@@ -198,13 +205,6 @@ from SafeLens.nla import (
     load_nla_config,
     normalize_nla_activation,
     validate_nla_tokenizer,
-)
-from SafeLens.jlens_profiles import (
-    JLENS_SUPPORTED_PROFILES,
-    QWEN25_7B_INSTRUCT_JLENS,
-    JLensProfile,
-    find_jlens_profile,
-    list_jlens_profiles,
 )
 from SafeLens.utils.model_wrapper import HookedTransformer
 from SafeLens.viz import (
@@ -273,6 +273,8 @@ __all__ = [
     "direct_logit_attribution",
     "FactoredMatrix",
     "INJECT_PLACEHOLDER",
+    "JLENS_SUPPORTED_PROFILES",
+    "JLensProfile",
     "NLAActivationReconstructor",
     "NLAActivationVerbalizer",
     "NLAActorOutput",
@@ -281,6 +283,7 @@ __all__ = [
     "NLAProfile",
     "NLAResult",
     "NLA_SUPPORTED_PROFILES",
+    "QWEN25_7B_INSTRUCT_JLENS",
     "get_duplicate_token_head_detection_pattern",
     "get_induction_head_detection_pattern",
     "get_previous_token_head_detection_pattern",
@@ -324,8 +327,10 @@ __all__ = [
     "component_activation_patch",
     "extract_nla_explanation",
     "find_nla_injection_positions",
+    "find_jlens_profile",
     "format_patch_results",
     "generic_activation_patch",
+    "list_jlens_profiles",
     "call_hf_with_retry",
     "clear_huggingface_cache",
     "complex_attn_linear",

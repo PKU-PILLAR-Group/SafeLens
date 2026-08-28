@@ -128,6 +128,42 @@ def test_logit_delta_summary_detects_full_vocabulary_effect() -> None:
     }
 
 
+def test_logit_delta_summary_uses_real_generation_steps_and_vocab_ids() -> None:
+    torch = pytest.importorskip("torch")
+    summary = MODULE._logit_delta_summary(
+        torch.tensor([[0.0, 1.0, 2.0], [3.0, 4.0, 5.0]]),
+        torch.tensor([[0.0, 1.0, 2.0], [3.0, 3.5, 7.0]]),
+    )
+
+    assert summary == {
+        "maxAbsLogit": 2.0,
+        "meanAbsLogit": pytest.approx(2.5 / 6),
+        "changedVocabularyLogits": 2,
+        "topChangedTokenId": 2,
+        "topChangedTokenDelta": 2.0,
+        "effectStatus": "changed",
+    }
+
+
+def test_generation_score_matrix_prefers_generate_output_scores() -> None:
+    torch = pytest.importorskip("torch")
+
+    class Generated:
+        scores = (torch.tensor([[1.0, 2.0]]), torch.tensor([[3.0, 4.0]]))
+
+    scores = MODULE._generation_score_matrix(
+        Generated(),
+        fallback=torch.tensor([9.0, 9.0]),
+    )
+
+    assert torch.equal(scores, torch.tensor([[1.0, 2.0], [3.0, 4.0]]))
+
+
+def test_optional_layer_treats_serialized_null_as_default() -> None:
+    assert MODULE._optional_layer(None, 18) == 18
+    assert MODULE._optional_layer(0, 18) == 0
+
+
 def test_direction_hook_skips_prefill_then_applies_raw_contrast_during_generation() -> None:
     torch = pytest.importorskip("torch")
     desired = torch.tensor([4.0, 8.0])

@@ -42,7 +42,7 @@ export function NLAJobPanel({ run, selectedToken, onRunReady }: NLAJobPanelProps
   const [preflightLoading, setPreflightLoading] = useState(true);
   const [positions, setPositions] = useState<number[]>([selectedToken]);
   const [revision, setRevision] = useState("main");
-  const [maxNewTokens, setMaxNewTokens] = useState(96);
+  const [maxNewTokens, setMaxNewTokens] = useState(256);
   const [confirmGatedAccess, setConfirmGatedAccess] = useState(false);
   const [setupOpen, setSetupOpen] = useState(availableRows === 0);
   const runner = useNlaRunner(onRunReady);
@@ -189,10 +189,10 @@ export function NLAJobPanel({ run, selectedToken, onRunReady }: NLAJobPanelProps
             aria-label="NLA maximum new tokens"
             type="number"
             min={8}
-            max={256}
+            max={512}
             value={maxNewTokens}
             disabled={isRunning}
-            onChange={(event) => setMaxNewTokens(clamp(event.target.value, 8, 256))}
+            onChange={(event) => setMaxNewTokens(clamp(event.target.value, 8, 512))}
           />
         </label>
         <div className="nla-profile-artifacts">

@@ -68,7 +68,7 @@ def neuronpedia_feature_info(
     and a missing network connection degrades to an explicit index-only label.
     """
     url = _neuronpedia_feature_url(model_name, layer, sae_id, feature_index)
-    fallback = {
+    fallback: dict[str, Any] = {
         "label": f"Gemma Scope feature {feature_index}",
         "source": "index",
         "url": url,

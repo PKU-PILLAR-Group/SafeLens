@@ -11,6 +11,7 @@ from __future__ import annotations
 import gc
 import math
 import random
+from collections.abc import Callable
 from typing import Any
 
 DATASET_CATALOG: tuple[dict[str, Any], ...] = (
@@ -489,7 +490,12 @@ def _render_chat_prompt(tokenizer: Any, prompt: str) -> str:
     return prompt
 
 
-def _direction_hook(vector: Any, strength: float, position: tuple[int, int], prompt_count: int):
+def _direction_hook(
+    vector: Any,
+    strength: float,
+    position: tuple[int, int],
+    prompt_count: int,
+) -> Callable[..., Any]:
     def hook(activation: Any = None, **kwargs: Any) -> Any:
         value = kwargs.get("activation", activation)
         if value is None or not hasattr(value, "clone") or int(value.shape[-2]) < prompt_count:
