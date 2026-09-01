@@ -19338,6 +19338,53 @@ body {
 .chat-sae-concept-evidence b { margin-right: 5px; color: #397466; }
 .chat-steering-result > footer { flex-wrap: wrap; }
 
+/* SAE uses progressive disclosure so the scan result remains the primary task. */
+.chat-sae-section-title { min-width: 0; display: flex; align-items: center; gap: 9px; }
+.chat-sae-section-title > div { min-width: 0; display: grid; gap: 3px; }
+.chat-sae-step { width: 22px; height: 22px; flex: 0 0 auto; display: inline-grid; place-items: center; border-radius: 50%; background: #dceee9; color: #176b5e; font-size: 11px; font-weight: 800; }
+.chat-sae-discovery-tools { display: grid; grid-template-columns: auto minmax(180px, 1fr) auto; align-items: end; gap: 8px; }
+.chat-sae-discovery-scope { display: flex; align-items: stretch; gap: 4px; }
+.chat-sae-discovery-scope button { min-height: 34px; padding: 0 9px; border: 1px solid #d4dfdb; border-radius: 5px; background: #fff; color: #55716b; font-size: 10px; font-weight: 750; white-space: nowrap; }
+.chat-sae-discovery-scope button:hover, .chat-sae-discovery-scope button.active { border-color: #4a9788; background: #e8f5f0; color: #176b5e; }
+.chat-sae-discovery-scope button:disabled { cursor: not-allowed; opacity: .55; }
+.chat-sae-discovery-tools .chat-sae-profile { display: grid; gap: 5px; }
+.chat-sae-discovery-tools .chat-sae-profile > span { color: #63736f; font-size: 10px; font-weight: 700; }
+.chat-sae-discovery-tools .chat-sae-profile select { height: 34px; padding: 0 8px; border: 1px solid #d7e1de; border-radius: 5px; background: #fff; color: #34433f; font-size: 11px; }
+.chat-sae-discovery-tools > button { min-height: 34px; }
+.chat-sae-candidates-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.chat-sae-candidates-heading strong { color: #38564e; font-size: 12px; }
+.chat-sae-candidates-heading small { color: #7b8985; font-size: 10px; }
+.chat-sae-config { margin-top: 16px; padding: 14px; border: 1px solid #dfe7e4; border-left: 3px solid #6a9d91; background: #fff; }
+.chat-sae-config.is-waiting { border-left-color: #c5cfcc; background: #fafbfb; }
+.chat-sae-config-heading { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
+.chat-sae-config-heading > span { padding: 4px 7px; border-radius: 4px; font-size: 10px; font-weight: 800; text-transform: uppercase; }
+.chat-sae-config-heading > span.ready { background: #e5f3ef; color: #197260; }
+.chat-sae-config-heading > span.waiting { background: #eef0f0; color: #78827f; }
+.chat-sae-not-selected { margin: 12px 0 0 31px; color: #77827f; font-size: 12px; line-height: 1.5; }
+.chat-sae-not-selected b { color: #4d6d65; }
+.chat-sae-config-body { margin-top: 13px; display: grid; gap: 13px; }
+.chat-sae-config .chat-feature-adjustment { padding: 0 0 13px; grid-template-columns: auto minmax(180px, 1fr) 96px; border-bottom: 1px solid #e8eeec; }
+.chat-sae-config .chat-feature-strength-presets { grid-column: 2 / -1; justify-content: flex-end; }
+.chat-feature-generation { display: grid; grid-template-columns: 130px minmax(0, 1fr); align-items: start; gap: 14px; }
+.chat-feature-generation > label { display: grid; gap: 5px; }
+.chat-feature-generation > label > span { color: #63716d; font-size: 11px; font-weight: 700; }
+.chat-feature-generation > label input { width: 100%; height: 34px; padding: 0 9px; border: 1px solid #d7d9db; border-radius: 5px; background: #fff; color: #303236; font: inherit; font-size: 12px; }
+.chat-sae-advanced { min-width: 0; }
+.chat-sae-advanced summary { min-height: 34px; padding: 0 10px; display: flex; align-items: center; cursor: pointer; border: 1px dashed #d3ddda; border-radius: 5px; color: #4c7168; font-size: 11px; font-weight: 750; list-style-position: inside; }
+.chat-sae-advanced[open] summary { border-style: solid; border-color: #c7ddd6; background: #f5faf8; }
+.chat-feature-advanced-grid { margin-top: 8px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.chat-feature-advanced-grid label { min-width: 0; display: grid; gap: 5px; }
+.chat-feature-advanced-grid label > span { color: #77827f; font-size: 10px; font-weight: 700; }
+.chat-feature-advanced-grid select, .chat-feature-advanced-grid input { width: 100%; height: 34px; padding: 0 8px; border: 1px solid #d7d9db; border-radius: 5px; background: #fff; color: #303236; font: inherit; font-size: 12px; }
+.chat-sae-config .chat-feature-selected { margin: 12px 0 0; padding: 10px; gap: 8px; border: 1px solid #d6e7e0; background: #f4faf7; }
+.chat-sae-config .chat-feature-concept { padding: 0; border: 0; background: transparent; }
+.chat-sae-config .chat-feature-concept > strong { color: #274d43; font-size: 13px; }
+.chat-token-range > header > span { display: inline-flex; align-items: center; gap: 8px; }
+.chat-token-range > header > span .chat-sae-step { width: 20px; height: 20px; }
+.chat-token-range > header > span .chat-sae-step + * { display: inline; }
+.chat-sae-range-hint { margin: 0; color: #87928f; font-size: 11px; line-height: 1.45; }
+.chat-feature-workbench > .chat-workbench-actions { margin-top: 2px; }
+
 @media (max-width: 760px) {
   .chat-attribution-rankings { grid-template-columns: 1fr; }
   .chat-attribution-rankings > section + section { border-left: 0; border-top: 1px solid #e5e7e8; padding: 14px 0 0; }
@@ -19347,6 +19394,18 @@ body {
   .chat-feature-adjustment { grid-template-columns: 1fr 92px; }
   .chat-feature-operations, .chat-feature-strength-presets { grid-column: 1 / -1; }
   .chat-feature-strength-number { width: 92px; }
+  .chat-sae-discovery-tools { grid-template-columns: 1fr; }
+  .chat-sae-discovery-scope { width: 100%; }
+  .chat-sae-discovery-scope button { flex: 1; }
+  .chat-sae-discovery-tools > button { width: 100%; }
+  .chat-sae-candidates-heading { align-items: flex-start; flex-direction: column; gap: 2px; }
+  .chat-sae-config { padding: 12px; }
+  .chat-sae-config .chat-feature-adjustment { grid-template-columns: 1fr 92px; }
+  .chat-sae-config .chat-feature-operations, .chat-sae-config .chat-feature-strength-presets { grid-column: 1 / -1; }
+  .chat-sae-config .chat-feature-strength-presets { justify-content: flex-start; }
+  .chat-feature-generation { grid-template-columns: 1fr; gap: 10px; }
+  .chat-feature-advanced-grid { grid-template-columns: 1fr; }
+  .chat-sae-not-selected { margin-left: 0; }
   .chat-attention-row-heatmap > header { display: grid; gap: 3px; }
 }
 

@@ -36,6 +36,9 @@ export function InterventionComparison({ experiment, onPin }: InterventionCompar
               <> <a href={featureCardUrl(experiment.feature.conceptUrl)} target="_blank" rel="noreferrer">Open feature card</a></>
             )}
           </small>
+          {experiment.feature.operation === "add" && experiment.feature.baselineActivation <= 0 && (
+            <small>Feature inactive in the selected prompt range; this run injects its decoder direction explicitly.</small>
+          )}
         </div>
       )}
 
@@ -62,7 +65,7 @@ export function InterventionComparison({ experiment, onPin }: InterventionCompar
         {experiment.deltas.generationChanged
           ? `Generation first diverged at output token ${experiment.deltas.firstDivergenceIndex ?? 0}.`
           : experiment.deltas.maxAbsLogit && experiment.deltas.maxAbsLogit > 0
-            ? "Logits changed, but greedy decoding stayed on the same tokens in this generation window."
+            ? "Logits changed, but greedy decoding stayed on the same tokens in this generation window. Try another feature or layer, or use sampling to expose the changed distribution."
             : experiment.deltas.probeReason}
       </p>
     </section>
@@ -110,7 +113,7 @@ function signed(value: number) {
   return `${value > 0 ? "+" : ""}${magnitude}`;
 }
 
-function featureCardUrl(value: string | undefined) {
+function featureCardUrl(value: string | null | undefined) {
   return value?.replace("/api/feature/", "/") ?? "";
 }
 

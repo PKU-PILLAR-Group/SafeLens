@@ -143,7 +143,9 @@ def main() -> None:
                 "width": feature_width,
                 "architecture": profile.architecture,
                 "source": profile.source,
-                "conceptLabel": concept["label"] if concept["source"] == "neuronpedia" else None,
+                # Keep the display label populated even when Neuronpedia is unavailable.
+                # The canonical label remains distinguishable through conceptSource.
+                "conceptLabel": concept["label"],
                 "conceptSource": concept["source"],
                 "conceptUrl": concept["url"],
                 "positiveTokens": concept["positiveTokens"],
@@ -258,6 +260,8 @@ def main() -> None:
                         "negativeCount": len(negative_prompts),
                     }
                     if mode == "direction"
+                    else {"injectionPhase": "prompt_and_generation"}
+                    if mode == "sae_feature"
                     else {}
                 ),
                 "activationReduce": (
@@ -488,17 +492,26 @@ def _make_sae_feature_hook(
         if value is None or not hasattr(value, "clone") or getattr(value, "ndim", 0) < 2:
             return value
         sequence_length = int(value.shape[-2])
-        if sequence_length < prompt_token_count:
-            return value
         start, end = position
-        bounded_end = min(end, sequence_length, prompt_token_count)
-        if start >= bounded_end:
-            return value
+        is_cached_generation_step = sequence_length < prompt_token_count
+        if is_cached_generation_step:
+            # Transformers passes only the newest token once a KV cache exists.
+            # Keep an output-boundary intervention active for every generated token.
+            if not (start == prompt_token_count - 1 and end == prompt_token_count):
+                return value
+            selected_start = -1
+            selected_end = None
+        else:
+            bounded_end = min(end, sequence_length, prompt_token_count)
+            if start >= bounded_end:
+                return value
+            selected_start = start
+            selected_end = bounded_end
         result = value.clone()
         selected = (
-            value[:, start:bounded_end, :]
+            value[:, selected_start:selected_end, :]
             if value.ndim >= 3
-            else value[start:bounded_end, :]
+            else value[selected_start:selected_end, :]
         )
         if int(selected.shape[-1]) != int(decoder.shape[-1]):
             raise ValueError(
@@ -516,9 +529,9 @@ def _make_sae_feature_hook(
             residual_delta = sae.decode(modified_features) - sae.decode(original_features)
         delta = residual_delta.to(device=value.device, dtype=value.dtype)
         if value.ndim >= 3:
-            result[:, start:bounded_end, :] += delta
+            result[:, selected_start:selected_end, :] += delta
         else:
-            result[start:bounded_end, :] += delta
+            result[selected_start:selected_end, :] += delta
         return result
 
     return hook

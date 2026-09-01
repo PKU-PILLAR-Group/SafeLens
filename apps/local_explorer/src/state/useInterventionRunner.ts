@@ -76,8 +76,10 @@ export function useInterventionRunner(
         const parsed = interventionJobSchema.safeParse(input);
         if (!parsed.success) {
           closeStream();
+          const issue = parsed.error.issues[0];
+          const location = issue?.path.length ? ` (${issue.path.join(".")})` : "";
           setError(jobProtocolFailure(
-            "Intervention progress payload failed validation.",
+            `Intervention progress payload failed validation${location}: ${issue?.message ?? "unknown schema error"}.`,
             "intervention_stream_invalid_schema"
           ));
           return;

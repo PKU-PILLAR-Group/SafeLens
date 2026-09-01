@@ -220,6 +220,37 @@ def test_sae_feature_hook_adds_one_decoded_feature_on_selected_prompt_tokens() -
     assert torch.equal(hook(activation=torch.zeros((1, 1, 2))), torch.zeros((1, 1, 2)))
 
 
+def test_sae_feature_hook_keeps_output_boundary_active_during_cached_generation() -> None:
+    torch = pytest.importorskip("torch")
+
+    class FakeSAE:
+        W_dec = torch.eye(2)
+
+        def encode(self, activation):
+            return activation
+
+        def decode(self, features):
+            return features
+
+    hook = MODULE._make_sae_feature_hook(
+        sae=FakeSAE(),
+        feature_index=1,
+        operation="add",
+        scale=3.0,
+        position=(2, 3),
+        prompt_token_count=3,
+    )
+
+    # A cached generation call contains only the newest token. The output
+    # boundary range must still receive the feature delta on every such call.
+    incremental = torch.tensor([[[1.0, 2.0]]])
+
+    assert torch.equal(
+        hook(activation=incremental),
+        torch.tensor([[[1.0, 5.0]]]),
+    )
+
+
 def test_sae_feature_hook_ablates_encoded_feature_without_replacing_reconstruction() -> None:
     torch = pytest.importorskip("torch")
 

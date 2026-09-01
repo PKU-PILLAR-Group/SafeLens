@@ -363,9 +363,9 @@ export interface InterventionExperiment {
     width?: number;
     architecture?: "jump_relu";
     source?: string;
-    conceptLabel?: string;
+    conceptLabel?: string | null;
     conceptSource?: "neuronpedia" | "index";
-    conceptUrl?: string;
+    conceptUrl?: string | null;
     positiveTokens?: string[];
     negativeTokens?: string[];
   };
@@ -384,7 +384,7 @@ export interface InterventionExperiment {
     dimension: number;
     sourceKey: string;
     injectionKey?: string;
-    injectionPhase?: "generation" | "prompt";
+    injectionPhase?: "generation" | "prompt" | "prompt_and_generation";
     referenceTemplate?: string;
     desiredTokenCount?: number;
     undesiredTokenCount?: number;

@@ -43,15 +43,21 @@ feature coordinate by the requested strength; `Ablate feature` sets it to
 zero. The result records the SAE release, SAE ID, feature index, activation
 statistics, logit deltas, and generated-token diff.
 
-In Chat, **Find active features** runs the selected SAE on the current user
-message and ranks features by their measured positive activation. Each row
-shows its peak token, activation, coverage, optional Neuronpedia concept, and
-a calibrated strength. Selecting a row fills the feature and strength fields.
-`Add activation` defaults to the output boundary so it can alter generation;
-`Ablate feature` defaults to the feature's measured peak token so it does not
-silently ablate an inactive coordinate. The suggested delta is approximately
-twice the observed peak (bounded to `100..1000`); **Subtle** applies half that
-value and all fields remain editable.
+In Chat, **Find active features** defaults to the output boundary, where an
+intervention can directly influence generation, and ranks features by their
+measured positive activation. The UI also keeps a user-input scan for features
+that are active only in the prompt. Each row shows its peak token, activation,
+coverage, optional Neuronpedia concept, and a calibrated strength. Selecting a
+row fills the feature and strength fields. `Add activation` defaults to the
+output boundary; `Ablate feature` defaults to the feature's measured peak token
+so it does not silently ablate an inactive coordinate. The suggested delta is
+approximately twice the observed peak (bounded to `100..1000`); **Subtle**
+applies half that value and all fields remain editable.
+
+For the output-boundary range, the decoded SAE delta is applied during prompt
+prefill and every cached autoregressive generation step. This keeps the
+intervention active after the first generated token instead of changing only a
+single next-token logit.
 
 ## Install and run
 
