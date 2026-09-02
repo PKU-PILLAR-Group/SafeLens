@@ -282,3 +282,39 @@ safety classifier. In particular:
 
 Hover a provenance row or heatmap cell to inspect the metric meaning and source
 cache key. Exported evidence JSON includes the complete provenance block.
+
+## Gemma-2-9B-it SAE steering demo
+
+The standalone demo is available at `http://127.0.0.1:7860/sae-steer` after
+starting the Explorer. It uses the canonical GemmaScope `layer_9/width_131k`
+dictionary (`blocks.9.hook_resid_post`) and accepts multiple decoder features.
+The old Gemma-3-270M Explorer SAE profile remains available in the Feature
+workbench for legacy/debug runs.
+
+Install the model/SAE runtime and download the checkpoint:
+
+```bash
+python -m pip install -e ".[explorer,models]"
+python scripts/download_gemma_scope_9b_it_sae.py \
+  --output /ssd/yqy/cache/safelens/gemma-scope-9b-it-res/layer_9/width_131k/average_l0_121/params.npz
+```
+
+Configure the local model, SAE path, device, and dtype before launching:
+
+```bash
+export SAFELENS_GEMMA_2_9B_IT_MODEL_PATH=/ssd/models/Gemma2-9b-it
+export SAFELENS_GEMMA_SCOPE_9B_IT_SAE_PATH=/ssd/yqy/cache/safelens/gemma-scope-9b-it-res/layer_9/width_131k/average_l0_121/params.npz
+export SAFELENS_GEMMA_SAE_DEVICE=cuda
+export SAFELENS_GEMMA_SAE_DTYPE=bfloat16
+safelens explorer --artifact-root outputs/local-explorer --no-browser
+```
+
+`SAFELENS_GEMMA_2_9B_IT_MODEL_PATH` may also be a Hugging Face model ID.
+The model and decoder are cached in the service process and reused across
+requests. `scripts/run_gemma_sae_steering.py` runs the same comparison without
+the web UI:
+
+```bash
+python scripts/run_gemma_sae_steering.py "Write a short greeting" \
+  --feature 62610:192 --feature 29917:166
+```

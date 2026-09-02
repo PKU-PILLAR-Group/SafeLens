@@ -47,6 +47,7 @@ import { QuickActionsDialog } from "./components/QuickActionsDialog";
 import { ActionableEmptyState } from "./components/ActionableEmptyState";
 import { ExplorerHome } from "./components/ExplorerHome";
 import { DatasetTestScreen } from "./components/DatasetTestScreen";
+import { SAESteeringDemo } from "./components/SAESteeringDemo";
 import {
   LayerSelector,
   SelectionWorkbench,
@@ -150,7 +151,7 @@ function preloadCompareDrawer() {
 const ExplorerRunContext = createContext<ExplorerRun>(realRun);
 type EvidenceFilter = "top" | "neighborhood" | "all";
 type WorkspaceLayout = "focus" | "dense";
-type AppScreen = "home" | "explorer" | "dataset-test";
+type AppScreen = "home" | "explorer" | "dataset-test" | "sae-steer";
 type ContextNotice = {
   id: number;
   kind: "run" | "selection";
@@ -181,6 +182,7 @@ function initialWorkspaceLayout(): WorkspaceLayout {
 function screenFromLocation(): AppScreen {
   const path = window.location.pathname.replace(/\/+$/, "");
   if (path === "/dataset-test") return "dataset-test";
+  if (path === "/sae-steer") return "sae-steer";
   if (path === "/explorer") return "explorer";
   const params = new URLSearchParams(window.location.search);
   const explorerKeys = [
@@ -275,6 +277,11 @@ function App() {
     setScreen("dataset-test");
   }
 
+  function openSAESteering() {
+    window.history.pushState(null, "", "/sae-steer");
+    setScreen("sae-steer");
+  }
+
   return (
     <ExplorerRunContext.Provider value={run}>
       {screen === "home" ? (
@@ -283,6 +290,7 @@ function App() {
           activeRecord={library.activeRecord}
           remoteState={library.remoteState}
           onOpenDatasetTest={openDatasetTest}
+          onOpenSAESteering={openSAESteering}
           onSelectConversation={(key) => library.selectRun(key, undefined, "none")}
           onRunReady={(generatedRun, job) => library.addGeneratedRun(
             generatedRun,
@@ -299,6 +307,8 @@ function App() {
         />
       ) : screen === "dataset-test" ? (
         <DatasetTestScreen onOpenChat={openHome} />
+      ) : screen === "sae-steer" ? (
+        <SAESteeringDemo onBack={openHome} />
       ) : (
         <ExplorerWorkspace
           key={library.activeRecord.key}

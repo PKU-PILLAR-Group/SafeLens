@@ -44,6 +44,8 @@ def _default_allowed_models() -> tuple[str, ...]:
 
     models = [DEFAULT_PROMPT_MODEL, TINYGPT2_MODEL]
     models.extend(str(profile["base_model"]) for profile in list_nla_profiles())
+    # Include every exact SAE base model in the picker. Gemma-2-9B can be used
+    # both by the standalone demo and as a normal multi-turn Chat model.
     models.extend(profile.model_name for profile in list_sae_profiles())
     return tuple(dict.fromkeys(models))
 
@@ -420,6 +422,56 @@ class SAEFeatureInfoResponse(BaseModel):
     url: str | None = None
     positiveTokens: list[str] = Field(default_factory=list)
     negativeTokens: list[str] = Field(default_factory=list)
+
+
+class SAESteeringFeatureRequest(BaseModel):
+    """One decoder feature used by the standalone Gemma steering demo."""
+
+    featureIndex: int = Field(ge=0, le=131_071)
+    strength: float = Field(ge=-9_000.0, le=9_000.0)
+
+
+class SAESteeringRequest(BaseModel):
+    prompt: str = Field(min_length=1, max_length=8_000)
+    features: list[SAESteeringFeatureRequest] = Field(default_factory=list, max_length=32)
+    maxNewTokens: int = Field(default=64, ge=1, le=512)
+    temperature: float = Field(default=0.0, ge=0.0, le=2.0)
+    seed: int = Field(default=0, ge=0, le=2_147_483_647)
+
+    @model_validator(mode="after")
+    def validate_prompt_and_features(self) -> SAESteeringRequest:
+        self.prompt = self.prompt.strip()
+        if not self.prompt:
+            raise ValueError("prompt must not be empty")
+        indices = [item.featureIndex for item in self.features]
+        if len(indices) != len(set(indices)):
+            raise ValueError("features must not contain duplicate featureIndex values")
+        return self
+
+
+class SAESteeringGenerationResponse(BaseModel):
+    text: str
+    tokenIds: list[int]
+    tokens: list[dict[str, Any]]
+
+
+class SAESteeringResponse(BaseModel):
+    modelName: str
+    modelPath: str
+    saeRelease: str
+    saeId: str
+    layer: int
+    hookName: str
+    featureCount: int
+    hiddenSize: int
+    features: list[SAESteeringFeatureRequest]
+    prompt: str
+    default: SAESteeringGenerationResponse
+    steered: SAESteeringGenerationResponse
+    generationChanged: bool
+    seed: int
+    maxNewTokens: int
+    temperature: float
 
 
 def _clean_intervention_prompts(prompts: list[str], field_name: str) -> list[str]:
@@ -870,6 +922,35 @@ def create_app(
         jlens_runner is not None or importlib.util.find_spec("jlens") is not None
     )
 
+    @app.on_event("startup")
+    def _preload_gemma_sae_runtime() -> None:
+        """Warm the standalone 9B SAE runtime once when complete local assets exist."""
+        enabled = os.environ.get("SAFELENS_GEMMA_SAE_PRELOAD", "1").strip().lower()
+        if enabled in {"0", "false", "no", "off"}:
+            return
+        try:
+            from SafeLens.gemma_sae_steering import (
+                GemmaSteeringConfig,
+                get_gemma_steering_runtime,
+            )
+
+            config = GemmaSteeringConfig.from_env()
+            checkpoint = Path(config.sae_path).expanduser()
+            model_path = Path(config.model_path).expanduser()
+            # Avoid surprising heavyweight downloads for a server that has not
+            # been configured yet. A real canonical checkpoint is >3 GiB.
+            if (
+                not model_path.is_dir()
+                or not checkpoint.is_file()
+                or checkpoint.stat().st_size < 100 * 1024 * 1024
+            ):
+                return
+            get_gemma_steering_runtime(config)
+        except (ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
+            # Keep the HTTP service available so the config endpoint can show
+            # the actionable error and a later request can retry the load.
+            print(f"SafeLens Gemma SAE preload skipped: {exc}", file=sys.stderr)
+
     @app.get("/api/health", response_model=HealthResponse)
     def health() -> HealthResponse:
         candidates = list(_artifact_candidates(root))
@@ -1112,6 +1193,43 @@ def create_app(
             positiveTokens=list(info.get("positiveTokens", [])),
             negativeTokens=list(info.get("negativeTokens", [])),
         )
+
+    @app.get("/api/sae-steering/config")
+    def sae_steering_config() -> dict[str, Any]:
+        """Return the configured Gemma-2-9B-it demo runtime and presets."""
+        from SafeLens.gemma_sae_steering import runtime_status
+
+        return runtime_status()
+
+    @app.post("/api/sae-steering", response_model=SAESteeringResponse)
+    def sae_steering(payload: SAESteeringRequest) -> SAESteeringResponse:
+        """Generate default and multi-feature steered Gemma continuations."""
+        from SafeLens.gemma_sae_steering import SAEFeature, steer_gemma_prompt
+
+        try:
+            result = steer_gemma_prompt(
+                payload.prompt,
+                [
+                    SAEFeature(feature_index=item.featureIndex, strength=item.strength)
+                    for item in payload.features
+                ],
+                max_new_tokens=payload.maxNewTokens,
+                temperature=payload.temperature,
+                seed=payload.seed,
+            )
+            return SAESteeringResponse.model_validate(result)
+        except (
+            ImportError,
+            FileNotFoundError,
+            OSError,
+            RuntimeError,
+            TypeError,
+            ValueError,
+        ) as exc:
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "sae_steering_error", "message": str(exc)},
+            ) from exc
 
     @app.post("/api/intervention/preflight", response_model=InterventionPreflightResponse)
     def intervention_preflight(

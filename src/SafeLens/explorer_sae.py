@@ -13,11 +13,16 @@ from urllib.error import URLError
 from urllib.request import Request, urlopen
 
 from SafeLens.explorer_model import DEFAULT_MODELSCOPE_MODEL_CACHE
+from SafeLens.sae_profiles import (
+    GEMMA_SCOPE_9B_IT_MODEL,
+    GEMMA_SCOPE_9B_IT_SAE_ID,
+)
 
 GEMMA_SCOPE_2_270M_IT_RELEASE = "gemma-scope-2-270m-it-res"
 GEMMA_SCOPE_2_270M_IT_REPO = "google/gemma-scope-2-270m-it"
 GEMMA_SCOPE_2_270M_IT_MODEL = "google/gemma-3-270m-it"
 NEURONPEDIA_GEMMA_MODEL = "gemma-3-270m-it"
+NEURONPEDIA_GEMMA_9B_MODEL = "gemma-2-9b-it"
 
 SAEConverter = Callable[
     [str, str, str, bool, dict[str, Any] | None],
@@ -136,6 +141,11 @@ def _neuronpedia_feature_url(
     sae_id: str,
     feature_index: int,
 ) -> str | None:
+    if model_name == GEMMA_SCOPE_9B_IT_MODEL and (
+        sae_id == GEMMA_SCOPE_9B_IT_SAE_ID
+        or (sae_id.startswith("layer_9") and "width_131k" in sae_id)
+    ):
+        return f"https://www.neuronpedia.org/{NEURONPEDIA_GEMMA_9B_MODEL}/9-gemmascope-res-131k/{feature_index}"
     if (
         model_name != GEMMA_SCOPE_2_270M_IT_MODEL
         or not sae_id.startswith("layer_")

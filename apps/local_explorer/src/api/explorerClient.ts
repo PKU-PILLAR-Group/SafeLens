@@ -953,6 +953,75 @@ const saeFeatureInfoSchema = z.object({
 
 export type SAEFeatureInfo = z.infer<typeof saeFeatureInfoSchema>;
 
+const saeSteeringFeatureSchema = z.object({
+  featureIndex: z.number().int().nonnegative(),
+  strength: z.number()
+});
+
+const saeSteeringGenerationSchema = z.object({
+  text: z.string(),
+  tokenIds: z.array(z.number().int().nonnegative()),
+  tokens: z.array(z.object({
+    index: z.number().int().nonnegative(),
+    tokenId: z.number().int().nonnegative(),
+    text: z.string()
+  }))
+});
+
+const saeSteeringResponseSchema = z.object({
+  modelName: z.string().min(1),
+  modelPath: z.string().min(1),
+  saeRelease: z.string().min(1),
+  saeId: z.string().min(1),
+  layer: z.number().int().nonnegative(),
+  hookName: z.string().min(1),
+  featureCount: z.number().int().positive(),
+  hiddenSize: z.number().int().positive(),
+  features: z.array(saeSteeringFeatureSchema),
+  prompt: z.string(),
+  default: saeSteeringGenerationSchema,
+  steered: saeSteeringGenerationSchema,
+  generationChanged: z.boolean(),
+  seed: z.number().int().nonnegative(),
+  maxNewTokens: z.number().int().positive(),
+  temperature: z.number().nonnegative()
+});
+
+const saeSteeringConfigSchema = z.object({
+  modelName: z.string().min(1),
+  modelPath: z.string().min(1),
+  saePath: z.string().min(1),
+  saeUrl: z.string().url(),
+  release: z.string().min(1),
+  saeId: z.string().min(1),
+  layer: z.number().int().nonnegative(),
+  hookName: z.string().min(1),
+  featureCount: z.number().int().positive(),
+  device: z.string().min(1),
+  dtype: z.string().min(1),
+  checkpointPresent: z.boolean(),
+  presets: z.array(z.object({
+    id: z.string().min(1),
+    label: z.string().min(1),
+    description: z.string(),
+    featureIndex: z.number().int().nonnegative(),
+    strength: z.number()
+  }))
+});
+
+export type SAESteeringFeature = z.infer<typeof saeSteeringFeatureSchema>;
+export type SAESteeringGeneration = z.infer<typeof saeSteeringGenerationSchema>;
+export type SAESteeringResponse = z.infer<typeof saeSteeringResponseSchema>;
+export type SAESteeringConfig = z.infer<typeof saeSteeringConfigSchema>;
+
+export interface SAESteeringInput {
+  prompt: string;
+  features: SAESteeringFeature[];
+  maxNewTokens: number;
+  temperature: number;
+  seed: number;
+}
+
 const saeFeatureCandidateSchema = z.object({
   featureIndex: z.number().int().nonnegative(),
   label: z.string().min(1),
@@ -1100,7 +1169,8 @@ export async function submitPromptJob(input: PromptRunInput): Promise<PromptJob>
 export async function fetchPromptOptions(signal?: AbortSignal): Promise<PromptOptions> {
   const response = await fetch(`${API_BASE}/prompt/options`, {
     headers: { Accept: "application/json" },
-    signal
+    signal,
+    cache: "no-store"
   });
   if (!response.ok) {
     throw await jobResponseError(response, "prompt_options_error");
@@ -1387,6 +1457,30 @@ export async function fetchSAEProfiles(
   if (!parsed.success) {
     throw new ExplorerApiError("invalid_sae_profiles", parsed.error.message);
   }
+  return parsed.data;
+}
+
+export async function fetchSAESteeringConfig(signal?: AbortSignal): Promise<SAESteeringConfig> {
+  const response = await fetch(`${API_BASE}/sae-steering/config`, {
+    signal,
+    headers: { Accept: "application/json" },
+    cache: "no-store"
+  });
+  if (!response.ok) throw new ExplorerApiError("sae_steering_config_error", await responseDetail(response));
+  const parsed = saeSteeringConfigSchema.safeParse(await response.json());
+  if (!parsed.success) throw new ExplorerApiError("invalid_sae_steering_config", parsed.error.message);
+  return parsed.data;
+}
+
+export async function submitSAESteering(input: SAESteeringInput): Promise<SAESteeringResponse> {
+  const response = await fetch(`${API_BASE}/sae-steering`, {
+    method: "POST",
+    headers: { Accept: "application/json", "Content-Type": "application/json" },
+    body: JSON.stringify(input)
+  });
+  if (!response.ok) throw new ExplorerApiError("sae_steering_error", await responseDetail(response));
+  const parsed = saeSteeringResponseSchema.safeParse(await response.json());
+  if (!parsed.success) throw new ExplorerApiError("invalid_sae_steering_response", parsed.error.message);
   return parsed.data;
 }
 

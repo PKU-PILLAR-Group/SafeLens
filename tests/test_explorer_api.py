@@ -686,6 +686,7 @@ def test_prompt_options_include_registered_nla_base_models(tmp_path: Path) -> No
         "sshleifer/tiny-gpt2",
         "google/gemma-3-12b-it",
         "google/gemma-3-270m-it",
+        "google/gemma-2-9b-it",
     ]
     assert response.json()["maxNewTokens"] == 512
 

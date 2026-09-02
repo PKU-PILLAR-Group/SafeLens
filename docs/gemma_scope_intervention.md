@@ -75,4 +75,33 @@ local cache.
 
 Gemma Scope SAEs are not compatible with Qwen or other base models. Selecting
 the SAE analysis on a non-Gemma run therefore shows no compatible profile
+
+## Gemma-2-9B-it steering demo
+
+SafeLens also ships a prompt-oriented steering demo at `/sae-steer`. It is
+configured for `google/gemma-2-9b-it` and the canonical GemmaScope release
+`gemma-scope-9b-it-res-canonical`, SAE id `layer_9/width_131k/canonical`, and hook
+`blocks.9.hook_resid_post`. The canonical downloaded file is:
+
+```text
+layer_9/width_131k/average_l0_121/params.npz
+```
+
+Download it with:
+
+```bash
+python scripts/download_gemma_scope_9b_it_sae.py \
+  --output /ssd/yqy/cache/safelens/gemma-scope-9b-it-res/layer_9/width_131k/average_l0_121/params.npz
+```
+
+On this server the model is `/ssd/models/Gemma2-9b-it` and the downloaded
+checkpoint is `/ssd/yqy/cache/safelens/gemma-scope-9b-it-res/layer_9/width_131k/average_l0_121/params.npz`.
+Set `SAFELENS_GEMMA_2_9B_IT_MODEL_PATH` and
+`SAFELENS_GEMMA_SCOPE_9B_IT_SAE_PATH` to these (or deployment-specific) paths,
+then choose `SAFELENS_GEMMA_SAE_DEVICE` (`cpu` or `cuda`) and
+`SAFELENS_GEMMA_SAE_DTYPE` (`float32` or `bfloat16`). The service caches the
+model and decoder once per process. Each request can add one or more feature
+directions; the decoder delta is `strength * W_dec[feature]` at every generated
+token. Built-in examples are Cats (62610, +192), Chinese (121465, +74), and
+Pirate (29917, +166), matching the layer-9 examples on the Neuronpedia demo.
 instead of silently applying an unrelated dictionary.

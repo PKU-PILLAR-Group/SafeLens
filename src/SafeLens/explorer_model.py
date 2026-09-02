@@ -22,6 +22,30 @@ MODELSCOPE_MODEL_IDS: dict[str, str] = {
 }
 
 
+def _configured_local_model_path(model_id: str) -> Path | None:
+    """Resolve an explicit or host-local model directory for an Explorer model."""
+    configured = os.environ.get("SAFELENS_EXPLORER_MODEL_PATHS", "").strip()
+    if configured:
+        try:
+            mapping = json.loads(configured)
+        except json.JSONDecodeError as exc:
+            raise ValueError("SAFELENS_EXPLORER_MODEL_PATHS must be a JSON object") from exc
+        if isinstance(mapping, dict) and isinstance(mapping.get(model_id), str):
+            return Path(mapping[model_id]).expanduser()
+    if model_id == "google/gemma-2-9b-it":
+        explicit = (
+            os.environ.get("SAFELENS_GEMMA_2_9B_IT_MODEL_PATH")
+            or os.environ.get("SAFELENS_GEMMA_2_9B_IT_MODEL")
+        )
+        if explicit:
+            return Path(explicit).expanduser()
+        for candidate in ("/ssd/models/Gemma2-9b-it", "/ssd/models/gemma-2-9b-it"):
+            path = Path(candidate)
+            if path.is_dir():
+                return path
+    return None
+
+
 def explorer_model_source(model_id: str) -> str:
     """Resolve the provider used by local Explorer workers.
 
@@ -67,7 +91,10 @@ def explorer_hf_model_config(
         "SAFELENS_EXPLORER_JOB_DTYPE",
         "float32" if device == "cpu" else "bfloat16",
     )
-    local_snapshot = complete_hf_snapshot(model_id, cache_dir)
+    local_snapshot = _configured_local_model_path(model_id)
+    if local_snapshot is not None and not local_snapshot.is_dir():
+        raise FileNotFoundError(f"Configured local model path does not exist: {local_snapshot}")
+    local_snapshot = local_snapshot or complete_hf_snapshot(model_id, cache_dir)
     source = "local" if local_snapshot is not None else explorer_model_source(model_id)
     if source == "local" and local_snapshot is None:
         raise FileNotFoundError(

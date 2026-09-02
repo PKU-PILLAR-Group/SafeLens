@@ -8,6 +8,7 @@ import {
   Play,
   LoaderCircle,
   SquarePen,
+  SlidersHorizontal,
   Trash2,
   X
 } from "lucide-react";
@@ -26,6 +27,16 @@ import type { TurnView } from "../state/useTurnManager";
 import type { AnalysisId } from "./TurnCard";
 
 const DEFAULT_MODEL = "Qwen/Qwen2.5-7B-Instruct";
+// Keep the picker useful while the API options request is in flight (or when
+// a remote VS Code port-forward briefly drops that request). The server still
+// remains the source of truth and replaces this list once it responds.
+const FALLBACK_MODELS = [
+  DEFAULT_MODEL,
+  "sshleifer/tiny-gpt2",
+  "google/gemma-3-12b-it",
+  "google/gemma-3-270m-it",
+  "google/gemma-2-9b-it"
+];
 const DEFAULT_MAX_NEW_TOKENS = 128;
 const MAX_NEW_TOKENS_LIMIT = 512;
 const HIDDEN_RUN_STORAGE_KEY = "safelens.localExplorer.hiddenWork.v1";
@@ -35,6 +46,7 @@ interface ExplorerHomeProps {
   activeRecord: RunRecord & { run: ExplorerRun };
   remoteState: RemoteRunState;
   onOpenDatasetTest: () => void;
+  onOpenSAESteering: () => void;
   onSelectConversation: (key: string) => void;
   onRunReady: (run: ExplorerRun, job: { id: string; kind: "prompt-run" | "attribution" | "intervention" | "patching" | "nla" | "jlens" }) => void;
   onRemoveRuns: (keys: string[]) => void;
@@ -45,13 +57,14 @@ export function ExplorerHome({
   activeRecord,
   remoteState,
   onOpenDatasetTest,
+  onOpenSAESteering,
   onSelectConversation,
   onRunReady,
   onRemoveRuns
 }: ExplorerHomeProps) {
   const [prompt, setPrompt] = useState("");
   const [sourceKey, setSourceKey] = useState(activeRecord.key);
-  const [models, setModels] = useState([DEFAULT_MODEL]);
+  const [models, setModels] = useState(FALLBACK_MODELS);
   const [model, setModel] = useState(DEFAULT_MODEL);
   const [maxNewTokens, setMaxNewTokens] = useState(DEFAULT_MAX_NEW_TOKENS);
   const [maxNewTokensLimit, setMaxNewTokensLimit] = useState(MAX_NEW_TOKENS_LIMIT);
@@ -98,7 +111,11 @@ export function ExplorerHome({
       setModel((current) => options.models.includes(current) ? current : options.models[0]);
       setMaxNewTokensLimit(options.maxNewTokens);
       setMaxNewTokens((current) => Math.min(current, options.maxNewTokens));
-    }).catch(() => undefined);
+    }).catch(() => {
+      // Keep the local fallback list visible if the API is temporarily
+      // unreachable. A later mount/request will refresh it from the server.
+      setModels((current) => current.length > 0 ? current : FALLBACK_MODELS);
+    });
     return () => controller.abort();
   }, []);
 
@@ -244,6 +261,7 @@ export function ExplorerHome({
           <PanelLeftOpen size={18} />
         </button>
         <nav className="chat-home-nav" aria-label="SafeLens modes">
+          <button aria-label="Open Gemma steering demo" onClick={onOpenSAESteering}><SlidersHorizontal size={16} /> Gemma steer</button>
           <button onClick={onOpenDatasetTest}><Database size={16} /> Dataset test</button>
           <span className={`chat-home-status ${remoteState.status}`}>
             <i />{remoteState.status === "ready" ? "Local workspace" : "Local mode"}
