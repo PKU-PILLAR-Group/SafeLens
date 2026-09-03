@@ -131,12 +131,15 @@ def test_nla_generation_status_requires_closing_tag(
     eos_token_id: int | list[int],
     expected: tuple[bool, str],
 ) -> None:
-    assert _nla_generation_status(
-        raw_text,
-        generated_ids,
-        max_new_tokens=maximum,
-        eos_token_id=eos_token_id,
-    ) == expected
+    assert (
+        _nla_generation_status(
+            raw_text,
+            generated_ids,
+            max_new_tokens=maximum,
+            eos_token_id=eos_token_id,
+        )
+        == expected
+    )
 
 
 def test_nla_stopping_criterion_detects_the_complete_contract() -> None:

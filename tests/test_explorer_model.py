@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
+from types import ModuleType, SimpleNamespace
 
 from SafeLens.explorer_model import (
     complete_hf_snapshot,
@@ -34,7 +36,11 @@ def _write_snapshot(cache: Path, *, missing_second_shard: bool = False) -> Path:
 
 def test_explorer_job_device_auto_prefers_cuda(monkeypatch) -> None:
     monkeypatch.delenv("SAFELENS_EXPLORER_JOB_DEVICE", raising=False)
-    monkeypatch.setattr("torch.cuda.is_available", lambda: True)
+    monkeypatch.setitem(
+        sys.modules,
+        "torch",
+        SimpleNamespace(cuda=SimpleNamespace(is_available=lambda: True)),
+    )
 
     assert explorer_job_device() == "cuda:0"
     assert explorer_job_device("auto") == "cuda:0"
@@ -42,15 +48,17 @@ def test_explorer_job_device_auto_prefers_cuda(monkeypatch) -> None:
 
 def test_explorer_job_device_auto_falls_back_to_cpu(monkeypatch) -> None:
     monkeypatch.delenv("SAFELENS_EXPLORER_JOB_DEVICE", raising=False)
-    monkeypatch.setattr("torch.cuda.is_available", lambda: False)
+    monkeypatch.setitem(
+        sys.modules,
+        "torch",
+        SimpleNamespace(cuda=SimpleNamespace(is_available=lambda: False)),
+    )
 
     assert explorer_job_device() == "cpu"
     assert explorer_job_device("auto") == "cpu"
 
 
-def test_explorer_job_device_preserves_explicit_device(monkeypatch) -> None:
-    monkeypatch.setattr("torch.cuda.is_available", lambda: False)
-
+def test_explorer_job_device_preserves_explicit_device() -> None:
     assert explorer_job_device("cpu") == "cpu"
     assert explorer_job_device("cuda:1") == "cuda:1"
 
@@ -97,10 +105,12 @@ def test_modelscope_resolver_uses_complete_snapshot_without_network(
     (snapshot / "tokenizer_config.json").write_text("{}", encoding="utf-8")
     (snapshot / "model.safetensors").write_text("weights", encoding="utf-8")
     monkeypatch.setenv("MODELSCOPE_CACHE", str(cache))
-    monkeypatch.setattr(
-        "modelscope.snapshot_download",
-        lambda **kwargs: (_ for _ in ()).throw(AssertionError("network lookup")),
+    monkeypatch.setattr("SafeLens.explorer_model._configured_local_model_path", lambda _: None)
+    modelscope = ModuleType("modelscope")
+    modelscope.snapshot_download = lambda **kwargs: (_ for _ in ()).throw(
+        AssertionError("network lookup")
     )
+    monkeypatch.setitem(sys.modules, "modelscope", modelscope)
 
     assert complete_modelscope_snapshot("google/gemma-3-270m-it", str(cache)) == snapshot
     assert resolve_explorer_pretrained_path("google/gemma-3-270m-it") == (
@@ -116,6 +126,8 @@ def test_explorer_model_config_prefers_modelscope_for_cached_gemma_provider(
 ) -> None:
     monkeypatch.delenv("SAFELENS_EXPLORER_MODEL_SOURCE", raising=False)
     monkeypatch.setenv("MODELSCOPE_CACHE", str(tmp_path / "modelscope"))
+    monkeypatch.setattr("SafeLens.explorer_model._configured_local_model_path", lambda _: None)
+    monkeypatch.setitem(sys.modules, "modelscope", ModuleType("modelscope"))
 
     config = explorer_hf_model_config(
         "google/gemma-3-270m-it",
@@ -129,6 +141,7 @@ def test_explorer_model_config_prefers_modelscope_for_cached_gemma_provider(
 
 def test_explorer_model_config_can_force_huggingface(monkeypatch) -> None:
     monkeypatch.setenv("SAFELENS_EXPLORER_MODEL_SOURCE", "huggingface")
+    monkeypatch.setattr("SafeLens.explorer_model._configured_local_model_path", lambda _: None)
 
     config = explorer_hf_model_config(
         "google/gemma-3-270m-it",

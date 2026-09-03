@@ -3,8 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import torch
-from safetensors.torch import save_file
+import pytest
 
 from SafeLens.explorer_sae import (
     GEMMA_SCOPE_2_270M_IT_RELEASE,
@@ -80,6 +79,9 @@ def test_gemma_scope_modelscope_loader_uses_only_checkpoint_files(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
+    torch = pytest.importorskip("torch")
+    save_file = pytest.importorskip("safetensors.torch").save_file
+    pytest.importorskip("modelscope")
     folder = Path("resid_post/layer_12_width_16k_l0_small")
     checkpoint = tmp_path / folder
     checkpoint.mkdir(parents=True)
@@ -136,6 +138,9 @@ def test_gemma_scope_modelscope_loader_reuses_complete_local_checkpoint(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
+    torch = pytest.importorskip("torch")
+    save_file = pytest.importorskip("safetensors.torch").save_file
+    pytest.importorskip("modelscope")
     repo = tmp_path / GEMMA_SCOPE_2_270M_IT_REPO
     folder = Path("resid_post/layer_12_width_16k_l0_small")
     checkpoint = repo / folder

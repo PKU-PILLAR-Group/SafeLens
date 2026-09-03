@@ -55,7 +55,8 @@ def main() -> None:
         if mode == "neuron":
             selected = next(
                 (
-                    item for item in run.get("mlpNeurons", [])
+                    item
+                    for item in run.get("mlpNeurons", [])
                     if isinstance(item, dict)
                     and int(item.get("layer", -1)) == int(request["layer"])
                     and int(item.get("neuron", -1)) == int(request.get("neuron", -1))
@@ -152,12 +153,8 @@ def main() -> None:
                 "negativeTokens": concept["negativeTokens"],
             }
         else:
-            positive_prompts = _request_prompt_batch(
-                request, "positivePrompts", "desiredPrompt"
-            )
-            negative_prompts = _request_prompt_batch(
-                request, "negativePrompts", "undesiredPrompt"
-            )
+            positive_prompts = _request_prompt_batch(request, "positivePrompts", "desiredPrompt")
+            negative_prompts = _request_prompt_batch(request, "negativePrompts", "undesiredPrompt")
             activation_reduce = str(request.get("activationReduce", "last_token"))
             desired_vector, desired_token_counts, reference_template = _reference_centroid(
                 wrapper,
@@ -272,9 +269,7 @@ def main() -> None:
                     else activation_reduce
                 ),
                 "rawNorm": round(
-                    _feature_reference_norm(feature, sae)
-                    if feature is not None
-                    else raw_norm,
+                    _feature_reference_norm(feature, sae) if feature is not None else raw_norm,
                     10,
                 ),
                 "normalized": False,
@@ -296,7 +291,8 @@ def main() -> None:
                         "sourceActivationNorm": round(source_activation_norm, 10),
                         "appliedVectorNorm": round(abs(float(request["scale"])) * raw_norm, 10),
                         "relativeStrength": round(
-                            abs(float(request["scale"])) * raw_norm
+                            abs(float(request["scale"]))
+                            * raw_norm
                             / max(source_activation_norm, 1e-12),
                             10,
                         ),
@@ -328,11 +324,7 @@ def main() -> None:
                     original["tokenIds"], steered["tokenIds"]
                 ),
                 **(
-                    {
-                        "directionProjectionDelta": round(
-                            float(request["scale"]) * raw_norm, 10
-                        )
-                    }
+                    {"directionProjectionDelta": round(float(request["scale"]) * raw_norm, 10)}
                     if mode == "direction"
                     else {
                         "featureActivationDelta": (
@@ -399,9 +391,7 @@ def _load_sae(
         getattr(sae, "cfg", None), "model_name", None
     )
     if recorded_model and str(recorded_model) != expected_model_name:
-        raise ValueError(
-            f"SAE was trained for {recorded_model}, not {expected_model_name}."
-        )
+        raise ValueError(f"SAE was trained for {recorded_model}, not {expected_model_name}.")
     if not callable(getattr(sae, "encode", None)) or not callable(getattr(sae, "decode", None)):
         raise TypeError("Loaded Gemma Scope object does not expose SAE encode/decode methods.")
     _sae_feature_width(sae)
@@ -451,7 +441,7 @@ def _source_sae_feature_stats(
     )
     activation = cache[activation_name]
     start, end = position
-    selected = activation[:, start:min(end, activation.shape[-2]), :]
+    selected = activation[:, start : min(end, activation.shape[-2]), :]
     if selected.numel() == 0:
         raise ValueError("SAE position range did not select any source activations.")
     decoder = _sae_decoder_direction(sae, feature_index)
@@ -461,9 +451,9 @@ def _source_sae_feature_stats(
             f"{decoder.shape[-1]} != {selected.shape[-1]}."
         )
     with torch.no_grad():
-        encoded = sae.encode(
-            selected.to(device=decoder.device, dtype=_sae_dtype(sae))
-        )[..., feature_index]
+        encoded = sae.encode(selected.to(device=decoder.device, dtype=_sae_dtype(sae)))[
+            ..., feature_index
+        ]
     values = encoded.float().detach().cpu()
     return {
         "maxActivation": float(values.max().item()),
@@ -609,9 +599,7 @@ def _reference_centroid(
     return torch.stack(vectors, dim=0).mean(dim=0), token_counts, reference_template
 
 
-def _request_prompt_batch(
-    request: dict[str, Any], batch_key: str, legacy_key: str
-) -> list[str]:
+def _request_prompt_batch(request: dict[str, Any], batch_key: str, legacy_key: str) -> list[str]:
     prompts = request.get(batch_key)
     if not isinstance(prompts, list) or not prompts:
         prompts = [request[legacy_key]]
@@ -666,7 +654,7 @@ def _source_activation_norm(
     if activation.ndim < 2:
         raise ValueError(f"Steering activation {activation_name} must include a model dimension.")
     start, end = position
-    selected = activation[0, start:min(end, activation.shape[-2]), :].float()
+    selected = activation[0, start : min(end, activation.shape[-2]), :].float()
     if selected.numel() == 0:
         raise ValueError("Steering position range did not select any source activations.")
     return float(selected.norm(dim=-1).median().detach().cpu().item())
@@ -767,8 +755,9 @@ def _make_neuron_hook(
         if value.ndim == 2:
             result[:, neuron] *= factor
         else:
-            result[:, max(0, start):min(value.shape[-2], end), neuron] *= factor
+            result[:, max(0, start) : min(value.shape[-2], end), neuron] *= factor
         return result
+
     return hook
 
 
@@ -795,6 +784,7 @@ def _make_generation_direction_hook(
         else:
             result[:, :] += scale * direction
         return result
+
     return hook
 
 
@@ -834,9 +824,7 @@ def _logit_delta_summary(original: Any, steered: Any) -> dict[str, Any]:
         "changedVocabularyLogits": changed_vocabulary_logits,
         "topChangedTokenId": top_index,
         "topChangedTokenDelta": round(
-            float(signed_delta.reshape(-1)[top_flat_index].item())
-            if signed_delta.numel()
-            else 0.0,
+            float(signed_delta.reshape(-1)[top_flat_index].item()) if signed_delta.numel() else 0.0,
             10,
         ),
         "effectStatus": "changed" if maximum > 1e-6 else "no_change",

@@ -33,8 +33,7 @@ GEMMA_SCOPE_9B_IT_SAE_URL = (
 )
 DEFAULT_GEMMA_9B_MODEL = GEMMA_SCOPE_9B_IT_MODEL
 DEFAULT_GEMMA_9B_SAE_PATH = (
-    ".cache/safelens/gemma-scope-9b-it-res/layer_9/width_131k/"
-    "average_l0_121/params.npz"
+    ".cache/safelens/gemma-scope-9b-it-res/layer_9/width_131k/" "average_l0_121/params.npz"
 )
 _GEMMA_9B_SAE_RELATIVE_PATH = Path(
     "gemma-scope-9b-it-res/layer_9/width_131k/average_l0_121/params.npz"
@@ -97,9 +96,8 @@ class GemmaSteeringConfig:
             configured_device = os.environ.get("SAFELENS_EXPLORER_JOB_DEVICE")
         device = explorer_job_device(configured_device)
         default_dtype = "bfloat16" if device.lower().startswith("cuda") else "float32"
-        configured_model = (
-            os.environ.get("SAFELENS_GEMMA_2_9B_IT_MODEL_PATH")
-            or os.environ.get("SAFELENS_GEMMA_2_9B_IT_MODEL")
+        configured_model = os.environ.get("SAFELENS_GEMMA_2_9B_IT_MODEL_PATH") or os.environ.get(
+            "SAFELENS_GEMMA_2_9B_IT_MODEL"
         )
         if not configured_model:
             # Reuse the Explorer model resolver so the standalone endpoint and
@@ -110,10 +108,7 @@ class GemmaSteeringConfig:
             if local_model is not None:
                 configured_model = str(local_model)
         return cls(
-            model_path=(
-                configured_model
-                or DEFAULT_GEMMA_9B_MODEL
-            ),
+            model_path=(configured_model or DEFAULT_GEMMA_9B_MODEL),
             sae_path=(
                 os.environ.get("SAFELENS_GEMMA_SCOPE_9B_IT_SAE_PATH")
                 or os.environ.get("SAFELENS_GEMMA_SAE_PATH")
@@ -186,9 +181,7 @@ def parse_dtype(dtype: str) -> Any:
     try:
         return values[normalized]
     except KeyError as exc:
-        raise ValueError(
-            "dtype must be one of float32, float16, or bfloat16"
-        ) from exc
+        raise ValueError("dtype must be one of float32, float16, or bfloat16") from exc
 
 
 def _default_gemma_sae_path() -> str:
@@ -254,9 +247,7 @@ def load_gemma_scope_decoder(
     ):
         decoder = decoder.T
     if expected_width is not None and decoder.shape[0] != expected_width:
-        raise ValueError(
-            f"Expected {expected_width} SAE features, got shape {decoder.shape!r}"
-        )
+        raise ValueError(f"Expected {expected_width} SAE features, got shape {decoder.shape!r}")
     target_dtype = parse_dtype(dtype)
     tensor = torch.from_numpy(np.ascontiguousarray(decoder)).to(device=device, dtype=target_dtype)
     return GemmaScopeDecoder(
@@ -361,12 +352,14 @@ def _make_decoder_hook(
 def _render_generation_prompt(tokenizer: Any, prompt: str) -> str:
     """Render a plain user prompt with Gemma's instruction template once."""
     stripped = prompt.lstrip()
-    if stripped.startswith((
-        "<bos><start_of_turn>",
-        "<start_of_turn>",
-        "<|im_start|>",
-        "<|begin_of_text|>",
-    )):
+    if stripped.startswith(
+        (
+            "<bos><start_of_turn>",
+            "<start_of_turn>",
+            "<|im_start|>",
+            "<|begin_of_text|>",
+        )
+    ):
         return stripped
     apply_chat_template = getattr(tokenizer, "apply_chat_template", None)
     if not callable(apply_chat_template):
@@ -474,8 +467,12 @@ def steer_gemma_prompt(
         raise ValueError("temperature must be between 0 and 2")
     normalized: list[SAEFeature] = []
     for item in features:
-        feature = item if isinstance(item, SAEFeature) else SAEFeature(
-            feature_index=int(item["featureIndex"]), strength=float(item["strength"])
+        feature = (
+            item
+            if isinstance(item, SAEFeature)
+            else SAEFeature(
+                feature_index=int(item["featureIndex"]), strength=float(item["strength"])
+            )
         )
         validate_feature_index(feature.feature_index)
         if not -9_000 <= feature.strength <= 9_000:

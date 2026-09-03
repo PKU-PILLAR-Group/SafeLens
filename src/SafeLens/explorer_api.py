@@ -834,9 +834,7 @@ def create_app(
     if allowed_models is None:
         allowed_models = _default_allowed_models()
     configured_root = (
-        artifact_root
-        or os.environ.get("SAFELENS_EXPLORER_ARTIFACT_ROOT")
-        or DEFAULT_ARTIFACT_ROOT
+        artifact_root or os.environ.get("SAFELENS_EXPLORER_ARTIFACT_ROOT") or DEFAULT_ARTIFACT_ROOT
     )
     root = Path(configured_root).expanduser().resolve()
     app = FastAPI(
@@ -1674,9 +1672,7 @@ def create_app(
             raise
         except (ArtifactReadError, KeyError, OSError, TypeError, ValueError) as exc:
             code = (
-                exc.code
-                if isinstance(exc, ArtifactReadError)
-                else "invalid_sae_discovery_request"
+                exc.code if isinstance(exc, ArtifactReadError) else "invalid_sae_discovery_request"
             )
             raise HTTPException(
                 status_code=422,
@@ -2538,9 +2534,13 @@ def _intervention_preflight(
     inject_layer = payload.injectLayer if payload.injectLayer is not None else payload.layer
     source_layer_available = source_layer in payload.availableLayers
     inject_layer_available = inject_layer in payload.availableLayers
-    layer_available = source_layer_available and inject_layer_available and (
-        sae_profile is None
-        or (source_layer == sae_profile.layer and inject_layer == sae_profile.layer)
+    layer_available = (
+        source_layer_available
+        and inject_layer_available
+        and (
+            sae_profile is None
+            or (source_layer == sae_profile.layer and inject_layer == sae_profile.layer)
+        )
     )
     component_supported = payload.component in {"resid_post", "attn_out", "mlp_out"} and (
         sae_profile is None or payload.component == sae_profile.component
@@ -3008,7 +3008,7 @@ def _subprocess_sae_discovery_runner(*, root: Path) -> JobRunner:
             if any(
                 not isinstance(candidate, dict)
                 or not isinstance(candidate.get("featureIndex"), int)
-                or not isinstance(candidate.get("maxActivation"), (int, float))
+                or not isinstance(candidate.get("maxActivation"), int | float)
                 for candidate in candidates
             ):
                 raise ValueError("SAE discovery returned an invalid candidate row.")

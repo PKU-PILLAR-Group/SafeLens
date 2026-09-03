@@ -7,7 +7,7 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
-import yaml  # type: ignore[import-untyped]
+import yaml
 from pydantic import ValidationError
 
 from SafeLens.core.base import LayerRef, MethodSpec, PipelineConfig, RunReport

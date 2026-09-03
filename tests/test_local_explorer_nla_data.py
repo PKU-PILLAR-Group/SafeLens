@@ -28,10 +28,13 @@ def test_complete_hf_snapshot_requires_model_tokenizer_and_weights(tmp_path: Pat
 
     weight = snapshot / "model-00001-of-00001.safetensors"
     weight.write_bytes(b"weights")
-    assert MODULE._complete_hf_snapshot(
-        "Qwen/Qwen2.5-7B-Instruct",
-        str(tmp_path),
-    ) == snapshot
+    assert (
+        MODULE._complete_hf_snapshot(
+            "Qwen/Qwen2.5-7B-Instruct",
+            str(tmp_path),
+        )
+        == snapshot
+    )
 
     weight.write_bytes(b"")
     assert MODULE._complete_hf_snapshot("Qwen/Qwen2.5-7B-Instruct", str(tmp_path)) is None
@@ -61,10 +64,13 @@ def test_complete_hf_snapshot_requires_every_indexed_shard(tmp_path: Path) -> No
     assert MODULE._complete_hf_snapshot("Qwen/Qwen2.5-7B-Instruct", str(tmp_path)) is None
 
     (snapshot / "model-00001-of-00002.safetensors").write_bytes(b"first")
-    assert MODULE._complete_hf_snapshot(
-        "Qwen/Qwen2.5-7B-Instruct",
-        str(tmp_path),
-    ) == snapshot
+    assert (
+        MODULE._complete_hf_snapshot(
+            "Qwen/Qwen2.5-7B-Instruct",
+            str(tmp_path),
+        )
+        == snapshot
+    )
 
 
 def test_localize_nla_profile_uses_complete_cached_pair(tmp_path: Path) -> None:
@@ -225,17 +231,19 @@ def test_merge_nla_results_rejects_a_truncated_actor_explanation() -> None:
     with pytest.raises(ValueError, match=r"T0 did not reach </explanation>.*limit 96"):
         MODULE._merge_results(
             run,
-            [{
-                "explanation": "unfinished thought",
-                "cosine": None,
-                "mse_nrm": None,
-                "activation_norm": 12.0,
-                "metadata": {
-                    "generation_complete": False,
-                    "generated_token_count": 96,
-                    "finish_reason": "length",
-                },
-            }],
+            [
+                {
+                    "explanation": "unfinished thought",
+                    "cosine": None,
+                    "mse_nrm": None,
+                    "activation_norm": 12.0,
+                    "metadata": {
+                        "generation_complete": False,
+                        "generated_token_count": 96,
+                        "finish_reason": "length",
+                    },
+                }
+            ],
             profile=profile,
             positions=[0],
             revision="main",

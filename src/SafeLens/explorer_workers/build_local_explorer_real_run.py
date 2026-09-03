@@ -291,7 +291,7 @@ def _build_run(
         generation_kwargs["temperature"] = temperature
     generated_tokens = wrapper.generate(prompt, **generation_kwargs)
     generated_ids = _flat_token_ids(generated_tokens)
-    continuation_ids = generated_ids[len(token_ids):]
+    continuation_ids = generated_ids[len(token_ids) :]
     generated = str(
         wrapper.tokenizer.decode(
             continuation_ids,
@@ -652,7 +652,7 @@ def _generation_stop_token_ids(
                     candidates.append(token_id)
     result: list[int] = []
     for candidate in candidates:
-        values = candidate if isinstance(candidate, (list, tuple, set)) else [candidate]
+        values = candidate if isinstance(candidate, list | tuple | set) else [candidate]
         for value in values:
             if value is None:
                 continue
@@ -822,16 +822,14 @@ def _attention_head_coverage(
     value_budget: int = ATTENTION_HEAD_VALUE_BUDGET,
 ) -> dict[str, Any]:
     available_by_layer = {
-        str(layer): int(cache[f"blocks.{layer}.attn.hook_pattern"].shape[1])
-        for layer in layers
+        str(layer): int(cache[f"blocks.{layer}.attn.hook_pattern"].shape[1]) for layer in layers
     }
     maximum_available = max(available_by_layer.values(), default=0)
     values_per_head = max(1, token_count * token_count)
     budgeted_per_layer = max(1, value_budget // max(1, len(layers) * values_per_head))
     retained_per_layer = min(maximum_available, budgeted_per_layer)
     stored_by_layer = {
-        layer: min(count, retained_per_layer)
-        for layer, count in available_by_layer.items()
+        layer: min(count, retained_per_layer) for layer, count in available_by_layer.items()
     }
     return {
         "complete": all(

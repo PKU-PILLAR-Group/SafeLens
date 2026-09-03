@@ -104,4 +104,6 @@ model and decoder once per process. Each request can add one or more feature
 directions; the decoder delta is `strength * W_dec[feature]` at every generated
 token. Built-in examples are Cats (62610, +192), Chinese (121465, +74), and
 Pirate (29917, +166), matching the layer-9 examples on the Neuronpedia demo.
+When `SAFELENS_GEMMA_SAE_DEVICE` is omitted or set to `auto`, the runtime uses
+`cuda:0` when CUDA is available and otherwise falls back to CPU.
 instead of silently applying an unrelated dictionary.

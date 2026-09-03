@@ -240,6 +240,19 @@ their model dependencies:
 python -m pip install -e ".[explorer,models,attribution,nla,jlens]"
 ```
 
+Start the production bundle after installing those extras:
+
+```bash
+safelens explorer --artifact-root outputs/local-explorer --no-browser
+```
+
+The `attribution` extra provides Captum for the **Run attribution** action. If
+the process was started with only `.[explorer]`, the viewer still loads but a
+real attribution job cannot run; install the complete command above and restart
+the process. Explorer automatically uses `cuda:0` when CUDA is available and
+falls back to CPU otherwise. Use `SAFELENS_EXPLORER_JOB_DEVICE=cpu` or
+`SAFELENS_EXPLORER_JOB_DEVICE=cuda:1` for an explicit override.
+
 J-Lens uses a fitted, model-specific Jacobian checkpoint. Explorer registers the
 public Neuronpedia checkpoint for `Qwen/Qwen2.5-7B-Instruct` (layers 0-26) and
 defaults to layer 20 so its selection aligns with the public Qwen NLA profile.

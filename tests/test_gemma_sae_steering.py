@@ -4,7 +4,6 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-import torch
 
 from SafeLens.gemma_sae_steering import (
     GEMMA_9B_STEERING_PRESETS,
@@ -20,6 +19,8 @@ from SafeLens.sae_profiles import (
     GEMMA_SCOPE_9B_IT_SAE_ID,
     list_sae_profiles,
 )
+
+torch = pytest.importorskip("torch")
 
 
 def test_gemma_scope_decoder_reads_npz_and_preserves_feature_directions(tmp_path: Path) -> None:

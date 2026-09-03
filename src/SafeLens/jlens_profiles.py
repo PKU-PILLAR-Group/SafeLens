@@ -26,10 +26,7 @@ QWEN25_7B_INSTRUCT_JLENS = JLensProfile(
     name="qwen2.5-7b-instruct-wikitext",
     base_model="Qwen/Qwen2.5-7B-Instruct",
     source="neuronpedia/jacobian-lens",
-    filename=(
-        "qwen2.5-7b-it/jlens/Salesforce-wikitext/"
-        "Qwen2.5-7B-Instruct_jacobian_lens.pt"
-    ),
+    filename=("qwen2.5-7b-it/jlens/Salesforce-wikitext/" "Qwen2.5-7B-Instruct_jacobian_lens.pt"),
     revision="4f30bb8c97e696115d4a2ef359923b5005fc860c",
     d_model=3584,
     source_layers=tuple(range(27)),
@@ -71,8 +68,7 @@ def find_jlens_profile(
         (
             profile
             for profile in JLENS_SUPPORTED_PROFILES
-            if profile.source == normalized_source
-            and profile.filename == normalized_filename
+            if profile.source == normalized_source and profile.filename == normalized_filename
         ),
         None,
     )

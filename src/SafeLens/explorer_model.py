@@ -57,9 +57,8 @@ def _configured_local_model_path(model_id: str) -> Path | None:
         if isinstance(mapping, dict) and isinstance(mapping.get(model_id), str):
             return Path(mapping[model_id]).expanduser()
     if model_id == "google/gemma-2-9b-it":
-        explicit = (
-            os.environ.get("SAFELENS_GEMMA_2_9B_IT_MODEL_PATH")
-            or os.environ.get("SAFELENS_GEMMA_2_9B_IT_MODEL")
+        explicit = os.environ.get("SAFELENS_GEMMA_2_9B_IT_MODEL_PATH") or os.environ.get(
+            "SAFELENS_GEMMA_2_9B_IT_MODEL"
         )
         if explicit:
             return Path(explicit).expanduser()
@@ -137,9 +136,7 @@ def explorer_hf_model_config(
     local_snapshot = local_snapshot or complete_hf_snapshot(model_id, cache_dir)
     source = "local" if local_snapshot is not None else explorer_model_source(model_id)
     if source == "local" and local_snapshot is None:
-        raise FileNotFoundError(
-            f"No complete local snapshot for {model_id!r} in {cache_dir!r}."
-        )
+        raise FileNotFoundError(f"No complete local snapshot for {model_id!r} in {cache_dir!r}.")
     provider_cache = cache_dir
     model_name = model_id
     if source == "modelscope":

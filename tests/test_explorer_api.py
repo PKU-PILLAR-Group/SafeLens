@@ -164,9 +164,7 @@ def test_explorer_api_indexes_and_serves_exact_samples(tmp_path: Path) -> None:
 def test_run_index_uses_original_user_prompt_instead_of_chat_template(tmp_path: Path) -> None:
     with_metadata = _sample(run_id="metadata-run")
     with_metadata["prompt"] = "<|im_start|>user\nRendered text<|im_end|>"
-    with_metadata["metadata"] = {
-        "promptRunner": {"userPrompt": "Original user question"}
-    }
+    with_metadata["metadata"] = {"promptRunner": {"userPrompt": "Original user question"}}
     legacy_qwen = _sample(run_id="legacy-qwen")
     legacy_qwen["prompt"] = (
         "<|im_start|>system\nSystem<|im_end|>\n"
@@ -177,8 +175,7 @@ def test_run_index_uses_original_user_prompt_instead_of_chat_template(tmp_path: 
     )
     legacy_gemma = _sample(run_id="legacy-gemma")
     legacy_gemma["prompt"] = (
-        "<bos><start_of_turn>user\nGemma question<end_of_turn>\n"
-        "<start_of_turn>model\n"
+        "<bos><start_of_turn>user\nGemma question<end_of_turn>\n" "<start_of_turn>model\n"
     )
     _write_artifact(tmp_path, "prompts.explorer.json", [with_metadata, legacy_qwen, legacy_gemma])
 

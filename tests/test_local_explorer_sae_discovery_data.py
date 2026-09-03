@@ -5,6 +5,8 @@ from pathlib import Path
 
 import pytest
 
+pytest.importorskip("torch")
+
 SCRIPT_PATH = Path(__file__).resolve().parents[1] / "scripts/run_local_explorer_sae_discovery.py"
 SPEC = importlib.util.spec_from_file_location("run_local_explorer_sae_discovery", SCRIPT_PATH)
 assert SPEC is not None and SPEC.loader is not None
@@ -54,9 +56,12 @@ def test_feature_ranking_retains_peak_token_and_activation_evidence() -> None:
 
 def test_feature_ranking_returns_empty_when_sae_has_no_positive_activation() -> None:
     torch = pytest.importorskip("torch")
-    assert MODULE._rank_feature_rows(
-        torch.zeros((2, 4)),
-        [{"text": "a"}, {"text": "b"}],
-        start=0,
-        limit=3,
-    ) == []
+    assert (
+        MODULE._rank_feature_rows(
+            torch.zeros((2, 4)),
+            [{"text": "a"}, {"text": "b"}],
+            start=0,
+            limit=3,
+        )
+        == []
+    )

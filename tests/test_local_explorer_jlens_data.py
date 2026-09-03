@@ -85,19 +85,16 @@ def test_jlens_worker_rejects_a_partial_sharded_snapshot(tmp_path: Path) -> None
 def test_jlens_worker_finds_a_pinned_cached_checkpoint(tmp_path: Path) -> None:
     revision = "abc123"
     filename = "model/lens.pt"
-    checkpoint = (
-        tmp_path
-        / "models--research--lens"
-        / "snapshots"
-        / revision
-        / filename
-    )
+    checkpoint = tmp_path / "models--research--lens" / "snapshots" / revision / filename
     checkpoint.parent.mkdir(parents=True)
     checkpoint.write_bytes(b"weights")
 
-    assert MODULE._cached_lens_checkpoint(
-        "research/lens",
-        filename=filename,
-        revision=revision,
-        cache_dir=str(tmp_path),
-    ) == checkpoint
+    assert (
+        MODULE._cached_lens_checkpoint(
+            "research/lens",
+            filename=filename,
+            revision=revision,
+            cache_dir=str(tmp_path),
+        )
+        == checkpoint
+    )

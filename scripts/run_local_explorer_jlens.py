@@ -125,10 +125,7 @@ def _run_jlens(run: dict[str, Any], request: dict[str, Any], *, run_id: str) -> 
     existing = [
         item
         for item in run.get("jLens", [])
-        if not (
-            int(item.get("layer", -1)) == layer
-            and int(item.get("tokenIndex", -1)) == position
-        )
+        if not (int(item.get("layer", -1)) == layer and int(item.get("tokenIndex", -1)) == position)
     ]
     run["jLens"] = [*existing, row]
     source_run = {"runId": run["runId"], "sampleId": run["sampleId"]}

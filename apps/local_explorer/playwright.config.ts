@@ -6,7 +6,7 @@ export default defineConfig({
   testDir: "./tests",
   testIgnore: ["performance-budget.spec.ts", "matrix-performance.spec.ts"],
   fullyParallel: true,
-  workers: 8,
+  workers: process.env.CI ? 2 : 8,
   retries: 0,
   reporter: "line",
   use: {

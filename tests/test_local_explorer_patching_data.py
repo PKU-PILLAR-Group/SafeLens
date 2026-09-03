@@ -86,14 +86,16 @@ def test_attention_head_patch_uses_position_head_vector_index_and_provenance() -
         corrupted_tokens=[{"index": 0, "tokenId": 8, "text": "x", "changed": True}],
         clean_score=4.5,
         corrupted_score=2.5,
-        cells=[{
-            "layer": 5,
-            "tokenIndex": 3,
-            "patchedScore": 3.5,
-            "causalEffect": 1.0,
-            "recoveryPercentage": 50.0,
-            "sourceKey": "layer_5.z[head=7]",
-        }],
+        cells=[
+            {
+                "layer": 5,
+                "tokenIndex": 3,
+                "patchedScore": 3.5,
+                "causalEffect": 1.0,
+                "recoveryPercentage": 50.0,
+                "sourceKey": "layer_5.z[head=7]",
+            }
+        ],
     )
 
     assert derived["patching"]["component"] == "z"

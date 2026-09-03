@@ -97,9 +97,11 @@ def test_chat_generation_stops_at_model_and_template_end_tokens() -> None:
         tokenizer = Tokenizer()
         model = type("Model", (), {"generation_config": GenerationConfig()})()
 
-    assert _generation_stop_token_ids(
-        Wrapper(), prompt_format={"template": "chat"}
-    ) == [2, 3, 151645]
+    assert _generation_stop_token_ids(Wrapper(), prompt_format={"template": "chat"}) == [
+        2,
+        3,
+        151645,
+    ]
 
 
 def test_real_run_worker_uses_complete_local_snapshot_without_network(
@@ -162,12 +164,14 @@ def test_attention_cells_are_derived_from_matching_layer_patterns() -> None:
 
 def test_attention_heads_keep_every_head_when_matrix_budget_allows() -> None:
     pattern = torch.tensor(
-        [[
-            [[1.0, 0.0], [0.8, 0.2]],
-            [[1.0, 0.0], [0.3, 0.7]],
-            [[1.0, 0.0], [0.5, 0.5]],
-            [[1.0, 0.0], [0.1, 0.9]],
-        ]]
+        [
+            [
+                [[1.0, 0.0], [0.8, 0.2]],
+                [[1.0, 0.0], [0.3, 0.7]],
+                [[1.0, 0.0], [0.5, 0.5]],
+                [[1.0, 0.0], [0.1, 0.9]],
+            ]
+        ]
     )
     cache = {"blocks.0.attn.hook_pattern": pattern}
 
@@ -181,12 +185,14 @@ def test_attention_heads_keep_every_head_when_matrix_budget_allows() -> None:
 
 def test_attention_heads_report_and_rank_budgeted_subset() -> None:
     pattern = torch.tensor(
-        [[
-            [[1.0, 0.0], [0.8, 0.2]],
-            [[1.0, 0.0], [0.3, 0.7]],
-            [[1.0, 0.0], [0.5, 0.5]],
-            [[1.0, 0.0], [0.1, 0.9]],
-        ]]
+        [
+            [
+                [[1.0, 0.0], [0.8, 0.2]],
+                [[1.0, 0.0], [0.3, 0.7]],
+                [[1.0, 0.0], [0.5, 0.5]],
+                [[1.0, 0.0], [0.1, 0.9]],
+            ]
+        ]
     )
     cache = {"blocks.0.attn.hook_pattern": pattern}
 

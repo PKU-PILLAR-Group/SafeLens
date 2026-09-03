@@ -19,6 +19,7 @@ WORKERS = (
     "run_local_explorer_jlens.py",
     "run_local_explorer_patching.py",
     "run_local_explorer_intervention.py",
+    "run_local_explorer_sae_discovery.py",
 )
 
 

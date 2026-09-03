@@ -138,22 +138,14 @@ def _complete_hf_snapshot(model_id: str, cache_dir: str) -> Path | None:
 def _localize_nla_profile(profile: Any, cache_dir: str) -> tuple[Any, bool]:
     av_snapshot = _complete_hf_snapshot(profile.av_repo, cache_dir)
     ar_snapshot = (
-        _complete_hf_snapshot(profile.ar_repo, cache_dir)
-        if profile.ar_repo is not None
-        else None
+        _complete_hf_snapshot(profile.ar_repo, cache_dir) if profile.ar_repo is not None else None
     )
     localized = replace(
         profile,
         av_repo=str(av_snapshot) if av_snapshot is not None else profile.av_repo,
-        ar_repo=(
-            str(ar_snapshot)
-            if ar_snapshot is not None
-            else profile.ar_repo
-        ),
+        ar_repo=(str(ar_snapshot) if ar_snapshot is not None else profile.ar_repo),
     )
-    complete = av_snapshot is not None and (
-        profile.ar_repo is None or ar_snapshot is not None
-    )
+    complete = av_snapshot is not None and (profile.ar_repo is None or ar_snapshot is not None)
     return localized, complete
 
 

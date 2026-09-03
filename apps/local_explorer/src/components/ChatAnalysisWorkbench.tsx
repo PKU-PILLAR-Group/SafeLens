@@ -1084,7 +1084,17 @@ function SteeringWorkbench({
           {advancedToggle}
         </div>
       )}
-      <WorkbenchActions running={running} disabled={!canRun} runLabel="Run steering" status={runner.error?.message ?? preflightError ?? preflight?.reason} progress={runner.job?.progress} onRun={submit} onCancel={() => void runner.cancel()} onReset={runner.reset} failed={Boolean(runner.error)} />
+      <WorkbenchActions
+        running={running}
+        disabled={!canRun}
+        runLabel="Run steering"
+        status={runner.error?.message ?? preflightError ?? preflight?.reason ?? "Checking steering inputs..."}
+        progress={runner.job?.progress}
+        onRun={submit}
+        onCancel={() => void runner.cancel()}
+        onReset={runner.reset}
+        failed={Boolean(runner.error)}
+      />
       {result?.intervention && <SteeringResult experiment={result.intervention} />}
     </section>
   );
@@ -1245,7 +1255,13 @@ function AttributionWorkbench({
         running={running}
         disabled={!response.trim() || responseTokens.length === 0 || running}
         runLabel="Run attribution"
-        status={runner.error?.message ?? runner.job?.detail}
+        status={runner.error?.message ?? runner.job?.detail ?? (
+          !response.trim()
+            ? "Enter a model response."
+            : responseTokens.length === 0
+              ? "Tokenizing response..."
+              : undefined
+        )}
         progress={runner.job?.progress}
         onRun={submit}
         onCancel={() => void runner.cancel()}

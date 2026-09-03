@@ -95,9 +95,12 @@ def _discover(run: dict[str, Any], request: dict[str, Any]) -> dict[str, Any]:
             )
 
         with torch.no_grad():
-            encoded = sae.encode(
-                selected.to(device=decoder.device, dtype=_sae_dtype(sae))
-            ).float().detach().cpu()
+            encoded = (
+                sae.encode(selected.to(device=decoder.device, dtype=_sae_dtype(sae)))
+                .float()
+                .detach()
+                .cpu()
+            )
         width = _sae_feature_width(sae)
         if encoded.ndim != 2 or int(encoded.shape[-1]) != width:
             raise ValueError("SAE encoder returned an unexpected feature matrix.")

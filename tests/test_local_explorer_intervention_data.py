@@ -93,9 +93,7 @@ def test_merge_intervention_result_preserves_causal_and_proxy_provenance() -> No
 
 def test_neuron_hook_scales_only_the_selected_neuron_and_position_range() -> None:
     torch = pytest.importorskip("torch")
-    activation = torch.tensor(
-        [[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]]]
-    )
+    activation = torch.tensor([[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]]])
     hook = MODULE._make_neuron_hook(neuron=1, factor=0.25, position=(1, 3))
 
     patched = hook(activation=activation)

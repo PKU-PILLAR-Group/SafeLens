@@ -19,11 +19,21 @@ entry point, or add `--no-browser` for a headless machine.
 
 The lightweight install includes all visualization components, the artifact
 library, and job APIs. Executing real-model Prompt, Attribution, NLA, J-Lens,
-Patching, and Intervention jobs requires the corresponding ML dependencies:
+Patching, and Intervention jobs requires the corresponding ML dependencies.
+For the complete local job surface, install the extras before launching the
+server:
 
 ```bash
 python -m pip install -e ".[explorer,models,attribution,nla,jlens]"
 ```
+
+`Attribution` uses Captum from the `attribution` extra. If the button remains
+disabled while a response is being tokenized, wait for the target-token list
+to become ready; if a submitted job fails with a Captum import error, install
+the command above and restart the Explorer process. Explorer jobs select
+`cuda:0` automatically when `torch.cuda.is_available()` is true and otherwise
+fall back to CPU. Set `SAFELENS_EXPLORER_JOB_DEVICE=cpu` or
+`SAFELENS_EXPLORER_JOB_DEVICE=cuda:1` to override that choice.
 
 J-Lens checkpoints are specific to a model width and fitted source layers. Set
 `SAFELENS_JLENS_SOURCE` to a checkpoint under the Explorer artifact root, a

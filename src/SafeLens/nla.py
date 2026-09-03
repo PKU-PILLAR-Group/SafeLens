@@ -733,9 +733,7 @@ class NLAClient:
                 local_files_only=local_files_only,
                 token=token,
                 revision=(
-                    reconstructor_revision
-                    if reconstructor_revision is not None
-                    else revision
+                    reconstructor_revision if reconstructor_revision is not None else revision
                 ),
                 device=device,
                 dtype=dtype,
