@@ -431,6 +431,15 @@ class SAESteeringFeatureRequest(BaseModel):
 
     featureIndex: int = Field(ge=0, le=131_071)
     strength: float = Field(ge=-9_000.0, le=9_000.0)
+    layer: int = Field(default=9, ge=0, le=41)
+
+
+class SAEInterventionFeatureRequest(BaseModel):
+    """One Neuronpedia feature used by the Explorer SAE workbench."""
+
+    featureIndex: int = Field(ge=0, le=131_071)
+    strength: float = Field(ge=-9_000.0, le=9_000.0)
+    layer: int = Field(default=9, ge=0, le=41)
 
 
 class SAESteeringRequest(BaseModel):
@@ -447,7 +456,7 @@ class SAESteeringRequest(BaseModel):
         self.prompt = self.prompt.strip()
         if not self.prompt:
             raise ValueError("prompt must not be empty")
-        indices = [item.featureIndex for item in self.features]
+        indices = [(item.layer, item.featureIndex) for item in self.features]
         if len(indices) != len(set(indices)):
             raise ValueError("features must not contain duplicate featureIndex values")
         if self.steerPosition == "prompt_position" and self.promptPosition is None:
@@ -467,7 +476,9 @@ class SAESteeringResponse(BaseModel):
     saeRelease: str
     saeId: str
     layer: int
+    layers: list[int] = Field(default_factory=list)
     hookName: str
+    hooks: list[str] = Field(default_factory=list)
     featureCount: int
     hiddenSize: int
     features: list[SAESteeringFeatureRequest]
@@ -597,6 +608,7 @@ class InterventionRunRequest(BaseModel):
     saeId: str | None = Field(default=None, min_length=1, max_length=200)
     featureIndex: int | None = Field(default=None, ge=0)
     saeOperation: Literal["add", "ablate"] = "add"
+    saeFeatures: list[SAEInterventionFeatureRequest] = Field(default_factory=list, max_length=32)
 
     @model_validator(mode="after")
     def normalize_references(self) -> InterventionRunRequest:
@@ -612,6 +624,14 @@ class InterventionRunRequest(BaseModel):
         )
         self.desiredPrompt = self.desiredPrompt or self.positivePrompts[0]
         self.undesiredPrompt = self.undesiredPrompt or self.negativePrompts[0]
+        if self.mode == "sae_feature" and not self.saeFeatures and self.featureIndex is not None:
+            self.saeFeatures = [
+                SAEInterventionFeatureRequest(
+                    featureIndex=self.featureIndex,
+                    strength=self.scale,
+                    layer=self.layer,
+                )
+            ]
         return self
 
 
@@ -1246,7 +1266,11 @@ def create_app(
             result = steer_gemma_prompt(
                 payload.prompt,
                 [
-                    SAEFeature(feature_index=item.featureIndex, strength=item.strength)
+                    SAEFeature(
+                        feature_index=item.featureIndex,
+                        strength=item.strength,
+                        layer=item.layer,
+                    )
                     for item in payload.features
                 ],
                 max_new_tokens=payload.maxNewTokens,
@@ -2701,7 +2725,10 @@ def _intervention_preflight(
             sae_profile_valid
         )
         checks["SAE feature index is outside the selected dictionary"] = feature_available
-        checks["Gemma Scope SAE checkpoint is unavailable (install the `sae` extra or download the public checkpoint)"] = (
+        checks[
+            "Gemma Scope SAE checkpoint is unavailable (install the `sae` extra or "
+            "download the public checkpoint)"
+        ] = (
             sae_runtime_available
         )
     failures = [message for message, passed in checks.items() if not passed]

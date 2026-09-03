@@ -17,6 +17,7 @@ from SafeLens.explorer_model import DEFAULT_MODELSCOPE_MODEL_CACHE
 from SafeLens.sae_profiles import (
     GEMMA_SCOPE_9B_IT_MODEL,
     GEMMA_SCOPE_9B_IT_RELEASE,
+    GEMMA_SCOPE_9B_IT_SAE_FOLDERS,
     GEMMA_SCOPE_9B_IT_SAE_ID,
 )
 
@@ -197,9 +198,9 @@ def _neuronpedia_feature_url(
 ) -> str | None:
     if model_name == GEMMA_SCOPE_9B_IT_MODEL and (
         sae_id == GEMMA_SCOPE_9B_IT_SAE_ID
-        or (sae_id.startswith("layer_9") and "width_131k" in sae_id)
+        or (sae_id.startswith("layer_") and "width_131k" in sae_id)
     ):
-        return f"https://www.neuronpedia.org/{NEURONPEDIA_GEMMA_9B_MODEL}/9-gemmascope-res-131k/{feature_index}"
+        return f"https://www.neuronpedia.org/{NEURONPEDIA_GEMMA_9B_MODEL}/{layer}-gemmascope-res-131k/{feature_index}"
     if (
         model_name != GEMMA_SCOPE_2_270M_IT_MODEL
         or not sae_id.startswith("layer_")
@@ -361,16 +362,18 @@ def gemma_3_sae_modelscope_loader(
     return config, state, None
 
 
-def _gemma_scope_9b_checkpoint_path() -> Path:
+def _gemma_scope_9b_checkpoint_path(layer: int = 9) -> Path:
     """Return the canonical local 9B checkpoint path used by the SAE demo."""
     configured = os.environ.get("SAFELENS_GEMMA_SCOPE_9B_IT_SAE_PATH") or os.environ.get(
         "SAFELENS_GEMMA_SAE_PATH"
     )
-    relative = Path(
-        "gemma-scope-9b-it-res/layer_9/width_131k/average_l0_121/params.npz"
-    )
+    try:
+        folder = GEMMA_SCOPE_9B_IT_SAE_FOLDERS[int(layer)]
+    except (KeyError, ValueError) as exc:
+        raise ValueError(f"Unsupported Gemma Scope 9B layer: {layer}") from exc
+    relative = Path(f"gemma-scope-9b-it-res/{folder}/params.npz")
     candidates = []
-    if configured:
+    if configured and layer == 9:
         candidates.append(Path(configured).expanduser())
     configured_root = os.environ.get("SAFELENS_GEMMA_SAE_CACHE")
     if configured_root:
@@ -461,9 +464,14 @@ def load_local_gemma_scope_sae(
     import torch
 
     if model_name == GEMMA_SCOPE_9B_IT_MODEL and release == GEMMA_SCOPE_9B_IT_RELEASE:
-        if sae_id != GEMMA_SCOPE_9B_IT_SAE_ID:
+        try:
+            layer = int(sae_id.split("/", 1)[0].removeprefix("layer_"))
+        except (AttributeError, ValueError):
+            layer = -1
+        expected_sae_id = f"layer_{layer}/width_131k/canonical"
+        if sae_id != expected_sae_id or layer not in GEMMA_SCOPE_9B_IT_SAE_FOLDERS:
             raise ValueError(f"Unsupported Gemma Scope 9B SAE ID: {sae_id!r}.")
-        checkpoint = _gemma_scope_9b_checkpoint_path()
+        checkpoint = _gemma_scope_9b_checkpoint_path(layer)
         if not checkpoint.is_file():
             raise FileNotFoundError(
                 f"Gemma Scope 9B checkpoint not found at {checkpoint}. "
@@ -526,7 +534,15 @@ def load_local_gemma_scope_sae(
 def gemma_scope_local_checkpoint_available(*, model_name: str, release: str, sae_id: str) -> bool:
     """Check for a local fallback checkpoint without downloading during preflight."""
     if model_name == GEMMA_SCOPE_9B_IT_MODEL and release == GEMMA_SCOPE_9B_IT_RELEASE:
-        return _gemma_scope_9b_checkpoint_path().is_file() and sae_id == GEMMA_SCOPE_9B_IT_SAE_ID
+        try:
+            layer = int(sae_id.split("/", 1)[0].removeprefix("layer_"))
+        except (AttributeError, ValueError):
+            return False
+        return (
+            sae_id == f"layer_{layer}/width_131k/canonical"
+            and layer in GEMMA_SCOPE_9B_IT_SAE_FOLDERS
+            and _gemma_scope_9b_checkpoint_path(layer).is_file()
+        )
     if model_name == GEMMA_SCOPE_2_270M_IT_MODEL and release == GEMMA_SCOPE_2_270M_IT_RELEASE:
         config_path, weights_path = _gemma_scope_270m_checkpoint_paths(sae_id)
         return config_path.is_file() and weights_path.is_file()

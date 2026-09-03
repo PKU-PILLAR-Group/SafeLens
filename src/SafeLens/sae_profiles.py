@@ -15,6 +15,11 @@ GEMMA_SCOPE_9B_IT_RELEASE = "gemma-scope-9b-it-res-canonical"
 GEMMA_SCOPE_9B_IT_SAE_ID = "layer_9/width_131k/canonical"
 GEMMA_SCOPE_9B_IT_LAYER = 9
 GEMMA_SCOPE_9B_IT_WIDTH = 131_072
+GEMMA_SCOPE_9B_IT_SAE_FOLDERS = {
+    9: "layer_9/width_131k/average_l0_121",
+    20: "layer_20/width_131k/average_l0_81",
+    31: "layer_31/width_131k/average_l0_109",
+}
 
 
 @dataclass(frozen=True)
@@ -55,22 +60,23 @@ GEMMA_SCOPE_2_PROFILES = tuple(
     for layer in (5, 9, 12, 15)
 )
 
-# This is the canonical 9B-it Gemma Scope dictionary used by the Neuronpedia
-# steering demo.  The slash-separated SAE id is the SAELens registry form;
-# the downloaded checkpoint lives under ``layer_9/width_131k/average_l0_121``.
-GEMMA_SCOPE_9B_IT_PROFILES = (
+# These are the canonical 9B-it Gemma Scope dictionaries used by the
+# Neuronpedia steering demo. The slash-separated SAE id is the SAELens registry
+# form; the downloaded checkpoint folder is selected by layer.
+GEMMA_SCOPE_9B_IT_PROFILES = tuple(
     SAEProfile(
-        id="gemma-scope-9b-it-resid-post-l9-131k-canonical",
-        label="Gemma Scope · L9 · residual · 131k · canonical (L0 121)",
+        id=f"gemma-scope-9b-it-resid-post-l{layer}-131k-canonical",
+        label=f"Gemma Scope · L{layer} · residual · 131k · canonical",
         model_name=GEMMA_SCOPE_9B_IT_MODEL,
         release=GEMMA_SCOPE_9B_IT_RELEASE,
-        sae_id=GEMMA_SCOPE_9B_IT_SAE_ID,
-        layer=GEMMA_SCOPE_9B_IT_LAYER,
+        sae_id=f"layer_{layer}/width_131k/canonical",
+        layer=layer,
         component="resid_post",
         width=GEMMA_SCOPE_9B_IT_WIDTH,
         architecture="jump_relu",
         source="google/gemma-scope-9b-it-res",
-    ),
+    )
+    for layer in GEMMA_SCOPE_9B_IT_SAE_FOLDERS
 )
 
 SAE_PROFILES = GEMMA_SCOPE_2_PROFILES + GEMMA_SCOPE_9B_IT_PROFILES

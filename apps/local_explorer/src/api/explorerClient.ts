@@ -959,7 +959,8 @@ export type SAEFeatureInfo = z.infer<typeof saeFeatureInfoSchema>;
 
 const saeSteeringFeatureSchema = z.object({
   featureIndex: z.number().int().nonnegative(),
-  strength: z.number()
+  strength: z.number(),
+  layer: z.number().int().nonnegative().default(9)
 });
 
 const saeSteeringGenerationSchema = z.object({
@@ -978,7 +979,9 @@ const saeSteeringResponseSchema = z.object({
   saeRelease: z.string().min(1),
   saeId: z.string().min(1),
   layer: z.number().int().nonnegative(),
+  layers: z.array(z.number().int().nonnegative()).default([]),
   hookName: z.string().min(1),
+  hooks: z.array(z.string().min(1)).default([]),
   featureCount: z.number().int().positive(),
   hiddenSize: z.number().int().positive(),
   features: z.array(saeSteeringFeatureSchema),
@@ -1001,7 +1004,9 @@ const saeSteeringConfigSchema = z.object({
   release: z.string().min(1),
   saeId: z.string().min(1),
   layer: z.number().int().nonnegative(),
+  layers: z.array(z.number().int().nonnegative()).default([]),
   hookName: z.string().min(1),
+  hooks: z.array(z.string().min(1)).default([]),
   featureCount: z.number().int().positive(),
   device: z.string().min(1),
   dtype: z.string().min(1),
@@ -1011,7 +1016,13 @@ const saeSteeringConfigSchema = z.object({
     label: z.string().min(1),
     description: z.string(),
     featureIndex: z.number().int().nonnegative(),
-    strength: z.number()
+    strength: z.number(),
+    layer: z.number().int().nonnegative().default(9),
+    features: z.array(z.object({
+      featureIndex: z.number().int().nonnegative(),
+      strength: z.number(),
+      layer: z.number().int().nonnegative().default(9)
+    })).default([])
   }))
 });
 
@@ -1167,6 +1178,11 @@ export const interventionJobSchema = z.object({
     saeId: z.string().min(1).nullish().transform((value) => value ?? undefined),
     featureIndex: z.number().int().nonnegative().nullish().transform((value) => value ?? undefined),
     saeOperation: z.enum(["add", "ablate"]).nullish().transform((value) => value ?? undefined),
+    saeFeatures: z.array(z.object({
+      featureIndex: z.number().int().nonnegative(),
+      strength: z.number(),
+      layer: z.number().int().nonnegative()
+    })).optional(),
     sourceRun: z.object({ runId: z.string(), sampleId: z.string(), modelName: z.string() }),
     preflight: interventionPreflightSchema
   }),
@@ -1199,6 +1215,7 @@ export interface InterventionRunInput {
   saeId?: string;
   featureIndex?: number;
   saeOperation?: "add" | "ablate";
+  saeFeatures?: Array<{ featureIndex: number; strength: number; layer: number }>;
 }
 
 export async function submitPromptJob(input: PromptRunInput): Promise<PromptJob> {

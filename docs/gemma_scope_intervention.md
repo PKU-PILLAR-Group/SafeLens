@@ -75,17 +75,45 @@ local cache.
 
 Gemma Scope SAEs are not compatible with Qwen or other base models. Selecting
 the SAE analysis on a non-Gemma run therefore shows no compatible profile
+instead of silently applying an unrelated dictionary.
 
-## Gemma-2-9B-it steering demo
+## Gemma-2-9B-it Neuronpedia modes
 
-SafeLens also ships a prompt-oriented steering demo at `/sae-steer`. It is
-configured for `google/gemma-2-9b-it` and the canonical GemmaScope release
-`gemma-scope-9b-it-res-canonical`, SAE id `layer_9/width_131k/canonical`, and hook
-`blocks.9.hook_resid_post`. The canonical downloaded file is:
+The Chat SAE workbench includes a `Neuronpedia mode` selector for
+`google/gemma-2-9b-it`. It uses the canonical GemmaScope release
+`gemma-scope-9b-it-res-canonical` and reproduces the public Neuronpedia
+`/gemma-2-9b-it/steer` modes and their published feature coefficients. The
+existing **Find active features** flow remains available alongside these
+presets, so users can either select a known mode or discover a feature from
+the current prompt:
+
+| Mode | SAE feature(s) |
+| --- | --- |
+| Cats | L9 F62610, +192 |
+| Chinese | L9 F121465, +74 |
+| Pirate | L31 F77558, +66; L9 F29917, +166 |
+| Shakespeare | L20 F57285, +226 |
+| Poetry | L20 F80360, +202 |
+| San Francisco | L20 F116871, +200 |
+| Positivity | L20 F111712, +160 |
+| Negativity | L20 F120550, +112 |
+| Music | L20 F61962, +170.5 |
+| British English | L20 F90098, +60 |
+
+The canonical SAE IDs are `layer_9/width_131k/canonical`,
+`layer_20/width_131k/canonical`, and `layer_31/width_131k/canonical`; all
+three use `resid_post` hooks (`blocks.{layer}.hook_resid_post`). The published
+L9 file is:
 
 ```text
 layer_9/width_131k/average_l0_121/params.npz
 ```
+
+L20 and L31 are downloaded lazily the first time a preset using that layer is
+selected. They are cached under the same SafeLens cache root, so a restart does
+not download them again. All weights are public files in
+`google/gemma-scope-9b-it-res`; SafeLens does not copy or redistribute model
+weights or Neuronpedia metadata.
 
 Download it with:
 
@@ -101,13 +129,13 @@ Set `SAFELENS_GEMMA_2_9B_IT_MODEL_PATH` and
 then choose `SAFELENS_GEMMA_SAE_DEVICE` (`cpu` or `cuda`) and
 `SAFELENS_GEMMA_SAE_DTYPE` (`float32` or `bfloat16`). The service caches the
 model and decoder once per process. Each request can add one or more feature
-directions; the decoder delta is `strength * W_dec[feature]` at every generated
-token. Built-in examples are Cats (62610, +192), Chinese (121465, +74), and
-Pirate (29917, +166), matching the layer-9 examples on the Neuronpedia demo.
-When `SAFELENS_GEMMA_SAE_DEVICE` is omitted or set to `auto`, the runtime uses
+directions, including features from different layers; the decoder delta is
+`strength * W_dec[feature]` at every hooked token. Pirate demonstrates the
+multi-layer case. When `SAFELENS_GEMMA_SAE_DEVICE` is omitted or set to `auto`, the runtime uses
 `cuda:0` when CUDA is available and otherwise falls back to CPU.
 
-The dedicated demo also exposes `POST /api/sae-steering/scan`. It encodes the
+For API clients, `POST /api/sae-steering/scan` remains available for
+compatibility. It encodes the
 rendered prompt with the checkpoint's `W_enc`, `b_enc`, and `threshold` using
 the published JumpReLU rule:
 
@@ -128,4 +156,3 @@ Steering scope can be selected in the UI or request body with
 accepts a zero-based `promptPosition`. This mirrors Neuronpedia's distinction
 between prompt positions and generated-token steering while preserving the
 original `all` behavior as the default.
-instead of silently applying an unrelated dictionary.

@@ -42,7 +42,17 @@ export function SAESteeringDemo({ onBack }: { onBack?: () => void }) {
   const selectedIds = useMemo(() => new Set(features.map((feature) => feature.featureIndex)), [features]);
 
   function loadPreset(preset: SAESteeringConfig["presets"][number]) {
-    setFeatures([{ featureIndex: preset.featureIndex, strength: preset.strength }]);
+    setFeatures(
+      (preset.features.length > 0 ? preset.features : [{
+        featureIndex: preset.featureIndex,
+        strength: preset.strength,
+        layer: preset.layer
+      }]).map((feature) => ({
+        featureIndex: feature.featureIndex,
+        strength: feature.strength,
+        layer: feature.layer
+      }))
+    );
     setResult(null);
     setError(null);
   }
@@ -51,7 +61,7 @@ export function SAESteeringDemo({ onBack }: { onBack?: () => void }) {
     let index = 0;
     while (selectedIds.has(index) && index < featureLimit) index += 1;
     if (index >= featureLimit) return;
-    setFeatures((current) => [...current, { featureIndex: index, strength: 1 }]);
+    setFeatures((current) => [...current, { featureIndex: index, strength: 1, layer: 9 }]);
   }
 
   function updateFeature(position: number, patch: Partial<SAESteeringFeature>) {
@@ -72,7 +82,7 @@ export function SAESteeringDemo({ onBack }: { onBack?: () => void }) {
   }
 
   function selectScannedFeature(feature: SAESteeringScan["features"][number]) {
-    setFeatures([{ featureIndex: feature.featureIndex, strength: feature.suggestedStrength }]);
+    setFeatures([{ featureIndex: feature.featureIndex, strength: feature.suggestedStrength, layer: 9 }]);
     setResult(null);
     setError(null);
   }
@@ -96,7 +106,7 @@ export function SAESteeringDemo({ onBack }: { onBack?: () => void }) {
         <div>
           <p className="eyebrow">SAE / STEERING</p>
           <h1>Gemma-2-9B-it feature steering</h1>
-          <p>GemmaScope canonical layer 9 residual stream · 131,072 features · JumpReLU</p>
+          <p>Neuronpedia-compatible GemmaScope residual stream · layers 9 / 20 / 31 · 131,072 features · JumpReLU</p>
         </div>
         {onBack && <button className="icon-action" type="button" aria-label="Back to Explorer" title="Back to Explorer" onClick={onBack}><X size={16} /></button>}
       </header>
@@ -107,8 +117,8 @@ export function SAESteeringDemo({ onBack }: { onBack?: () => void }) {
           <div className="sae-demo-section-heading"><strong>Features</strong><div className="sae-demo-heading-actions"><button type="button" className="sae-scan-feature" disabled={scanRunning || !prompt.trim()} onClick={() => void scanPrompt()}><Search size={15} /> {scanRunning ? "Scanning..." : "Scan prompt"}</button><button type="button" className="sae-add-feature" onClick={addFeature}><Plus size={15} /> Add feature</button></div></div>
           <div className="sae-demo-presets" role="list" aria-label="GemmaScope demo presets">
             {(config?.presets ?? []).map((preset) => (
-              <button type="button" key={preset.id} className={features.some((feature) => feature.featureIndex === preset.featureIndex) ? "active" : ""} onClick={() => loadPreset(preset)}>
-                <strong>{preset.label}</strong><small>F{preset.featureIndex} · {preset.strength > 0 ? "+" : ""}{preset.strength}</small><span>{preset.description}</span>
+              <button type="button" key={preset.id} className={features.some((feature) => (preset.features.length > 0 ? preset.features : [{ featureIndex: preset.featureIndex, layer: preset.layer }]).some((item) => item.featureIndex === feature.featureIndex && item.layer === feature.layer)) ? "active" : ""} onClick={() => loadPreset(preset)}>
+                <strong>{preset.label}</strong><small>{(preset.features.length > 0 ? preset.features : [{ featureIndex: preset.featureIndex, strength: preset.strength, layer: preset.layer }]).map((feature) => `L${feature.layer} F${feature.featureIndex} ${feature.strength > 0 ? "+" : ""}${feature.strength}`).join(" · ")}</small><span>{preset.description}</span>
               </button>
             ))}
           </div>
@@ -117,6 +127,7 @@ export function SAESteeringDemo({ onBack }: { onBack?: () => void }) {
             {features.map((feature, index) => (
               <div className="sae-demo-feature-row" key={`${index}-${feature.featureIndex}`}>
                 <label><span>Feature</span><input aria-label={`Feature ${index + 1} index`} type="number" min={0} max={featureLimit - 1} value={feature.featureIndex} onChange={(event) => updateFeature(index, { featureIndex: clampInt(event.target.value, 0, featureLimit - 1) })} /></label>
+                <label><span>Layer</span><input aria-label={`Feature ${index + 1} layer`} type="number" min={0} max={41} value={feature.layer} onChange={(event) => updateFeature(index, { layer: clampInt(event.target.value, 0, 41) })} /></label>
                 <label><span>Strength</span><input aria-label={`Feature ${index + 1} strength`} type="number" min={-9000} max={9000} step={1} value={feature.strength} onChange={(event) => updateFeature(index, { strength: clampFloat(event.target.value, -9000, 9000) })} /></label>
                 <button type="button" className="icon-action" aria-label={`Remove feature ${feature.featureIndex}`} title="Remove feature" onClick={() => setFeatures((current) => current.filter((_, itemIndex) => itemIndex !== index))}><Trash2 size={15} /></button>
               </div>
@@ -138,9 +149,9 @@ export function SAESteeringDemo({ onBack }: { onBack?: () => void }) {
         <section className="sae-demo-results" aria-label="Default and steered generations">
           {!result ? <div className="sae-demo-result-empty"><RotateCcw size={18} /><p>Run a comparison to see the default and steered continuations side by side.</p></div> : (
             <>
-              <header className="sae-demo-result-header"><div><strong>Generation comparison</strong><span>L{result.layer} · {result.hookName}</span></div><span className={result.generationChanged ? "changed" : "unchanged"}>{result.generationChanged ? "Changed" : "Same tokens"}</span></header>
+              <header className="sae-demo-result-header"><div><strong>Generation comparison</strong><span>{(result.layers.length > 0 ? result.layers : [result.layer]).map((layer) => `L${layer}`).join(" / ")} · {result.hookName}</span></div><span className={result.generationChanged ? "changed" : "unchanged"}>{result.generationChanged ? "Changed" : "Same tokens"}</span></header>
               <div className="sae-demo-output-grid"><Output title="Default" output={result.default} /><Output title="Steered" output={result.steered} steered /></div>
-              <footer className="sae-demo-result-meta"><span>{result.features.length} feature{result.features.length === 1 ? "" : "s"} · {result.features.map((feature) => `F${feature.featureIndex} ${feature.strength > 0 ? "+" : ""}${feature.strength}`).join(" · ") || "no injection"}</span><span>seed {result.seed} · {result.maxNewTokens} max tokens</span></footer>
+              <footer className="sae-demo-result-meta"><span>{result.features.length} feature{result.features.length === 1 ? "" : "s"} · {result.features.map((feature) => `L${feature.layer} F${feature.featureIndex} ${feature.strength > 0 ? "+" : ""}${feature.strength}`).join(" · ") || "no injection"}</span><span>seed {result.seed} · {result.maxNewTokens} max tokens</span></footer>
             </>
           )}
         </section>

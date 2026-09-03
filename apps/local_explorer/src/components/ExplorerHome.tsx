@@ -8,7 +8,6 @@ import {
   Play,
   LoaderCircle,
   SquarePen,
-  SlidersHorizontal,
   Trash2,
   X
 } from "lucide-react";
@@ -46,7 +45,6 @@ interface ExplorerHomeProps {
   activeRecord: RunRecord & { run: ExplorerRun };
   remoteState: RemoteRunState;
   onOpenDatasetTest: () => void;
-  onOpenSAESteering: () => void;
   onSelectConversation: (key: string) => void;
   onRunReady: (run: ExplorerRun, job: { id: string; kind: "prompt-run" | "attribution" | "intervention" | "patching" | "nla" | "jlens" }) => void;
   onRemoveRuns: (keys: string[]) => void;
@@ -57,7 +55,6 @@ export function ExplorerHome({
   activeRecord,
   remoteState,
   onOpenDatasetTest,
-  onOpenSAESteering,
   onSelectConversation,
   onRunReady,
   onRemoveRuns
@@ -261,7 +258,6 @@ export function ExplorerHome({
           <PanelLeftOpen size={18} />
         </button>
         <nav className="chat-home-nav" aria-label="SafeLens modes">
-          <button aria-label="Open Gemma steering demo" onClick={onOpenSAESteering}><SlidersHorizontal size={16} /> Gemma steer</button>
           <button onClick={onOpenDatasetTest}><Database size={16} /> Dataset test</button>
           <span className={`chat-home-status ${remoteState.status}`}>
             <i />{remoteState.status === "ready" ? "Local workspace" : "Local mode"}

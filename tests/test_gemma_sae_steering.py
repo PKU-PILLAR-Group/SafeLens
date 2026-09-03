@@ -10,8 +10,8 @@ from SafeLens.gemma_sae_steering import (
     GemmaSteeringConfig,
     SAEFeature,
     _make_decoder_hook,
-    load_gemma_scope_encoder,
     load_gemma_scope_decoder,
+    load_gemma_scope_encoder,
     validate_feature_index,
 )
 from SafeLens.sae_profiles import (
@@ -94,11 +94,55 @@ def test_gemma_feature_index_range_and_presets() -> None:
     validate_feature_index(131_071)
     with pytest.raises(ValueError, match="between 0"):
         validate_feature_index(131_072)
-    assert {item["featureIndex"] for item in GEMMA_9B_STEERING_PRESETS} == {
-        62_610,
-        121_465,
-        29_917,
+    assert len(GEMMA_9B_STEERING_PRESETS) == 10
+    presets = {item["id"]: item for item in GEMMA_9B_STEERING_PRESETS}
+    assert presets["cats"]["features"] == [
+        {"featureIndex": 62_610, "strength": 192.0, "layer": 9}
+    ]
+    assert presets["chinese"]["features"] == [
+        {"featureIndex": 121_465, "strength": 74.0, "layer": 9}
+    ]
+    assert presets["pirate"]["features"] == [
+        {"featureIndex": 77_558, "strength": 66.0, "layer": 31},
+        {"featureIndex": 29_917, "strength": 166.0, "layer": 9},
+    ]
+    assert presets["shakespeare"]["features"] == [
+        {"featureIndex": 57_285, "strength": 226.0, "layer": 20}
+    ]
+
+
+def test_sae_feature_api_includes_layer() -> None:
+    assert SAEFeature(123, 4.5, layer=20).to_api() == {
+        "featureIndex": 123,
+        "strength": 4.5,
+        "layer": 20,
     }
+
+
+def test_sae_steering_request_allows_same_index_on_different_layers() -> None:
+    from SafeLens.explorer_api import SAESteeringRequest
+
+    request = SAESteeringRequest(
+        prompt="hello",
+        features=[
+            {"featureIndex": 10, "strength": 1, "layer": 9},
+            {"featureIndex": 10, "strength": 2, "layer": 20},
+        ],
+    )
+    assert [feature.layer for feature in request.features] == [9, 20]
+
+
+def test_sae_steering_request_rejects_duplicate_layer_and_index() -> None:
+    from SafeLens.explorer_api import SAESteeringRequest
+
+    with pytest.raises(ValueError, match="duplicate featureIndex"):
+        SAESteeringRequest(
+            prompt="hello",
+            features=[
+                {"featureIndex": 10, "strength": 1, "layer": 9},
+                {"featureIndex": 10, "strength": 2, "layer": 9},
+            ],
+        )
 
 
 def test_gemma_steering_config_reads_all_runtime_environment(monkeypatch) -> None:
@@ -130,11 +174,12 @@ def test_gemma_steering_config_auto_selects_cuda(monkeypatch) -> None:
 
 def test_canonical_gemma_9b_profile_matches_gemmascope_contract() -> None:
     profiles = list_sae_profiles(model_name=GEMMA_SCOPE_9B_IT_MODEL)
-    assert len(profiles) == 1
-    profile = profiles[0]
+    assert len(profiles) == 3
+    profile = next(item for item in profiles if item.layer == 9)
     assert profile.release == GEMMA_SCOPE_9B_IT_RELEASE == "gemma-scope-9b-it-res-canonical"
     assert profile.sae_id == GEMMA_SCOPE_9B_IT_SAE_ID == "layer_9/width_131k/canonical"
     assert profile.layer == 9
     assert profile.width == 131_072
     assert profile.component == "resid_post"
     assert profile.architecture == "jump_relu"
+    assert [item.layer for item in profiles] == [9, 20, 31]

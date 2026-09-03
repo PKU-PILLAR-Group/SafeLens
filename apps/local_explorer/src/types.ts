@@ -368,6 +368,7 @@ export interface InterventionExperiment {
     conceptUrl?: string | null;
     positiveTokens?: string[];
     negativeTokens?: string[];
+    features?: Array<{ featureIndex: number; strength: number; layer: number }>;
   };
   vector: {
     algorithmVersion?: string;

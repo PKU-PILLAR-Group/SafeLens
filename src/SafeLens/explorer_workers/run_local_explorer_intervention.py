@@ -40,7 +40,7 @@ def main() -> None:
     run = payload["run"]
     request = payload["request"]
     wrapper = load_explorer_hf_model(str(run["modelName"]))
-    sae: Any | None = None
+    sae: dict[int, Any] = {}
     try:
         prompt_tokens = wrapper.to_tokens(str(run["prompt"]), prepend_bos=False)
         prompt_ids = _flat_token_ids(prompt_tokens)
@@ -97,28 +97,67 @@ def main() -> None:
                 raise ValueError(
                     "Model, release, and SAE ID are not an enabled Gemma Scope profile."
                 )
-            if int(request["layer"]) != profile.layer or request["component"] != profile.component:
-                raise ValueError("Gemma Scope profile does not match the requested layer and site.")
+            requested_features = request.get("saeFeatures") or [{
+                "featureIndex": request.get("featureIndex", -1),
+                "strength": request.get("scale", 0),
+                "layer": request.get("layer", profile.layer),
+            }]
+            if not isinstance(requested_features, list) or not requested_features:
+                raise ValueError("At least one SAE feature is required.")
+            feature_specs: list[dict[str, Any]] = []
+            for raw_feature in requested_features:
+                feature_layer = int(raw_feature.get("layer", profile.layer))
+                feature_profile = (
+                    profile
+                    if feature_layer == profile.layer
+                    else get_sae_profile(
+                        model_name=str(run["modelName"]),
+                        release=str(request.get("saeRelease", "")),
+                        sae_id=f"layer_{feature_layer}/width_131k/canonical",
+                    )
+                )
+                if feature_profile is None or request["component"] != feature_profile.component:
+                    raise ValueError(
+                        "No compatible Gemma Scope profile is enabled for "
+                        f"layer L{feature_layer}."
+                    )
+                if feature_layer not in sae:
+                    sae[feature_layer] = _load_sae(
+                        wrapper,
+                        release=feature_profile.release,
+                        sae_id=feature_profile.sae_id,
+                        expected_model_name=feature_profile.model_name,
+                    )
+                feature_index = int(raw_feature.get("featureIndex", -1))
+                feature_width = _sae_feature_width(sae[feature_layer])
+                if feature_index < 0 or feature_index >= feature_width:
+                    raise ValueError(
+                        f"SAE feature {feature_index} is outside dictionary width "
+                        f"{feature_width}."
+                    )
+                feature_specs.append({
+                    "layer": feature_layer,
+                    "featureIndex": feature_index,
+                    "strength": float(raw_feature.get("strength", request.get("scale", 0))),
+                    "profile": feature_profile,
+                })
+            primary_spec = feature_specs[0]
+            profile = primary_spec["profile"]
             source_layer = profile.layer
             inject_layer = profile.layer
             activation_name = f"layer_{profile.layer}.{profile.component}"
             source_activation_name = activation_name
             inject_activation_name = activation_name
-            sae = _load_sae(
-                wrapper,
-                release=profile.release,
-                sae_id=profile.sae_id,
-                expected_model_name=profile.model_name,
-            )
-            feature_index = int(request.get("featureIndex", -1))
-            feature_width = _sae_feature_width(sae)
+            primary_sae = sae[primary_spec["layer"]]
+            feature_index = primary_spec["featureIndex"]
+            feature_width = _sae_feature_width(primary_sae)
             if feature_index < 0 or feature_index >= feature_width:
                 raise ValueError(
                     f"SAE feature {feature_index} is outside dictionary width {feature_width}."
                 )
             feature_stats = _source_sae_feature_stats(
                 wrapper,
-                sae,
+                primary_sae,
                 str(run["prompt"]),
                 activation_name,
                 feature_index=feature_index,
@@ -155,6 +194,14 @@ def main() -> None:
                 "conceptUrl": concept["url"],
                 "positiveTokens": concept["positiveTokens"],
                 "negativeTokens": concept["negativeTokens"],
+                "features": [
+                    {
+                        "layer": spec["layer"],
+                        "featureIndex": spec["featureIndex"],
+                        "strength": spec["strength"],
+                    }
+                    for spec in feature_specs
+                ],
             }
         else:
             positive_prompts = _request_prompt_batch(request, "positivePrompts", "desiredPrompt")
@@ -198,17 +245,24 @@ def main() -> None:
                     prompt_token_count=len(prompt_ids),
                 )
             else:
-                if sae is None:
+                if not sae:
                     raise RuntimeError("Gemma Scope SAE was not loaded.")
-                hook = _make_sae_feature_hook(
-                    sae=sae,
-                    feature_index=int(request["featureIndex"]),
-                    operation=str(request.get("saeOperation", "add")),
-                    scale=float(request["scale"]),
-                    position=position,
-                    prompt_token_count=len(prompt_ids),
-                )
-            handle = wrapper.add_hook(activation_name, hook)
+                hooks = {
+                    f"blocks.{spec['layer']}.hook_resid_post": _make_sae_feature_hook(
+                        sae=sae[spec["layer"]],
+                        feature_index=spec["featureIndex"],
+                        operation=str(request.get("saeOperation", "add")),
+                        scale=spec["strength"],
+                        position=position,
+                        prompt_token_count=len(prompt_ids),
+                    )
+                    for spec in feature_specs
+                }
+            handles = []
+            if mode == "sae_feature":
+                handles = [wrapper.add_hook(name, hook_fn) for name, hook_fn in hooks.items()]
+            else:
+                handles = [wrapper.add_hook(activation_name, hook)]
             try:
                 steered, steered_logits = _run_condition(
                     wrapper,
@@ -220,7 +274,8 @@ def main() -> None:
                     temperature=float(request["temperature"]),
                 )
             finally:
-                handle.remove()
+                for handle in reversed(handles):
+                    handle.remove()
         else:
             steered, steered_logits = _run_condition(
                 wrapper,
@@ -273,15 +328,27 @@ def main() -> None:
                     else activation_reduce
                 ),
                 "rawNorm": round(
-                    _feature_reference_norm(feature, sae) if feature is not None else raw_norm,
+                    (
+                        _feature_reference_norm(
+                            feature,
+                            primary_sae if mode == "sae_feature" else None,
+                        )
+                        if feature is not None
+                        else raw_norm
+                    ),
                     10,
                 ),
                 "normalized": False,
                 "dimension": (
                     1
                     if mode == "neuron"
-                    else int(_sae_decoder_direction(sae, int(request["featureIndex"])).shape[-1])
-                    if mode == "sae_feature" and sae is not None
+                    else int(
+                        _sae_decoder_direction(
+                            primary_sae,
+                            int(request["featureIndex"]),
+                        ).shape[-1]
+                    )
+                    if mode == "sae_feature" and primary_sae is not None
                     else int(vector.shape[-1])
                 ),
                 "sourceKey": source_activation_name if mode == "direction" else activation_name,
@@ -352,8 +419,7 @@ def main() -> None:
         derived = _merge_intervention_result(run, comparison, run_id=args.run_id)
     finally:
         wrapper.remove_hooks()
-        if sae is not None:
-            del sae
+        sae.clear()
         del wrapper
         gc.collect()
 
@@ -400,9 +466,6 @@ def _load_sae(
             converter=explorer_sae_converter(release),
         )
     except Exception:
-        # Canonical Gemma Scope IDs are also distributed as plain public
-        # checkpoints.  Prefer that local source when an SAE Lens registry
-        # does not know a custom release name.
         return load_local_gemma_scope_sae(
             model_name=expected_model_name,
             release=release,

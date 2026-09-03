@@ -22,6 +22,7 @@ import {
   fetchPatchingPreflight,
   fetchSAEFeatureInfo,
   fetchSAEProfiles,
+  fetchSAESteeringConfig,
   type ActivationComponent,
   type AttributionJob,
   type AttributionRunInput,
@@ -36,7 +37,8 @@ import {
   type RemoteRunSummary,
   type SAEFeatureCandidate,
   type SAEFeatureInfo,
-  type SAEProfile
+  type SAEProfile,
+  type SAESteeringConfig
 } from "../api/explorerClient";
 import { useAttributionRunner } from "../state/useAttributionRunner";
 import { useInterventionRunner } from "../state/useInterventionRunner";
@@ -476,6 +478,11 @@ function FeatureInterventionWorkbench({
       ? run.intervention
       : undefined;
   const [profiles, setProfiles] = useState<SAEProfile[]>([]);
+  const [steeringConfig, setSteeringConfig] = useState<SAESteeringConfig | null>(null);
+  const [steeringPresetId, setSteeringPresetId] = useState("custom");
+  const [steeringPresetFeatures, setSteeringPresetFeatures] = useState<
+    Array<{ featureIndex: number; strength: number; layer: number }>
+  >([]);
   const [profilesReady, setProfilesReady] = useState(false);
   const [profileError, setProfileError] = useState<string | null>(null);
   const [profileId, setProfileId] = useState("");
@@ -520,6 +527,8 @@ function FeatureInterventionWorkbench({
     ?? profiles.find((profile) => profile.layer === 12)
     ?? profiles[0];
   const selectedCandidate = candidates.find((candidate) => candidate.featureIndex === featureIndex);
+  const selectedSteeringPreset = steeringConfig?.presets.find((preset) => preset.id === steeringPresetId);
+  const neuronpediaRun = run.modelName === "google/gemma-2-9b-it";
   const hasSelectedFeature = Boolean(selectedCandidate || prior?.feature || manualFeatureSelected);
   const scaleLimit = Math.min(
     1_000,
@@ -546,6 +555,14 @@ function FeatureInterventionWorkbench({
     });
     return () => controller.abort();
   }, [prior?.feature?.saeId, run.modelName]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    void fetchSAESteeringConfig(controller.signal).then(setSteeringConfig).catch(() => {
+      if (!controller.signal.aborted) setSteeringConfig(null);
+    });
+    return () => controller.abort();
+  }, []);
 
   useEffect(() => {
     if (selectedProfile && featureIndex >= selectedProfile.width) setFeatureIndex(0);
@@ -612,9 +629,43 @@ function FeatureInterventionWorkbench({
 
   function selectProfile(nextProfileId: string) {
     setProfileId(nextProfileId);
+    setSteeringPresetId("custom");
+    setSteeringPresetFeatures([]);
     setCandidates([]);
     setManualFeatureSelected(false);
     discovery.reset();
+    setResult(null);
+  }
+
+  function selectNeuronpediaPreset(nextPresetId: string) {
+    setSteeringPresetId(nextPresetId);
+    if (nextPresetId === "custom") {
+      setSteeringPresetFeatures([]);
+      setManualFeatureSelected(false);
+      setResult(null);
+      return;
+    }
+    const preset = steeringConfig?.presets.find((item) => item.id === nextPresetId);
+    const firstFeature = preset?.features[0] ?? (preset ? {
+      featureIndex: preset.featureIndex,
+      strength: preset.strength,
+      layer: preset.layer
+    } : undefined);
+    if (!preset || !firstFeature) return;
+    const profile = profiles.find((item) => item.layer === firstFeature.layer);
+    if (!profile) {
+      setProfileError(`The ${preset.label} mode requires a Gemma-2-9B-it run with an L${firstFeature.layer} SAE profile.`);
+      return;
+    }
+    setProfileId(profile.id);
+    setSteeringPresetFeatures(preset.features.length > 0 ? preset.features : [firstFeature]);
+    setFeatureIndex(firstFeature.featureIndex);
+    setScale(firstFeature.strength);
+    setOperation("add");
+    setManualFeatureSelected(true);
+    setCandidates([]);
+    discovery.reset();
+    setRange(outputBoundary, run.tokens.length);
     setResult(null);
   }
 
@@ -634,6 +685,8 @@ function FeatureInterventionWorkbench({
   }
 
   function selectCandidate(candidate: SAEFeatureCandidate) {
+    setSteeringPresetId("custom");
+    setSteeringPresetFeatures([]);
     setFeatureIndex(candidate.featureIndex);
     setFeatureInfo({
       modelName: run.modelName,
@@ -652,11 +705,17 @@ function FeatureInterventionWorkbench({
   }
 
   function applySuggestedScale(multiplier: number) {
+    setSteeringPresetId("custom");
+    setSteeringPresetFeatures([]);
     const basis = selectedCandidate?.recommendedDelta ?? 100;
     setScale(Math.max(-1_000, Math.min(1_000, Math.round(basis * multiplier))));
   }
 
   function selectOperation(nextOperation: "add" | "ablate") {
+    if (nextOperation === "ablate") {
+      setSteeringPresetId("custom");
+      setSteeringPresetFeatures([]);
+    }
     setOperation(nextOperation);
     if (nextOperation === "add") {
       setRange(outputBoundary, run.tokens.length);
@@ -682,6 +741,7 @@ function FeatureInterventionWorkbench({
       saeId: selectedProfile.saeId,
       featureIndex,
       saeOperation: operation,
+      saeFeatures: steeringPresetFeatures.length > 0 ? steeringPresetFeatures : undefined,
       scale,
       positionStart,
       positionEnd,
@@ -721,6 +781,16 @@ function FeatureInterventionWorkbench({
             </div>
           </div>
           <div className="chat-sae-discovery-tools">
+            {steeringConfig && (
+              <label className="chat-sae-profile chat-sae-neuronpedia-mode">
+                <span>Neuronpedia mode</span>
+                <select aria-label="Neuronpedia steering mode" value={steeringPresetId} disabled={running || discoveryRunning || !neuronpediaRun || !profilesReady || profiles.length === 0} onChange={(event) => selectNeuronpediaPreset(event.target.value)}>
+                  <option value="custom">Custom feature</option>
+                  {steeringConfig.presets.map((preset) => <option key={preset.id} value={preset.id}>{preset.label}</option>)}
+                </select>
+                {!neuronpediaRun && <small className="chat-sae-mode-hint">Switch the chat model to Gemma-2-9B-it to enable these modes.</small>}
+              </label>
+            )}
             <div className="chat-sae-discovery-scope" role="group" aria-label="Feature discovery range">
               <button
                 type="button"
@@ -739,8 +809,8 @@ function FeatureInterventionWorkbench({
             </div>
             <label className="chat-sae-profile">
               <span>SAE checkpoint</span>
-              <select aria-label="SAE checkpoint" value={selectedProfile?.id ?? ""} disabled={running || discoveryRunning || profiles.length === 0} onChange={(event) => selectProfile(event.target.value)}>
-                {profiles.map((profile) => <option key={profile.id} value={profile.id}>L{profile.layer} · 16k · L0 small</option>)}
+              <select aria-label="SAE checkpoint" value={selectedProfile?.id ?? ""} disabled={running || discoveryRunning || profiles.length === 0} onChange={(event) => { setSteeringPresetId("custom"); selectProfile(event.target.value); }}>
+                {profiles.map((profile) => <option key={profile.id} value={profile.id}>L{profile.layer} · {profile.width >= 131_072 ? "131k · canonical" : "16k · L0 small"}</option>)}
               </select>
             </label>
             <button
@@ -813,6 +883,11 @@ function FeatureInterventionWorkbench({
               {(featureInfo?.positiveTokens.length ?? 0) > 0 && <small className="chat-feature-evidence"><b>Positive</b>{featureInfo?.positiveTokens.slice(0, 6).join(" · ")}</small>}
               {(featureInfo?.negativeTokens.length ?? 0) > 0 && <small className="chat-feature-evidence"><b>Negative</b>{featureInfo?.negativeTokens.slice(0, 6).join(" · ")}</small>}
             </div>
+            {selectedSteeringPreset && (
+              <small className="chat-sae-preset-note">
+                {selectedSteeringPreset.features.map((item) => `L${item.layer} F${item.featureIndex} ${signed(item.strength)}`).join(" · ")}
+              </small>
+            )}
           </div>
         )}
         <div className="chat-sae-config-body">
@@ -823,9 +898,9 @@ function FeatureInterventionWorkbench({
             </div>
             <label className="chat-feature-strength">
               <span>Feature delta <b>{operation === "ablate" ? "zero" : signed(scale)}</b></span>
-              <input aria-label="SAE feature delta" type="range" min={-scaleLimit} max={scaleLimit} step={5} value={scale} disabled={running || operation === "ablate" || !hasSelectedFeature} onChange={(event) => setScale(Number(event.target.value))} />
+              <input aria-label="SAE feature delta" type="range" min={-scaleLimit} max={scaleLimit} step={5} value={scale} disabled={running || operation === "ablate" || !hasSelectedFeature} onChange={(event) => { setSteeringPresetId("custom"); setSteeringPresetFeatures([]); setScale(Number(event.target.value)); }} />
             </label>
-            <input className="chat-feature-strength-number" aria-label="SAE feature delta value" type="number" min={-1000} max={1000} step={5} value={scale} disabled={running || operation === "ablate" || !hasSelectedFeature} onChange={(event) => setScale(Math.max(-1000, Math.min(1000, Number(event.target.value) || 0)))} />
+            <input className="chat-feature-strength-number" aria-label="SAE feature delta value" type="number" min={-1000} max={1000} step={5} value={scale} disabled={running || operation === "ablate" || !hasSelectedFeature} onChange={(event) => { setSteeringPresetId("custom"); setSteeringPresetFeatures([]); setScale(Math.max(-1000, Math.min(1000, Number(event.target.value) || 0))); }} />
             <div className="chat-feature-strength-presets" role="group" aria-label="SAE strength presets">
               <button type="button" disabled={running || operation === "ablate" || !hasSelectedFeature} onClick={() => applySuggestedScale(0.5)}>Subtle</button>
               <button type="button" disabled={running || operation === "ablate" || !hasSelectedFeature} onClick={() => applySuggestedScale(1)}>Suggested</button>
@@ -837,7 +912,7 @@ function FeatureInterventionWorkbench({
             <details className="chat-sae-advanced" open={hasSelectedFeature}>
               <summary>Advanced settings</summary>
               <div className="chat-feature-advanced-grid">
-                <label><span>Feature ID</span><input aria-label="SAE feature index" type="number" min={0} max={(selectedProfile?.width ?? 1) - 1} value={featureIndex} disabled={running || discoveryRunning || !selectedProfile} onChange={(event) => { setManualFeatureSelected(true); setFeatureIndex(Math.max(0, Math.min((selectedProfile?.width ?? 1) - 1, Number(event.target.value) || 0))); }} /></label>
+                <label><span>Feature ID</span><input aria-label="SAE feature index" type="number" min={0} max={(selectedProfile?.width ?? 1) - 1} value={featureIndex} disabled={running || discoveryRunning || !selectedProfile} onChange={(event) => { setSteeringPresetId("custom"); setSteeringPresetFeatures([]); setManualFeatureSelected(true); setFeatureIndex(Math.max(0, Math.min((selectedProfile?.width ?? 1) - 1, Number(event.target.value) || 0))); }} /></label>
                 <label><span>Tracked output token</span><select aria-label="SAE tracked output token" value={targetTokenId} disabled={running} onChange={(event) => setTargetTokenId(Number(event.target.value))}>{targetOptions.map((option) => <option key={option.tokenId} value={option.tokenId}>{visibleToken(option.tokenText)} · #{option.tokenId}</option>)}</select></label>
               </div>
             </details>
