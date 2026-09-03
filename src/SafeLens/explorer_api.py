@@ -2045,8 +2045,10 @@ def _subprocess_prompt_runner(*, root: Path) -> PromptRunner:
             ),
             encoding="utf-8",
         )
-        configured_device = os.environ.get("SAFELENS_EXPLORER_JOB_DEVICE", "cpu")
-        device_label = "GPU" if configured_device.startswith("cuda") else "CPU"
+        from SafeLens.explorer_model import explorer_job_device
+
+        configured_device = explorer_job_device()
+        device_label = "GPU" if configured_device.lower().startswith("cuda") else "CPU"
         progress(8, "model", f"Loading {payload.model} on the local {device_label} worker.")
         command = [
             sys.executable,
@@ -2735,7 +2737,9 @@ def _subprocess_jlens_runner(*, root: Path) -> JobRunner:
             "--run-id",
             derived_run_id,
         ]
-        device = os.environ.get("SAFELENS_EXPLORER_JOB_DEVICE", "cpu")
+        from SafeLens.explorer_model import explorer_job_device
+
+        device = explorer_job_device()
         progress(5, "base-model", f"Loading the source model on {device}.")
         try:
             process = subprocess.Popen(

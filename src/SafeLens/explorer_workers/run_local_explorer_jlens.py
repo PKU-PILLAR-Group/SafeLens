@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from SafeLens.explorer_model import resolve_explorer_pretrained_path
+from SafeLens.explorer_model import explorer_job_device, resolve_explorer_pretrained_path
 
 
 def main() -> None:
@@ -36,10 +36,10 @@ def _run_jlens(run: dict[str, Any], request: dict[str, Any], *, run_id: str) -> 
         ) from exc
 
     model_name = str(run["modelName"])
-    device = os.environ.get("SAFELENS_EXPLORER_JOB_DEVICE", "cpu")
+    device = explorer_job_device()
     dtype_name = os.environ.get(
         "SAFELENS_EXPLORER_JOB_DTYPE",
-        "float32" if device == "cpu" else "bfloat16",
+        "float32" if device.lower() == "cpu" else "bfloat16",
     )
     dtype = getattr(torch, dtype_name, "auto") if dtype_name != "auto" else "auto"
     cache_dir = os.environ.get(

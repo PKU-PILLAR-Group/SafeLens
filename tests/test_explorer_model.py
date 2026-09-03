@@ -7,6 +7,7 @@ from SafeLens.explorer_model import (
     complete_hf_snapshot,
     complete_modelscope_snapshot,
     explorer_hf_model_config,
+    explorer_job_device,
     resolve_explorer_pretrained_path,
 )
 
@@ -31,6 +32,29 @@ def _write_snapshot(cache: Path, *, missing_second_shard: bool = False) -> Path:
     return snapshot
 
 
+def test_explorer_job_device_auto_prefers_cuda(monkeypatch) -> None:
+    monkeypatch.delenv("SAFELENS_EXPLORER_JOB_DEVICE", raising=False)
+    monkeypatch.setattr("torch.cuda.is_available", lambda: True)
+
+    assert explorer_job_device() == "cuda:0"
+    assert explorer_job_device("auto") == "cuda:0"
+
+
+def test_explorer_job_device_auto_falls_back_to_cpu(monkeypatch) -> None:
+    monkeypatch.delenv("SAFELENS_EXPLORER_JOB_DEVICE", raising=False)
+    monkeypatch.setattr("torch.cuda.is_available", lambda: False)
+
+    assert explorer_job_device() == "cpu"
+    assert explorer_job_device("auto") == "cpu"
+
+
+def test_explorer_job_device_preserves_explicit_device(monkeypatch) -> None:
+    monkeypatch.setattr("torch.cuda.is_available", lambda: False)
+
+    assert explorer_job_device("cpu") == "cpu"
+    assert explorer_job_device("cuda:1") == "cuda:1"
+
+
 def test_explorer_model_config_uses_gpu_dtype_and_complete_local_snapshot(
     tmp_path: Path,
     monkeypatch,
@@ -38,6 +62,10 @@ def test_explorer_model_config_uses_gpu_dtype_and_complete_local_snapshot(
     snapshot = _write_snapshot(tmp_path)
     monkeypatch.setenv("SAFELENS_EXPLORER_JOB_DEVICE", "cuda:0")
     monkeypatch.setenv("SAFELENS_EXPLORER_JOB_DTYPE", "bfloat16")
+    monkeypatch.setenv(
+        "SAFELENS_EXPLORER_MODEL_PATHS",
+        json.dumps({"Qwen/Qwen2.5-7B-Instruct": str(snapshot)}),
+    )
 
     config = explorer_hf_model_config(
         "Qwen/Qwen2.5-7B-Instruct",

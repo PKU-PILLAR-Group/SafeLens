@@ -90,19 +90,13 @@ class GemmaSteeringConfig:
 
     @classmethod
     def from_env(cls) -> GemmaSteeringConfig:
-        configured_device = os.environ.get(
-            "SAFELENS_GEMMA_SAE_DEVICE",
-            os.environ.get("SAFELENS_EXPLORER_JOB_DEVICE", ""),
-        ).strip()
-        if not configured_device:
-            try:
-                import torch
+        from SafeLens.explorer_model import explorer_job_device
 
-                configured_device = "cuda:0" if torch.cuda.is_available() else "cpu"
-            except ImportError:
-                configured_device = "cpu"
-        device = configured_device
-        default_dtype = "bfloat16" if device.startswith("cuda") else "float32"
+        configured_device = os.environ.get("SAFELENS_GEMMA_SAE_DEVICE")
+        if configured_device is None:
+            configured_device = os.environ.get("SAFELENS_EXPLORER_JOB_DEVICE")
+        device = explorer_job_device(configured_device)
+        default_dtype = "bfloat16" if device.lower().startswith("cuda") else "float32"
         configured_model = (
             os.environ.get("SAFELENS_GEMMA_2_9B_IT_MODEL_PATH")
             or os.environ.get("SAFELENS_GEMMA_2_9B_IT_MODEL")

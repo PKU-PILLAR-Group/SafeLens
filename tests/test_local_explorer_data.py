@@ -37,6 +37,7 @@ def test_real_run_worker_uses_configured_gpu_and_dtype(monkeypatch: pytest.Monke
 
     monkeypatch.setenv("SAFELENS_EXPLORER_JOB_DEVICE", "cuda:0")
     monkeypatch.setenv("SAFELENS_EXPLORER_JOB_DTYPE", "bfloat16")
+    monkeypatch.setattr("SafeLens.explorer_model._configured_local_model_path", lambda _: None)
     monkeypatch.setattr(MODULE, "HuggingFaceModelWrapper", FakeWrapper)
     monkeypatch.setattr(MODULE, "build_model_wrapper", fake_build)
 
@@ -122,6 +123,8 @@ def test_real_run_worker_uses_complete_local_snapshot_without_network(
         captured["config"] = config
         return FakeWrapper()
 
+    monkeypatch.setenv("SAFELENS_EXPLORER_JOB_DEVICE", "cpu")
+    monkeypatch.setattr("SafeLens.explorer_model._configured_local_model_path", lambda _: None)
     monkeypatch.setattr(MODULE, "HuggingFaceModelWrapper", FakeWrapper)
     monkeypatch.setattr(MODULE, "build_model_wrapper", fake_build)
 

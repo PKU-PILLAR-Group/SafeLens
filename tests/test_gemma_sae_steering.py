@@ -77,6 +77,19 @@ def test_gemma_steering_config_reads_all_runtime_environment(monkeypatch) -> Non
     assert config.dtype == "bfloat16"
 
 
+def test_gemma_steering_config_auto_selects_cuda(monkeypatch) -> None:
+    monkeypatch.delenv("SAFELENS_GEMMA_SAE_DEVICE", raising=False)
+    monkeypatch.delenv("SAFELENS_EXPLORER_JOB_DEVICE", raising=False)
+    monkeypatch.delenv("SAFELENS_GEMMA_SAE_DTYPE", raising=False)
+    monkeypatch.delenv("SAFELENS_EXPLORER_JOB_DTYPE", raising=False)
+    monkeypatch.setattr("torch.cuda.is_available", lambda: True)
+
+    config = GemmaSteeringConfig.from_env()
+
+    assert config.device == "cuda:0"
+    assert config.dtype == "bfloat16"
+
+
 def test_canonical_gemma_9b_profile_matches_gemmascope_contract() -> None:
     profiles = list_sae_profiles(model_name=GEMMA_SCOPE_9B_IT_MODEL)
     assert len(profiles) == 1

@@ -15,7 +15,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from SafeLens.explorer_model import load_explorer_hf_model
+from SafeLens.explorer_model import explorer_job_device, load_explorer_hf_model
 from SafeLens.nla import NLAClient, get_nla_profile
 from SafeLens.utils import HuggingFaceModelWrapper
 
@@ -60,7 +60,7 @@ def main() -> None:
         token=token,
         revision=actor_revision,
         reconstructor_revision=reconstructor_revision,
-        device=os.environ.get("SAFELENS_EXPLORER_JOB_DEVICE", "cpu"),
+        device=explorer_job_device(),
         dtype=os.environ.get("SAFELENS_EXPLORER_JOB_DTYPE", "auto"),
         trust_remote_code=False,
     )

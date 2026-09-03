@@ -22,6 +22,30 @@ MODELSCOPE_MODEL_IDS: dict[str, str] = {
 }
 
 
+def explorer_job_device(configured: str | None = None) -> str:
+    """Resolve the device used by local Explorer jobs.
+
+    An explicit device remains authoritative, while an unset or ``auto``
+    value selects the first CUDA device when one is available.  CUDA probing
+    is intentionally lazy so importing SafeLens does not require PyTorch.
+    """
+    if configured is None:
+        configured = os.environ.get("SAFELENS_EXPLORER_JOB_DEVICE", "")
+    configured = configured.strip()
+    if configured and configured.lower() != "auto":
+        return configured
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            return "cuda:0"
+    except (ImportError, RuntimeError):
+        # A CPU-only PyTorch build or an unavailable CUDA driver should not
+        # prevent the local Explorer from starting.
+        pass
+    return "cpu"
+
+
 def _configured_local_model_path(model_id: str) -> Path | None:
     """Resolve an explicit or host-local model directory for an Explorer model."""
     configured = os.environ.get("SAFELENS_EXPLORER_MODEL_PATHS", "").strip()
@@ -102,7 +126,7 @@ def explorer_hf_model_config(
     cache_dir: str = DEFAULT_EXPLORER_MODEL_CACHE,
 ) -> ModelLoadConfig:
     """Build the consistent device, dtype, and offline-cache config used by Explorer jobs."""
-    device = os.environ.get("SAFELENS_EXPLORER_JOB_DEVICE", "cpu")
+    device = explorer_job_device()
     dtype = os.environ.get(
         "SAFELENS_EXPLORER_JOB_DTYPE",
         "float32" if device == "cpu" else "bfloat16",
