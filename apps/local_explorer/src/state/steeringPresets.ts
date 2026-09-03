@@ -1,3 +1,5 @@
+import { createClientId } from "../clientId";
+
 export interface SteeringPreset {
   id: string;
   pairId?: string;
@@ -170,7 +172,7 @@ export function createUserPreset(
   category?: SteeringCategory
 ): SteeringPreset {
   return {
-    id: `u-${crypto.randomUUID()}`,
+    id: `u-${createClientId()}`,
     label: label.trim(),
     text,
     direction,

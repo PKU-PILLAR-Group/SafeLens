@@ -5,6 +5,7 @@ import { usePromptRunner } from "./usePromptRunner";
 import type { ExplorerRun } from "../types";
 import type { TurnView } from "../components/TurnCard";
 import { generatedResponseText } from "../generatedResponse";
+import { createClientId } from "../clientId";
 
 export type { TurnView };
 
@@ -109,12 +110,12 @@ export function useTurnManager({
   const submit = useCallback((prompt: string) => {
     if (activeTurnIdRef.current) return;
     const hadConversation = Boolean(conversationIdRef.current);
-    const nextConversationId = conversationIdRef.current ?? crypto.randomUUID();
+    const nextConversationId = conversationIdRef.current ?? createClientId();
     conversationIdRef.current = nextConversationId;
     if (!hadConversation) onConversationStart(nextConversationId);
     const messages = contextMessages(turns);
     const turn: TurnView = {
-      id: crypto.randomUUID(),
+      id: createClientId(),
       prompt,
       run: null,
       jobId: null,

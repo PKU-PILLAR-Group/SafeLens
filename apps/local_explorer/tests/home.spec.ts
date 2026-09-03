@@ -1018,6 +1018,23 @@ test("opens as the minimal Chat interface shown in the reference figures", async
   expect(layout.document).toBeLessThanOrEqual(layout.viewport);
 });
 
+test("submits from an ordinary HTTP preview without crypto.randomUUID", async ({ page }) => {
+  await prepareHome(page);
+  await mockReadyPromptJob(page);
+  await page.addInitScript(() => {
+    Object.defineProperty(globalThis.crypto, "randomUUID", {
+      configurable: true,
+      value: undefined
+    });
+  });
+  await page.goto("/");
+
+  await runReadyAnalysis(page, "Hello from an HTTP preview");
+
+  await expect(page.locator(".chat-turn-card")).toHaveCount(1);
+  await expect(page.locator(".chat-assistant-message")).toContainText("strongest residual alignment");
+});
+
 test("runs the real prompt-job protocol and keeps the conversation above two focused analyses", async ({ page }) => {
   await prepareHome(page);
   const submitted = await mockReadyPromptJob(page);
