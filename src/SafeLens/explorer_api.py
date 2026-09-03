@@ -422,6 +422,8 @@ class SAEFeatureInfoResponse(BaseModel):
     url: str | None = None
     positiveTokens: list[str] = Field(default_factory=list)
     negativeTokens: list[str] = Field(default_factory=list)
+    maxActApprox: float | None = None
+    vectorDefaultSteerStrength: float | None = None
 
 
 class SAESteeringFeatureRequest(BaseModel):
@@ -437,6 +439,8 @@ class SAESteeringRequest(BaseModel):
     maxNewTokens: int = Field(default=64, ge=1, le=512)
     temperature: float = Field(default=0.0, ge=0.0, le=2.0)
     seed: int = Field(default=0, ge=0, le=2_147_483_647)
+    steerPosition: Literal["all", "prompt", "generated", "prompt_position"] = "all"
+    promptPosition: int | None = Field(default=None, ge=0)
 
     @model_validator(mode="after")
     def validate_prompt_and_features(self) -> SAESteeringRequest:
@@ -446,6 +450,8 @@ class SAESteeringRequest(BaseModel):
         indices = [item.featureIndex for item in self.features]
         if len(indices) != len(set(indices)):
             raise ValueError("features must not contain duplicate featureIndex values")
+        if self.steerPosition == "prompt_position" and self.promptPosition is None:
+            raise ValueError("promptPosition is required when steerPosition is prompt_position")
         return self
 
 
@@ -472,6 +478,32 @@ class SAESteeringResponse(BaseModel):
     seed: int
     maxNewTokens: int
     temperature: float
+    steerPosition: Literal["all", "prompt", "generated", "prompt_position"] = "all"
+    promptPosition: int | None = None
+
+
+class SAESteeringScanRequest(BaseModel):
+    prompt: str = Field(min_length=1, max_length=8_000)
+    limit: int = Field(default=12, ge=1, le=32)
+
+    @model_validator(mode="after")
+    def validate_prompt(self) -> SAESteeringScanRequest:
+        self.prompt = self.prompt.strip()
+        if not self.prompt:
+            raise ValueError("prompt must not be empty")
+        return self
+
+
+class SAESteeringScanResponse(BaseModel):
+    modelName: str
+    saeRelease: str
+    saeId: str
+    layer: int = Field(ge=0)
+    hookName: str
+    featureCount: int = Field(gt=0)
+    prompt: str
+    tokens: list[dict[str, Any]]
+    features: list[dict[str, Any]]
 
 
 def _clean_intervention_prompts(prompts: list[str], field_name: str) -> list[str]:
@@ -1146,7 +1178,11 @@ def create_app(
             for profile in list_sae_profiles(model_name=modelName)
         ]
 
-    @app.get("/api/intervention/sae-feature-info", response_model=SAEFeatureInfoResponse)
+    @app.get(
+        "/api/intervention/sae-feature-info",
+        response_model=SAEFeatureInfoResponse,
+        response_model_exclude_none=True,
+    )
     def intervention_sae_feature_info(
         modelName: str = Query(min_length=1),
         layer: int = Query(ge=0),
@@ -1190,6 +1226,8 @@ def create_app(
             url=info.get("url"),
             positiveTokens=list(info.get("positiveTokens", [])),
             negativeTokens=list(info.get("negativeTokens", [])),
+            maxActApprox=info.get("maxActApprox"),
+            vectorDefaultSteerStrength=info.get("vectorDefaultSteerStrength"),
         )
 
     @app.get("/api/sae-steering/config")
@@ -1214,6 +1252,8 @@ def create_app(
                 max_new_tokens=payload.maxNewTokens,
                 temperature=payload.temperature,
                 seed=payload.seed,
+                steer_position=payload.steerPosition,
+                prompt_position=payload.promptPosition,
             )
             return SAESteeringResponse.model_validate(result)
         except (
@@ -1227,6 +1267,60 @@ def create_app(
             raise HTTPException(
                 status_code=422,
                 detail={"code": "sae_steering_error", "message": str(exc)},
+            ) from exc
+
+    @app.post("/api/sae-steering/scan", response_model=SAESteeringScanResponse)
+    def sae_steering_scan(payload: SAESteeringScanRequest) -> SAESteeringScanResponse:
+        """Encode a prompt with the canonical GemmaScope JumpReLU SAE."""
+        from concurrent.futures import ThreadPoolExecutor
+
+        from SafeLens.explorer_sae import neuronpedia_feature_info
+        from SafeLens.gemma_sae_steering import scan_gemma_prompt
+
+        try:
+            result = scan_gemma_prompt(payload.prompt, limit=payload.limit)
+            feature_rows = list(result.get("features", []))
+
+            def enrich(row: dict[str, Any]) -> dict[str, Any]:
+                info = neuronpedia_feature_info(
+                    model_name=result["modelName"],
+                    layer=int(result["layer"]),
+                    sae_id=result["saeId"],
+                    feature_index=int(row["featureIndex"]),
+                )
+                max_activation = float(row["maxActivation"])
+                default_strength = info.get("vectorDefaultSteerStrength")
+                return {
+                    **row,
+                    "label": str(info["label"]),
+                    "source": "neuronpedia" if info.get("source") == "neuronpedia" else "index",
+                    "url": info.get("url"),
+                    "positiveTokens": list(info.get("positiveTokens", [])),
+                    "negativeTokens": list(info.get("negativeTokens", [])),
+                    "maxActApprox": info.get("maxActApprox"),
+                    "vectorDefaultSteerStrength": default_strength,
+                    # The UI can use this exact value as the initial coefficient
+                    # while still showing the measured prompt activation above.
+                    "suggestedStrength": float(default_strength)
+                    if isinstance(default_strength, (int, float))
+                    else max_activation,
+                }
+
+            if feature_rows:
+                with ThreadPoolExecutor(max_workers=min(8, len(feature_rows))) as executor:
+                    result["features"] = list(executor.map(enrich, feature_rows))
+            return SAESteeringScanResponse.model_validate(result)
+        except (
+            ImportError,
+            FileNotFoundError,
+            OSError,
+            RuntimeError,
+            TypeError,
+            ValueError,
+        ) as exc:
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "sae_scan_error", "message": str(exc)},
             ) from exc
 
     @app.post("/api/intervention/preflight", response_model=InterventionPreflightResponse)
@@ -2563,9 +2657,19 @@ def _intervention_preflight(
         )
     else:
         feature_available = True
-    sae_runtime_available = (
-        payload.mode != "sae_feature" or importlib.util.find_spec("sae_lens") is not None
-    )
+    if payload.mode == "sae_feature" and sae_profile is not None:
+        from SafeLens.explorer_sae import gemma_scope_local_checkpoint_available
+
+        sae_runtime_available = bool(
+            importlib.util.find_spec("sae_lens") is not None
+            or gemma_scope_local_checkpoint_available(
+                model_name=sae_profile.model_name,
+                release=sae_profile.release,
+                sae_id=sae_profile.sae_id,
+            )
+        )
+    else:
+        sae_runtime_available = payload.mode != "sae_feature"
     try:
         vocab_size = int(len(tokenizer))
     except (TypeError, AttributeError):
@@ -2597,7 +2701,7 @@ def _intervention_preflight(
             sae_profile_valid
         )
         checks["SAE feature index is outside the selected dictionary"] = feature_available
-        checks["SAE Lens is unavailable; install SafeLens with the `sae` extra"] = (
+        checks["Gemma Scope SAE checkpoint is unavailable (install the `sae` extra or download the public checkpoint)"] = (
             sae_runtime_available
         )
     failures = [message for message, passed in checks.items() if not passed]

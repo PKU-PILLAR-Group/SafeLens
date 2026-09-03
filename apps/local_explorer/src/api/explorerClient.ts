@@ -950,7 +950,9 @@ const saeFeatureInfoSchema = z.object({
   source: z.enum(["neuronpedia", "index"]),
   url: z.string().url().nullable().optional(),
   positiveTokens: z.array(z.string()).default([]),
-  negativeTokens: z.array(z.string()).default([])
+  negativeTokens: z.array(z.string()).default([]),
+  maxActApprox: z.number().nullable().optional(),
+  vectorDefaultSteerStrength: z.number().nullable().optional()
 });
 
 export type SAEFeatureInfo = z.infer<typeof saeFeatureInfoSchema>;
@@ -986,7 +988,9 @@ const saeSteeringResponseSchema = z.object({
   generationChanged: z.boolean(),
   seed: z.number().int().nonnegative(),
   maxNewTokens: z.number().int().positive(),
-  temperature: z.number().nonnegative()
+  temperature: z.number().nonnegative(),
+  steerPosition: z.enum(["all", "prompt", "generated", "prompt_position"]).default("all"),
+  promptPosition: z.number().int().nonnegative().nullable().optional()
 });
 
 const saeSteeringConfigSchema = z.object({
@@ -1011,10 +1015,44 @@ const saeSteeringConfigSchema = z.object({
   }))
 });
 
+const saeSteeringScanFeatureSchema = z.object({
+  featureIndex: z.number().int().nonnegative(),
+  maxActivation: z.number(),
+  meanActivation: z.number(),
+  activeTokenCount: z.number().int().nonnegative(),
+  peakTokenIndex: z.number().int().nonnegative(),
+  peakTokenText: z.string(),
+  label: z.string().min(1),
+  source: z.enum(["neuronpedia", "index"]),
+  url: z.string().url().nullable().optional(),
+  positiveTokens: z.array(z.string()).default([]),
+  negativeTokens: z.array(z.string()).default([]),
+  maxActApprox: z.number().nullable().optional(),
+  vectorDefaultSteerStrength: z.number().nullable().optional(),
+  suggestedStrength: z.number()
+});
+
+const saeSteeringScanSchema = z.object({
+  modelName: z.string().min(1),
+  saeRelease: z.string().min(1),
+  saeId: z.string().min(1),
+  layer: z.number().int().nonnegative(),
+  hookName: z.string().min(1),
+  featureCount: z.number().int().positive(),
+  prompt: z.string(),
+  tokens: z.array(z.object({
+    index: z.number().int().nonnegative(),
+    tokenId: z.number().int().nonnegative(),
+    text: z.string()
+  })),
+  features: z.array(saeSteeringScanFeatureSchema).max(32)
+});
+
 export type SAESteeringFeature = z.infer<typeof saeSteeringFeatureSchema>;
 export type SAESteeringGeneration = z.infer<typeof saeSteeringGenerationSchema>;
 export type SAESteeringResponse = z.infer<typeof saeSteeringResponseSchema>;
 export type SAESteeringConfig = z.infer<typeof saeSteeringConfigSchema>;
+export type SAESteeringScan = z.infer<typeof saeSteeringScanSchema>;
 
 export interface SAESteeringInput {
   prompt: string;
@@ -1022,6 +1060,13 @@ export interface SAESteeringInput {
   maxNewTokens: number;
   temperature: number;
   seed: number;
+  steerPosition?: "all" | "prompt" | "generated" | "prompt_position";
+  promptPosition?: number | null;
+}
+
+export interface SAESteeringScanInput {
+  prompt: string;
+  limit: number;
 }
 
 const saeFeatureCandidateSchema = z.object({
@@ -1483,6 +1528,22 @@ export async function submitSAESteering(input: SAESteeringInput): Promise<SAESte
   if (!response.ok) throw new ExplorerApiError("sae_steering_error", await responseDetail(response));
   const parsed = saeSteeringResponseSchema.safeParse(await response.json());
   if (!parsed.success) throw new ExplorerApiError("invalid_sae_steering_response", parsed.error.message);
+  return parsed.data;
+}
+
+export async function scanSAESteering(
+  input: SAESteeringScanInput,
+  signal?: AbortSignal
+): Promise<SAESteeringScan> {
+  const response = await fetch(`${API_BASE}/sae-steering/scan`, {
+    method: "POST",
+    signal,
+    headers: { Accept: "application/json", "Content-Type": "application/json" },
+    body: JSON.stringify(input)
+  });
+  if (!response.ok) throw new ExplorerApiError("sae_steering_scan_error", await responseDetail(response));
+  const parsed = saeSteeringScanSchema.safeParse(await response.json());
+  if (!parsed.success) throw new ExplorerApiError("invalid_sae_steering_scan", parsed.error.message);
   return parsed.data;
 }
 

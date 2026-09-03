@@ -106,4 +106,26 @@ token. Built-in examples are Cats (62610, +192), Chinese (121465, +74), and
 Pirate (29917, +166), matching the layer-9 examples on the Neuronpedia demo.
 When `SAFELENS_GEMMA_SAE_DEVICE` is omitted or set to `auto`, the runtime uses
 `cuda:0` when CUDA is available and otherwise falls back to CPU.
+
+The dedicated demo also exposes `POST /api/sae-steering/scan`. It encodes the
+rendered prompt with the checkpoint's `W_enc`, `b_enc`, and `threshold` using
+the published JumpReLU rule:
+
+```python
+pre = activations @ W_enc + b_enc
+feature_acts = pre * (pre > threshold)
+```
+
+The response ranks positive features by their measured prompt activation and
+includes the peak token, active-token count, Neuronpedia `maxActApprox`, and
+`vectorDefaultSteerStrength` when the metadata endpoint is reachable. The
+weights for this scan are loaded lazily, so a steering-only deployment keeps
+only the decoder resident. Network failures fall back to index-only feature
+labels without sending prompt text to Neuronpedia.
+
+Steering scope can be selected in the UI or request body with
+`steerPosition=all|prompt|generated|prompt_position`; the latter additionally
+accepts a zero-based `promptPosition`. This mirrors Neuronpedia's distinction
+between prompt positions and generated-token steering while preserving the
+original `all` behavior as the default.
 instead of silently applying an unrelated dictionary.

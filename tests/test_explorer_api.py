@@ -70,6 +70,55 @@ def test_sae_feature_info_endpoint_exposes_concept_metadata(tmp_path: Path, monk
     }
 
 
+def test_sae_steering_scan_endpoint_enriches_real_activation_rows(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "SafeLens.gemma_sae_steering.scan_gemma_prompt",
+        lambda prompt, limit: {
+            "modelName": "google/gemma-2-9b-it",
+            "saeRelease": "gemma-scope-9b-it-res-canonical",
+            "saeId": "layer_9/width_131k/canonical",
+            "layer": 9,
+            "hookName": "blocks.9.hook_resid_post",
+            "featureCount": 131072,
+            "prompt": prompt,
+            "tokens": [{"index": 0, "tokenId": 1, "text": "Cats"}],
+            "features": [{
+                "featureIndex": 62610,
+                "maxActivation": 57.7,
+                "meanActivation": 57.7,
+                "activeTokenCount": 1,
+                "peakTokenIndex": 0,
+                "peakTokenText": "Cats",
+            }],
+        },
+    )
+    monkeypatch.setattr(
+        "SafeLens.explorer_sae.neuronpedia_feature_info",
+        lambda **kwargs: {
+            "label": "mentions and references to cats and related topics",
+            "source": "neuronpedia",
+            "url": "https://www.neuronpedia.org/gemma-2-9b-it/9-gemmascope-res-131k/62610",
+            "positiveTokens": ["▁cats"],
+            "negativeTokens": [],
+            "maxActApprox": 57.847,
+            "vectorDefaultSteerStrength": 10,
+        },
+    )
+
+    response = TestClient(create_app(tmp_path)).post(
+        "/api/sae-steering/scan",
+        json={"prompt": "Cats", "limit": 3},
+    )
+
+    assert response.status_code == 200
+    feature = response.json()["features"][0]
+    assert feature["featureIndex"] == 62610
+    assert feature["maxActivation"] == 57.7
+    assert feature["maxActApprox"] == 57.847
+    assert feature["vectorDefaultSteerStrength"] == 10.0
+    assert feature["suggestedStrength"] == 10.0
+
+
 def _sample(*, run_id: str = "run-a", sample_id: str = "sample-a") -> dict[str, object]:
     return {
         "runId": run_id,

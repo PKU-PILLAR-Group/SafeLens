@@ -152,11 +152,34 @@ class GemmaScopeDecoder:
 
 
 @dataclass
+class GemmaScopeEncoder:
+    """JumpReLU encoder parameters used to measure prompt feature activity."""
+
+    W_enc: Any
+    b_enc: Any
+    threshold: Any
+    width: int
+    d_in: int
+    dtype: str
+    device: str
+    source_path: str
+
+    def encode(self, activation: Any) -> Any:
+        """Encode residual activations with the published GemmaScope formula."""
+        import torch
+
+        x = activation.to(device=self.W_enc.device, dtype=torch.float32)
+        pre = x @ self.W_enc.float() + self.b_enc.float()
+        return pre * (pre > self.threshold.float())
+
+
+@dataclass
 class GemmaSteeringRuntime:
     wrapper: HuggingFaceModelWrapper
     sae: GemmaScopeDecoder
     config: GemmaSteeringConfig
     lock: threading.RLock
+    encoder: GemmaScopeEncoder | None = None
 
 
 def validate_feature_index(feature_index: int, width: int = GEMMA_SCOPE_9B_IT_WIDTH) -> None:
@@ -260,6 +283,78 @@ def load_gemma_scope_decoder(
     )
 
 
+def load_gemma_scope_encoder(
+    path: str | os.PathLike[str],
+    *,
+    device: str = "cpu",
+    expected_width: int | None = None,
+    expected_d_in: int | None = None,
+) -> GemmaScopeEncoder:
+    """Load the encoder side of the canonical JumpReLU checkpoint.
+
+    The encoder is intentionally loaded separately from the decoder. The
+    steering path only needs ``W_dec``; prompt scans opt into the additional
+    roughly 1.9 GiB ``W_enc`` allocation.
+    """
+
+    import numpy as np
+    import torch
+
+    checkpoint = Path(path).expanduser()
+    if not checkpoint.is_file():
+        raise FileNotFoundError(
+            f"GemmaScope SAE checkpoint not found at {checkpoint}. "
+            f"Download it from {GEMMA_SCOPE_9B_IT_SAE_URL}"
+        )
+    try:
+        with np.load(checkpoint, allow_pickle=False) as payload:
+            encoder = np.asarray(_npz_array(payload, "W_enc", "w_enc", "encoder"))
+            b_enc = np.asarray(_npz_array(payload, "b_enc"))
+            threshold = np.asarray(_npz_array(payload, "threshold"))
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise ValueError(f"Could not read GemmaScope encoder checkpoint {checkpoint}: {exc}") from exc
+    if encoder.ndim != 2:
+        raise ValueError(f"SAE encoder must be rank-2, got shape {encoder.shape!r}")
+    if (
+        expected_width is not None
+        and encoder.shape[1] != expected_width
+        and encoder.shape[0] == expected_width
+    ):
+        encoder = encoder.T
+    if expected_width is not None and encoder.shape[1] != expected_width:
+        raise ValueError(f"Expected {expected_width} SAE features, got shape {encoder.shape!r}")
+    if expected_d_in is not None and encoder.shape[0] != expected_d_in:
+        raise ValueError(
+            f"Expected encoder input width {expected_d_in}, got shape {encoder.shape!r}"
+        )
+    width = int(encoder.shape[1])
+    if b_enc.shape != (width,) or threshold.shape != (width,):
+        raise ValueError(
+            "GemmaScope encoder bias/threshold shape does not match the feature width: "
+            f"{b_enc.shape!r}, {threshold.shape!r}, width={width}"
+        )
+    target_device = torch.device(device)
+    w_tensor = torch.from_numpy(np.ascontiguousarray(encoder)).to(
+        device=target_device, dtype=torch.float32
+    )
+    b_tensor = torch.from_numpy(np.ascontiguousarray(b_enc)).to(
+        device=target_device, dtype=torch.float32
+    )
+    threshold_tensor = torch.from_numpy(np.ascontiguousarray(threshold)).to(
+        device=target_device, dtype=torch.float32
+    )
+    return GemmaScopeEncoder(
+        W_enc=w_tensor,
+        b_enc=b_tensor,
+        threshold=threshold_tensor,
+        width=width,
+        d_in=int(encoder.shape[0]),
+        dtype="float32",
+        device=str(w_tensor.device),
+        source_path=str(checkpoint),
+    )
+
+
 def _load_model(config: GemmaSteeringConfig) -> HuggingFaceModelWrapper:
     model_path = Path(config.model_path).expanduser()
     identifier = str(model_path) if model_path.is_dir() else config.model_path
@@ -317,6 +412,18 @@ def get_gemma_steering_runtime(config: GemmaSteeringConfig | None = None) -> Gem
     )
 
 
+def _runtime_encoder(runtime: GemmaSteeringRuntime) -> GemmaScopeEncoder:
+    """Load prompt-scan weights once, only when a scan is requested."""
+    if runtime.encoder is None:
+        runtime.encoder = load_gemma_scope_encoder(
+            runtime.config.sae_path,
+            device=runtime.config.device,
+            expected_width=runtime.sae.width,
+            expected_d_in=runtime.sae.d_in,
+        )
+    return runtime.encoder
+
+
 def clear_gemma_steering_runtime_cache() -> None:
     """Release cached references (useful for tests and controlled reloads)."""
 
@@ -326,6 +433,9 @@ def clear_gemma_steering_runtime_cache() -> None:
 def _make_decoder_hook(
     sae: GemmaScopeDecoder,
     features: Sequence[SAEFeature],
+    *,
+    steer_position: str = "all",
+    prompt_position: int | None = None,
 ) -> Any:
     import torch
 
@@ -334,15 +444,36 @@ def _make_decoder_hook(
     for feature in features:
         direction = direction + float(feature.strength) * sae.direction(feature.feature_index)
 
+    invocation_count = 0
+
     def hook(activation: Any = None, **kwargs: Any) -> Any:
+        nonlocal invocation_count
         value = kwargs.get("activation", activation)
         if value is None or not hasattr(value, "clone") or getattr(value, "ndim", 0) < 2:
+            return value
+        is_prompt_pass = invocation_count == 0
+        invocation_count += 1
+        if steer_position == "prompt" and not is_prompt_pass:
+            return value
+        if steer_position == "generated" and is_prompt_pass:
+            return value
+        if steer_position == "prompt_position" and not is_prompt_pass:
             return value
         delta = direction.to(device=value.device, dtype=value.dtype)
         result = value.clone()
         if value.ndim >= 3:
-            result += delta.view(1, 1, -1)
+            sequence_length = int(value.shape[-2])
+            if steer_position == "prompt_position":
+                if prompt_position is None or not 0 <= prompt_position < sequence_length:
+                    return result
+                result[:, prompt_position, :] += delta
+            else:
+                result += delta.view(1, 1, -1)
         else:
+            if steer_position == "prompt":
+                return result
+            if steer_position == "prompt_position":
+                return result
             result += delta.view(1, -1)
         return result
 
@@ -455,6 +586,8 @@ def steer_gemma_prompt(
     max_new_tokens: int = 64,
     temperature: float = 0.0,
     seed: int = 0,
+    steer_position: str = "all",
+    prompt_position: int | None = None,
     config: GemmaSteeringConfig | None = None,
 ) -> dict[str, Any]:
     """Generate default and multi-feature steered continuations."""
@@ -465,6 +598,10 @@ def steer_gemma_prompt(
         raise ValueError("max_new_tokens must be between 1 and 512")
     if not 0 <= temperature <= 2:
         raise ValueError("temperature must be between 0 and 2")
+    if steer_position not in {"all", "prompt", "generated", "prompt_position"}:
+        raise ValueError("steer_position must be one of all, prompt, generated, prompt_position")
+    if prompt_position is not None and (prompt_position < 0 or not isinstance(prompt_position, int)):
+        raise ValueError("prompt_position must be a non-negative integer")
     normalized: list[SAEFeature] = []
     for item in features:
         feature = (
@@ -480,6 +617,15 @@ def steer_gemma_prompt(
         normalized.append(feature)
     runtime = get_gemma_steering_runtime(config)
     with runtime.lock:
+        if steer_position == "prompt_position":
+            rendered_prompt = _render_generation_prompt(runtime.wrapper.tokenizer, prompt)
+            token_count = int(
+                runtime.wrapper.to_tokens(rendered_prompt, prepend_bos=False).shape[-1]
+            )
+            if prompt_position is None or prompt_position >= token_count:
+                raise ValueError(
+                    f"promptPosition must be within the rendered prompt token range [0, {token_count - 1}]"
+                )
         default = _generate(
             runtime.wrapper,
             prompt,
@@ -493,7 +639,16 @@ def steer_gemma_prompt(
             max_new_tokens=max_new_tokens,
             temperature=temperature,
             seed=seed,
-            hook=_make_decoder_hook(runtime.sae, normalized) if normalized else None,
+            hook=(
+                _make_decoder_hook(
+                    runtime.sae,
+                    normalized,
+                    steer_position=steer_position,
+                    prompt_position=prompt_position,
+                )
+                if normalized
+                else None
+            ),
         )
     return {
         "modelName": GEMMA_SCOPE_9B_IT_MODEL,
@@ -512,6 +667,83 @@ def steer_gemma_prompt(
         "seed": seed,
         "maxNewTokens": max_new_tokens,
         "temperature": temperature,
+        "steerPosition": steer_position,
+        "promptPosition": prompt_position,
+    }
+
+
+def scan_gemma_prompt(
+    prompt: str,
+    *,
+    limit: int = 12,
+    config: GemmaSteeringConfig | None = None,
+) -> dict[str, Any]:
+    """Return the strongest real JumpReLU activations for a prompt.
+
+    This follows Neuronpedia's activation semantics and reports one row per
+    feature with its peak token, mean activation, and active-token coverage.
+    """
+
+    import torch
+
+    if not prompt.strip():
+        raise ValueError("prompt must not be empty")
+    if not 1 <= limit <= 32:
+        raise ValueError("limit must be between 1 and 32")
+    runtime = get_gemma_steering_runtime(config)
+    with runtime.lock:
+        encoder = _runtime_encoder(runtime)
+        # Neuronpedia's activation endpoints scan the raw prompt. Do not wrap
+        # it in Gemma's chat template here: template control tokens can
+        # dominate the ranking and are not evidence about the user's text.
+        prompt_tokens = runtime.wrapper.to_tokens(prompt.strip(), prepend_bos=False)
+        _output, cache_value = runtime.wrapper.run_with_cache(
+            {"input_ids": prompt_tokens}, layers=[HOOK_NAME]
+        )
+        try:
+            activation = cache_value[HOOK_NAME]
+        except (KeyError, TypeError) as exc:
+            raise RuntimeError(f"SAE hook activation {HOOK_NAME!r} was not captured") from exc
+        if getattr(activation, "ndim", 0) < 3:
+            raise RuntimeError(f"Expected batched residual activations, got {getattr(activation, 'shape', None)!r}")
+        activation = activation[0]
+        with torch.no_grad():
+            encoded = encoder.encode(activation)
+            max_values, peak_offsets = encoded.max(dim=0)
+            positive_indices = (max_values > 0).nonzero(as_tuple=False).flatten()
+            ranked = positive_indices[
+                max_values[positive_indices].argsort(descending=True)[:limit]
+            ].tolist()
+            token_ids = [int(value) for value in prompt_tokens[0].detach().cpu().tolist()]
+            token_texts = [str(value) for value in runtime.wrapper.to_str_tokens(prompt_tokens)]
+            features: list[dict[str, Any]] = []
+            for raw_index in ranked:
+                feature_index = int(raw_index)
+                values = encoded[:, feature_index]
+                peak_index = int(peak_offsets[feature_index].item())
+                features.append(
+                    {
+                        "featureIndex": feature_index,
+                        "maxActivation": float(max_values[feature_index].item()),
+                        "meanActivation": float(values.mean().item()),
+                        "activeTokenCount": int((values > 0).sum().item()),
+                        "peakTokenIndex": peak_index,
+                        "peakTokenText": token_texts[peak_index] if peak_index < len(token_texts) else "",
+                    }
+                )
+    return {
+        "modelName": GEMMA_SCOPE_9B_IT_MODEL,
+        "saeRelease": GEMMA_SCOPE_9B_IT_RELEASE,
+        "saeId": GEMMA_SCOPE_9B_IT_SAE_ID,
+        "layer": GEMMA_SCOPE_9B_IT_LAYER,
+        "hookName": HOOK_NAME,
+        "featureCount": runtime.sae.feature_count,
+        "prompt": prompt,
+        "tokens": [
+            {"index": index, "tokenId": token_id, "text": token_texts[index]}
+            for index, token_id in enumerate(token_ids)
+        ],
+        "features": features,
     }
 
 
@@ -541,12 +773,15 @@ __all__ = [
     "GEMMA_9B_STEERING_PRESETS",
     "GEMMA_SCOPE_9B_IT_SAE_URL",
     "GemmaScopeDecoder",
+    "GemmaScopeEncoder",
     "GemmaSteeringConfig",
     "SAEFeature",
     "clear_gemma_steering_runtime_cache",
     "get_gemma_steering_runtime",
     "load_gemma_scope_decoder",
+    "load_gemma_scope_encoder",
     "runtime_status",
     "steer_gemma_prompt",
+    "scan_gemma_prompt",
     "validate_feature_index",
 ]

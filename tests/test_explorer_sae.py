@@ -11,6 +11,7 @@ from SafeLens.explorer_sae import (
     explorer_sae_converter,
     explorer_sae_source,
     gemma_3_sae_modelscope_loader,
+    load_local_gemma_scope_sae,
     neuronpedia_feature_info,
 )
 
@@ -20,6 +21,37 @@ def test_explorer_sae_source_can_force_huggingface(monkeypatch) -> None:
 
     assert explorer_sae_source(GEMMA_SCOPE_2_270M_IT_RELEASE) == "huggingface"
     assert explorer_sae_converter(GEMMA_SCOPE_2_270M_IT_RELEASE) is None
+
+
+def test_local_jump_relu_sae_adapter_matches_published_formula(tmp_path: Path) -> None:
+    np = pytest.importorskip("numpy")
+    torch = pytest.importorskip("torch")
+    checkpoint = tmp_path / "params.npz"
+    np.savez(
+        checkpoint,
+        W_enc=np.array([[1.0, -1.0], [0.5, 0.5]], dtype=np.float32),
+        W_dec=np.array([[2.0, 0.0], [0.0, 3.0]], dtype=np.float32),
+        b_enc=np.array([0.0, 0.0], dtype=np.float32),
+        b_dec=np.array([0.25, -0.5], dtype=np.float32),
+        threshold=np.array([0.5, 0.1], dtype=np.float32),
+    )
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setenv("SAFELENS_GEMMA_SCOPE_9B_IT_SAE_PATH", str(checkpoint))
+    try:
+        sae = load_local_gemma_scope_sae(
+            model_name="google/gemma-2-9b-it",
+            release="gemma-scope-9b-it-res-canonical",
+            sae_id="layer_9/width_131k/canonical",
+            device="cpu",
+            dtype=torch.float32,
+        )
+        encoded = sae.encode(torch.tensor([[1.0, 0.0], [0.0, 1.0]]))
+        assert torch.equal(encoded, torch.tensor([[1.0, 0.0], [0.0, 0.5]]))
+        decoded = sae.decode(encoded)
+        assert torch.allclose(decoded, torch.tensor([[2.25, -0.5], [0.25, 1.0]]))
+        assert next(sae.parameters()).dtype == torch.float32
+    finally:
+        monkeypatch.undo()
 
 
 def test_neuronpedia_feature_info_returns_explanation_and_logit_evidence(

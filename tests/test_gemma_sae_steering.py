@@ -10,6 +10,7 @@ from SafeLens.gemma_sae_steering import (
     GemmaSteeringConfig,
     SAEFeature,
     _make_decoder_hook,
+    load_gemma_scope_encoder,
     load_gemma_scope_decoder,
     validate_feature_index,
 )
@@ -50,6 +51,42 @@ def test_decoder_hook_combines_multiple_features_on_all_sequence_positions(tmp_p
     expected = torch.tensor([0.0, 1.5, 3.0]).reshape(1, 1, 3)
     assert result.shape == value.shape
     torch.testing.assert_close(result, expected.expand_as(value))
+
+
+def test_jump_relu_encoder_matches_gemma_scope_formula(tmp_path: Path) -> None:
+    path = tmp_path / "params.npz"
+    np.savez(
+        path,
+        W_enc=np.array([[1.0, -1.0], [2.0, 1.0]], dtype=np.float32),
+        b_enc=np.array([0.0, 1.0], dtype=np.float32),
+        threshold=np.array([1.0, 2.0], dtype=np.float32),
+    )
+    encoder = load_gemma_scope_encoder(path, expected_width=2, expected_d_in=2)
+    activation = torch.tensor([[1.0, 0.0], [0.0, 1.0]])
+
+    # pre = x @ W_enc + b_enc; JumpReLU keeps pre only above threshold.
+    torch.testing.assert_close(
+        encoder.encode(activation),
+        torch.tensor([[0.0, 0.0], [2.0, 0.0]]),
+    )
+
+
+def test_decoder_hook_can_limit_steering_to_prompt_or_generated_calls(tmp_path: Path) -> None:
+    path = tmp_path / "params.npz"
+    decoder = np.zeros((8, 3), dtype=np.float32)
+    decoder[1] = [1, 2, 3]
+    np.savez(path, W_dec=decoder)
+    sae = load_gemma_scope_decoder(path, expected_width=8)
+
+    prompt_hook = _make_decoder_hook(sae, [SAEFeature(1, 1)], steer_position="prompt")
+    generated_hook = _make_decoder_hook(sae, [SAEFeature(1, 1)], steer_position="generated")
+    prompt = torch.zeros(1, 4, 3)
+    step = torch.zeros(1, 1, 3)
+    expected = torch.tensor([1.0, 2.0, 3.0])
+    torch.testing.assert_close(prompt_hook(prompt), expected.reshape(1, 1, 3).expand_as(prompt))
+    torch.testing.assert_close(prompt_hook(step), step)
+    torch.testing.assert_close(generated_hook(prompt), prompt)
+    torch.testing.assert_close(generated_hook(step), expected.reshape(1, 1, 3))
 
 
 def test_gemma_feature_index_range_and_presets() -> None:

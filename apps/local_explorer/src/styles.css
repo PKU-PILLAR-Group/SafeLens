@@ -1154,7 +1154,11 @@
 .sae-demo-controls textarea { resize: vertical; padding: 9px 10px; line-height: 1.45; }
 .sae-demo-controls input { height: 34px; padding: 0 9px; }
 .sae-demo-section-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; color: #294d44; font-size: 13px; }
+.sae-demo-heading-actions { display: flex; align-items: center; gap: 7px; }
 .sae-add-feature, .sae-demo-run { display: inline-flex; align-items: center; justify-content: center; gap: 7px; border: 1px solid #168277; border-radius: 5px; background: #168277; color: #fff; font: inherit; font-size: 12px; font-weight: 750; cursor: pointer; }
+.sae-scan-feature { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 30px; padding: 0 9px; border: 1px solid #b7d3cc; border-radius: 5px; background: #f5fbf9; color: #28766a; font: inherit; font-size: 11px; font-weight: 750; cursor: pointer; }
+.sae-scan-feature:hover { border-color: #45a297; background: #eaf6f2; }
+.sae-scan-feature:disabled { cursor: wait; opacity: .58; }
 .sae-add-feature { min-height: 30px; padding: 0 9px; }
 .sae-add-feature:hover, .sae-demo-run:hover { background: #116e65; }
 .sae-demo-presets { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 7px; }
@@ -1167,6 +1171,21 @@
 .sae-demo-empty { margin: 0; padding: 12px; border: 1px dashed #cfdcd7; color: #7a8c86; font-size: 12px; text-align: center; }
 .sae-demo-feature-row { display: grid; grid-template-columns: 1fr 1fr 32px; align-items: end; gap: 8px; padding: 9px; border: 1px solid #dce8e3; border-radius: 5px; background: #fbfdfc; }
 .sae-demo-feature-row .icon-action { width: 32px; height: 34px; }
+.sae-demo-scan { display: grid; gap: 8px; padding-top: 2px; }
+.sae-demo-scan > header { display: flex; align-items: center; justify-content: space-between; color: #527269; font-size: 11px; }
+.sae-demo-scan > header span { color: #91a09b; font-size: 10px; }
+.sae-demo-scan-list { display: grid; gap: 5px; max-height: 300px; overflow: auto; }
+.sae-demo-scan-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px; width: 100%; padding: 8px 9px; border: 1px solid #dce8e3; border-radius: 5px; background: #fbfdfc; color: #31574e; text-align: left; cursor: pointer; }
+.sae-demo-scan-row:hover { border-color: #79b9ac; background: #f0faf7; }
+.sae-demo-scan-main, .sae-demo-scan-values { display: grid; gap: 2px; min-width: 0; }
+.sae-demo-scan-main { grid-template-columns: auto minmax(0, 1fr); align-items: baseline; column-gap: 6px; }
+.sae-demo-scan-main strong { color: #168277; font-size: 11px; }
+.sae-demo-scan-main em { overflow: hidden; color: #45645b; font-size: 11px; font-style: normal; text-overflow: ellipsis; white-space: nowrap; }
+.sae-demo-scan-main small, .sae-demo-scan-values small { color: #899b94; font-size: 9px; }
+.sae-demo-scan-values { justify-items: end; }
+.sae-demo-scan-values b { color: #1c796a; font-size: 12px; }
+.sae-demo-steer-mode { display: grid; grid-template-columns: minmax(0, 1fr) 112px; gap: 9px; }
+.sae-demo-steer-mode select { width: 100%; height: 34px; padding: 0 8px; border: 1px solid #cedbd6; border-radius: 5px; background: #fbfdfc; color: #22332e; font: inherit; font-size: 12px; }
 .sae-demo-generation-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 9px; }
 .sae-demo-run { min-height: 38px; }
 .sae-demo-runtime, .sae-demo-error, .sae-demo-download { margin: -7px 0 0; font-size: 11px; }

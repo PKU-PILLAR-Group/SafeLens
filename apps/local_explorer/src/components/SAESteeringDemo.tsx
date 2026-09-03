@@ -1,12 +1,14 @@
 import { useEffect, useMemo, useState } from "react";
-import { ExternalLink, Plus, RotateCcw, Send, Trash2, X } from "lucide-react";
+import { ExternalLink, Plus, RotateCcw, Search, Send, Trash2, X } from "lucide-react";
 
 import {
   fetchSAESteeringConfig,
+  scanSAESteering,
   submitSAESteering,
   type SAESteeringConfig,
   type SAESteeringFeature,
-  type SAESteeringResponse
+  type SAESteeringResponse,
+  type SAESteeringScan
 } from "../api/explorerClient";
 
 const DEFAULT_PROMPT = "Explain how to build a safe and helpful AI assistant.";
@@ -22,6 +24,10 @@ export function SAESteeringDemo({ onBack }: { onBack?: () => void }) {
   const [result, setResult] = useState<SAESteeringResponse | null>(null);
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [scan, setScan] = useState<SAESteeringScan | null>(null);
+  const [scanRunning, setScanRunning] = useState(false);
+  const [steerPosition, setSteerPosition] = useState<"all" | "prompt" | "generated" | "prompt_position">("all");
+  const [promptPosition, setPromptPosition] = useState(0);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -52,12 +58,31 @@ export function SAESteeringDemo({ onBack }: { onBack?: () => void }) {
     setFeatures((current) => current.map((feature, index) => index === position ? { ...feature, ...patch } : feature));
   }
 
+  async function scanPrompt() {
+    if (!prompt.trim() || scanRunning) return;
+    setScanRunning(true);
+    setError(null);
+    try {
+      setScan(await scanSAESteering({ prompt: prompt.trim(), limit: 12 }));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "SAE activation scan failed.");
+    } finally {
+      setScanRunning(false);
+    }
+  }
+
+  function selectScannedFeature(feature: SAESteeringScan["features"][number]) {
+    setFeatures([{ featureIndex: feature.featureIndex, strength: feature.suggestedStrength }]);
+    setResult(null);
+    setError(null);
+  }
+
   async function run() {
     if (!canRun) return;
     setRunning(true);
     setError(null);
     try {
-      setResult(await submitSAESteering({ prompt: prompt.trim(), features, maxNewTokens, temperature, seed }));
+      setResult(await submitSAESteering({ prompt: prompt.trim(), features, maxNewTokens, temperature, seed, steerPosition, promptPosition: steerPosition === "prompt_position" ? promptPosition : null }));
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "SAE steering failed.");
     } finally {
@@ -79,7 +104,7 @@ export function SAESteeringDemo({ onBack }: { onBack?: () => void }) {
       <div className="sae-demo-layout">
         <section className="sae-demo-controls surface" aria-label="SAE steering controls">
           <label className="sae-demo-prompt"><span>Prompt</span><textarea value={prompt} rows={5} onChange={(event) => setPrompt(event.target.value)} /></label>
-          <div className="sae-demo-section-heading"><strong>Demo features</strong><button type="button" className="sae-add-feature" onClick={addFeature}><Plus size={15} /> Add feature</button></div>
+          <div className="sae-demo-section-heading"><strong>Features</strong><div className="sae-demo-heading-actions"><button type="button" className="sae-scan-feature" disabled={scanRunning || !prompt.trim()} onClick={() => void scanPrompt()}><Search size={15} /> {scanRunning ? "Scanning..." : "Scan prompt"}</button><button type="button" className="sae-add-feature" onClick={addFeature}><Plus size={15} /> Add feature</button></div></div>
           <div className="sae-demo-presets" role="list" aria-label="GemmaScope demo presets">
             {(config?.presets ?? []).map((preset) => (
               <button type="button" key={preset.id} className={features.some((feature) => feature.featureIndex === preset.featureIndex) ? "active" : ""} onClick={() => loadPreset(preset)}>
@@ -97,6 +122,8 @@ export function SAESteeringDemo({ onBack }: { onBack?: () => void }) {
               </div>
             ))}
           </div>
+          {scan && <section className="sae-demo-scan" aria-label="Prompt feature activations"><header><strong>Active features</strong><span>{scan.tokens.length} prompt tokens</span></header><div className="sae-demo-scan-list">{scan.features.map((feature) => <button type="button" key={feature.featureIndex} className="sae-demo-scan-row" onClick={() => selectScannedFeature(feature)}><span className="sae-demo-scan-main"><strong>F{feature.featureIndex}</strong><em>{feature.label}</em><small>peak {feature.peakTokenText || "token"}</small></span><span className="sae-demo-scan-values"><b>{feature.maxActivation.toFixed(2)}</b><small>prompt activation</small><small>NP max {feature.maxActApprox == null ? "n/a" : feature.maxActApprox.toFixed(2)} · steer {feature.vectorDefaultSteerStrength == null ? "n/a" : feature.vectorDefaultSteerStrength.toFixed(0)}</small></span></button>)}</div></section>}
+          <div className="sae-demo-steer-mode"><label><span>Steer scope</span><select value={steerPosition} onChange={(event) => setSteerPosition(event.target.value as typeof steerPosition)}><option value="all">Prompt and generated tokens</option><option value="prompt">Prompt tokens only</option><option value="generated">Generated tokens only</option><option value="prompt_position">One prompt position</option></select></label>{steerPosition === "prompt_position" && <label><span>Prompt position</span><input type="number" min={0} value={promptPosition} onChange={(event) => setPromptPosition(clampInt(event.target.value, 0, 4096))} /></label>}</div>
           <div className="sae-demo-generation-grid">
             <label><span>New tokens</span><input type="number" min={1} max={512} value={maxNewTokens} onChange={(event) => setMaxNewTokens(clampInt(event.target.value, 1, 512))} /></label>
             <label><span>Temperature</span><input type="number" min={0} max={2} step={0.1} value={temperature} onChange={(event) => setTemperature(clampFloat(event.target.value, 0, 2))} /></label>

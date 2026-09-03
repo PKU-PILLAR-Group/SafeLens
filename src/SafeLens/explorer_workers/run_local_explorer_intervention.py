@@ -18,7 +18,11 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from SafeLens.explorer_model import load_explorer_hf_model
-from SafeLens.explorer_sae import explorer_sae_converter, neuronpedia_feature_info
+from SafeLens.explorer_sae import (
+    explorer_sae_converter,
+    load_local_gemma_scope_sae,
+    neuronpedia_feature_info,
+)
 from SafeLens.sae_profiles import get_sae_profile
 from SafeLens.utils import HuggingFaceModelWrapper
 
@@ -366,11 +370,8 @@ def _load_sae(
 ) -> Any:
     try:
         from sae_lens import SAE
-    except ImportError as exc:
-        raise RuntimeError(
-            "SAE Lens is required for Gemma Scope interventions. Install SafeLens with "
-            "`pip install -e '.[sae]'`."
-        ) from exc
+    except ImportError:
+        SAE = None
 
     model = getattr(wrapper, "model", None)
     if model is None:
@@ -379,12 +380,36 @@ def _load_sae(
         model_device = str(next(model.parameters()).device)
     except (AttributeError, StopIteration) as exc:
         raise RuntimeError("Could not determine the base model device for SAE loading.") from exc
-    loaded = SAE.from_pretrained(
-        release=release,
-        sae_id=sae_id,
-        device=model_device,
-        converter=explorer_sae_converter(release),
-    )
+    if SAE is None:
+        try:
+            model_dtype = next(model.parameters()).dtype
+        except (AttributeError, StopIteration):
+            model_dtype = None
+        return load_local_gemma_scope_sae(
+            model_name=expected_model_name,
+            release=release,
+            sae_id=sae_id,
+            device=model_device,
+            dtype=model_dtype,
+        )
+    try:
+        loaded = SAE.from_pretrained(
+            release=release,
+            sae_id=sae_id,
+            device=model_device,
+            converter=explorer_sae_converter(release),
+        )
+    except Exception:
+        # Canonical Gemma Scope IDs are also distributed as plain public
+        # checkpoints.  Prefer that local source when an SAE Lens registry
+        # does not know a custom release name.
+        return load_local_gemma_scope_sae(
+            model_name=expected_model_name,
+            release=release,
+            sae_id=sae_id,
+            device=model_device,
+            dtype=getattr(next(model.parameters()), "dtype", None),
+        )
     sae = loaded[0] if isinstance(loaded, tuple) else loaded
     metadata = getattr(getattr(sae, "cfg", None), "metadata", None)
     recorded_model = getattr(metadata, "model_name", None) or getattr(
