@@ -100,6 +100,22 @@ checkpoint is the 16k, L0-small variant). This profile requires the matching
 Gemma base model and the optional `sae` dependency; Gemma Scope dictionaries
 must not be used with Qwen or another base model.
 
+## Gemma-2-9B-it Neuronpedia SAE steering
+
+The Explorer conversation `SAE` workbench also supports the public
+Neuronpedia-style steering presets for `google/gemma-2-9b-it`. The presets use
+the canonical Gemma Scope residual-stream dictionaries at layers 9, 20, and 31
+and keep the existing **Find active features** scan available for prompt-driven
+feature discovery. Select `gemma-2-9b-it` in the chat model picker, run a prompt,
+and open `SAE`; there is no separate steering page.
+
+The real-model installation requires the `models` and `sae` extras in addition
+to `explorer`. Checkpoint paths, lazy downloads, GPU placement, and the ten
+available modes (Cats, Chinese, Pirate, Shakespeare, Poetry, San Francisco,
+Positivity, Negativity, Music, and British English) are documented in the
+[Local Explorer setup guide](explorer_setup.md) and [Gemma Scope intervention
+reference](gemma_scope_intervention.md).
+
 The `huggingface`, `modelscope`, and `local` sources can load many
 Transformers-compatible models beyond the explicit lists above.
 

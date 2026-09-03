@@ -5,11 +5,15 @@ workspace described in `docs/local_explorer_plan.md`.
 
 ## Quick Start
 
+For the canonical, fresh-checkout installation and operations guide, see
+[`docs/explorer_setup.md`](../../docs/explorer_setup.md). The commands below are
+the short version for working from this directory.
+
 The production frontend is bundled in the Python package. From the repository
 root, launch the complete web application and API with one command:
 
 ```bash
-python -m pip install -e ".[explorer]"
+python -m pip install -e ".[explorer,models,sae,attribution,nla,jlens]"
 safelens explorer --artifact-root outputs/local-explorer
 ```
 
@@ -17,14 +21,14 @@ The browser opens `http://127.0.0.1:7860`. Node.js is not needed to run the
 packaged application. Use `safelens-explorer` as an equivalent standalone
 entry point, or add `--no-browser` for a headless machine.
 
-The lightweight install includes all visualization components, the artifact
-library, and job APIs. Executing real-model Prompt, Attribution, NLA, J-Lens,
-Patching, and Intervention jobs requires the corresponding ML dependencies.
-For the complete local job surface, install the extras before launching the
-server:
+The complete install above includes the visualization components, artifact
+library, and real-model Prompt, SAE, Attribution, NLA, J-Lens, Patching, and
+Intervention jobs. For a viewer-only install with bundled artifacts, use the
+smaller `.[explorer]` extra instead. If you add extras after starting the
+server, restart the Explorer process:
 
 ```bash
-python -m pip install -e ".[explorer,models,attribution,nla,jlens]"
+python -m pip install -e ".[explorer,models,sae,attribution,nla,jlens]"
 ```
 
 `Attribution` uses Captum from the `attribution` extra. If the button remains
@@ -293,18 +297,19 @@ safety classifier. In particular:
 Hover a provenance row or heatmap cell to inspect the metric meaning and source
 cache key. Exported evidence JSON includes the complete provenance block.
 
-## Gemma-2-9B-it SAE steering demo
+## Gemma-2-9B-it SAE workbench
 
-The standalone demo is available at `http://127.0.0.1:7860/sae-steer` after
-starting the Explorer. It uses the canonical GemmaScope `layer_9/width_131k`
-dictionary (`blocks.9.hook_resid_post`) and accepts multiple decoder features.
-The old Gemma-3-270M Explorer SAE profile remains available in the Feature
-workbench for legacy/debug runs.
+SAE steering is integrated into the conversation `SAE` workbench. There is no
+separate `/sae-steer` page. Choose `gemma-2-9b-it`, run a prompt, click `SAE`,
+and select either `Find active features` or a `Neuronpedia mode`. The preset
+selector is disabled for non-Gemma-2-9B-it runs. The public modes are Cats,
+Chinese, Pirate, Shakespeare, Poetry, San Francisco, Positivity, Negativity,
+Music, and British English.
 
 Install the model/SAE runtime and download the checkpoint:
 
 ```bash
-python -m pip install -e ".[explorer,models]"
+python -m pip install -e ".[explorer,models,sae]"
 python scripts/download_gemma_scope_9b_it_sae.py \
   --output /ssd/yqy/cache/safelens/gemma-scope-9b-it-res/layer_9/width_131k/average_l0_121/params.npz
 ```
@@ -314,15 +319,17 @@ Configure the local model, SAE path, device, and dtype before launching:
 ```bash
 export SAFELENS_GEMMA_2_9B_IT_MODEL_PATH=/ssd/models/Gemma2-9b-it
 export SAFELENS_GEMMA_SCOPE_9B_IT_SAE_PATH=/ssd/yqy/cache/safelens/gemma-scope-9b-it-res/layer_9/width_131k/average_l0_121/params.npz
-export SAFELENS_GEMMA_SAE_DEVICE=cuda
-export SAFELENS_GEMMA_SAE_DTYPE=bfloat16
+export SAFELENS_GEMMA_SAE_DEVICE=auto
+# Leave SAFELENS_GEMMA_SAE_DTYPE unset for automatic bfloat16/float32 selection.
 safelens explorer --artifact-root outputs/local-explorer --no-browser
 ```
 
-`SAFELENS_GEMMA_2_9B_IT_MODEL_PATH` may also be a Hugging Face model ID.
 The model and decoder are cached in the service process and reused across
-requests. `scripts/run_gemma_sae_steering.py` runs the same comparison without
-the web UI:
+requests. L20 and L31 Gemma Scope checkpoints are downloaded lazily for the
+corresponding Neuronpedia modes; set `SAFELENS_GEMMA_SAE_CACHE` to a parent
+cache containing `gemma-scope-9b-it-res/` to run fully offline. The
+`scripts/run_gemma_sae_steering.py` command remains available for API/CLI
+compatibility, but the supported user workflow is the integrated workbench:
 
 ```bash
 python scripts/run_gemma_sae_steering.py "Write a short greeting" \

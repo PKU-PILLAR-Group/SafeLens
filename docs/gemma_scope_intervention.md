@@ -1,7 +1,7 @@
 # Gemma Scope SAE intervention
 
-SafeLens exposes Gemma Scope 2 features as a separate `sae_feature`
-intervention. The first supported profile is:
+SafeLens exposes Gemma Scope 2 features through the integrated Explorer `SAE`
+workbench as a `sae_feature` intervention. The first supported profile is:
 
 ```text
 base model: google/gemma-3-270m-it
@@ -62,9 +62,13 @@ single next-token logit.
 ## Install and run
 
 ```bash
-pip install -e '.[sae,explorer]'
-python -m SafeLens.explorer_api --host 127.0.0.1 --port 7860
+python -m pip install -e ".[explorer,models,sae,attribution,nla,jlens]"
+safelens explorer --artifact-root outputs/local-explorer --no-browser
 ```
+
+For the complete fresh-checkout procedure, including frontend staging, model
+cache layout, GPU/CPU selection, remote/container deployment, and troubleshooting,
+see [`docs/explorer_setup.md`](explorer_setup.md).
 
 SafeLens first uses an available local Hugging Face snapshot and can fall back
 to the configured ModelScope cache for both the Gemma base model and Gemma

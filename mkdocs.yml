@@ -12,6 +12,7 @@ nav:
   - Configuration: configuration.md
   - Supported Models: supported_models.md
   - Gemma Scope SAE Intervention: gemma_scope_intervention.md
+  - Local Explorer Setup: explorer_setup.md
   - NLA Research Notes: nla_research.md
   - Local Explorer Plan: local_explorer_plan.md
   - Project Delivery Timeline: project_delivery_timeline.md

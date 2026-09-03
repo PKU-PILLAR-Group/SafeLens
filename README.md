@@ -220,11 +220,12 @@ print(report.summary)
 ## Local Explorer
 
 The interactive visualization workspace ships inside the Python package. From a
-source checkout, install the lightweight server extra and start one process:
+source checkout, install the complete real-model job surface and start one
+process:
 
 ```bash
-python -m pip install -e ".[explorer]"
-safelens explorer --artifact-root outputs/local-explorer
+python -m pip install -e ".[explorer,models,sae,attribution,nla,jlens]"
+safelens explorer --artifact-root outputs/local-explorer --no-browser
 ```
 
 SafeLens opens `http://127.0.0.1:7860`. The React application, artifact API,
@@ -233,11 +234,12 @@ runtime. The bundled example is immediately available, and compact
 `*.explorer.json` files placed under the artifact root appear in the Run
 Library.
 
-Real-model Prompt, Attribution, NLA, J-Lens, Patching, and Intervention jobs also need
-their model dependencies:
+The lightweight `.[explorer]` install is enough for the viewer and bundled
+artifacts. Real-model Prompt, Attribution, NLA, J-Lens, Patching, and
+Intervention jobs need their corresponding extras:
 
 ```bash
-python -m pip install -e ".[explorer,models,attribution,nla,jlens]"
+python -m pip install -e ".[explorer,models,sae,attribution,nla,jlens]"
 ```
 
 Start the production bundle after installing those extras:
@@ -247,11 +249,13 @@ safelens explorer --artifact-root outputs/local-explorer --no-browser
 ```
 
 The `attribution` extra provides Captum for the **Run attribution** action. If
-the process was started with only `.[explorer]`, the viewer still loads but a
-real attribution job cannot run; install the complete command above and restart
+the process was started with only `.[explorer]`, the viewer still loads but real
+model jobs may be unavailable; install the complete command above and restart
 the process. Explorer automatically uses `cuda:0` when CUDA is available and
-falls back to CPU otherwise. Use `SAFELENS_EXPLORER_JOB_DEVICE=cpu` or
-`SAFELENS_EXPLORER_JOB_DEVICE=cuda:1` for an explicit override.
+falls back to CPU otherwise. Use `SAFELENS_EXPLORER_JOB_DEVICE=auto`, `cpu`, or
+`cuda:1` for an explicit override. See the complete [Local Explorer setup
+guide](docs/explorer_setup.md) for model downloads, Gemma SAE setup, frontend
+staging, remote deployment, health checks, and troubleshooting.
 
 J-Lens uses a fitted, model-specific Jacobian checkpoint. Explorer registers the
 public Neuronpedia checkpoint for `Qwen/Qwen2.5-7B-Instruct` (layers 0-26) and
@@ -285,7 +289,7 @@ SafeLens is currently installed from source.
 | HuggingFace, local, Qwen3 Dense, TransformerLens-compatible wrappers | `python -m pip install -e ".[models]" --no-build-isolation` |
 | ModelScope wrapper | `python -m pip install -e ".[modelscope]" --no-build-isolation` |
 | Local Explorer | `python -m pip install -e ".[explorer]"` |
-| Explorer with real-model jobs | `python -m pip install -e ".[explorer,models,attribution,nla,jlens]"` |
+| Explorer with real-model jobs | `python -m pip install -e ".[explorer,models,sae,attribution,nla,jlens]"` |
 
 Recommended isolated setup:
 
@@ -633,6 +637,7 @@ src/SafeLens/
 | Topic | Link |
 | --- | --- |
 | Documentation site | <https://pku-pillar-group.github.io/SafeLens/> |
+| Explorer setup and operations | [`docs/explorer_setup.md`](docs/explorer_setup.md) |
 | Configuration | [`docs/configuration.md`](docs/configuration.md) |
 | Development guide | [`docs/development.md`](docs/development.md) |
 | Add a model adapter | [`docs/guides/add_model_adapter.md`](docs/guides/add_model_adapter.md) |
