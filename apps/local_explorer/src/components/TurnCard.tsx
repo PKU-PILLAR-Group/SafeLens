@@ -26,6 +26,9 @@ export interface TurnView {
   jobId: string | null;
   status: "pending" | "ready" | "error" | "cancelled";
   errorMessage?: string;
+  jobProgress?: number;
+  jobStage?: string;
+  jobDetail?: string;
   startedAt: string;
 }
 
@@ -92,9 +95,9 @@ export function TurnCard({
             </>
           ) : (
             <div className="chat-job-progress">
-              <span><LoaderCircle size={16} /> Running the analysis...</span>
-              <i><b style={{ width: `${active ? 50 : 4}%` }} /></i>
-              <small>{active ? "in progress" : "queued"}</small>
+              <span><LoaderCircle size={16} /> {turn.jobDetail || "Running the analysis..."}</span>
+              <i><b style={{ width: `${active ? (turn.jobProgress ?? 2) : 4}%` }} /></i>
+              <small>{active ? `${turn.jobStage || "in progress"} · ${turn.jobProgress ?? 0}%` : "queued"}</small>
               {active && <button aria-label="Cancel analysis" onClick={onCancel}><CircleStop size={16} /></button>}
               {turn.status === "cancelled" && (
                 <button aria-label="Retry analysis" title="Retry analysis" onClick={onRetry}>

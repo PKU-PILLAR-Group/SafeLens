@@ -3,7 +3,9 @@ import { z } from "zod";
 import { explorerRunSchema } from "../schemas/explorerArtifact";
 import type { ExplorerRun } from "../types";
 
-const API_BASE = "/api";
+// Keep API calls relative so the app also works when mounted below a proxy
+// prefix (for example `/v1/proxy/7860/`) instead of at the domain root.
+const API_BASE = "./api";
 
 const remoteSummarySchema = z.object({
   runId: z.string().min(1),

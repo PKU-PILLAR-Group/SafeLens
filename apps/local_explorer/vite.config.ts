@@ -3,6 +3,9 @@ import react from "@vitejs/plugin-react";
 
 export default defineConfig({
   plugins: [react()],
+  // The Explorer is often served below a platform proxy prefix such as
+  // `/v1/proxy/7860/`, so assets must resolve relative to the current page.
+  base: "./",
   build: {
     rollupOptions: {
       output: {

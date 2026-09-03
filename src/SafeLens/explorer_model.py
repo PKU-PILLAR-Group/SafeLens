@@ -43,6 +43,22 @@ def _configured_local_model_path(model_id: str) -> Path | None:
             path = Path(candidate)
             if path.is_dir():
                 return path
+    # Research workspaces commonly keep downloaded Hugging Face snapshots in a
+    # shared model directory rather than the per-job cache. Discover those
+    # directories so Explorer jobs can run offline without copying multi-GB
+    # checkpoints or requiring a JSON environment override.
+    model_roots = (
+        Path("/workspace/model"),
+        Path("/workspace/models"),
+        Path("/ssd/models"),
+        Path.cwd() / "models",
+    )
+    directory_names = (model_id.replace("/", "--"), model_id.rsplit("/", 1)[-1])
+    for root in model_roots:
+        for name in directory_names:
+            candidate = root / name
+            if candidate.is_dir() and (candidate / "config.json").is_file():
+                return candidate
     return None
 
 

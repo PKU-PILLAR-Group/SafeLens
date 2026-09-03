@@ -81,6 +81,21 @@ export function useTurnManager({
 
   useEffect(() => {
     if (!runner.job || !activeTurnId) return;
+    setTurns((current) => current.map((turn) =>
+      turn.id === activeTurnId
+        ? {
+            ...turn,
+            jobId: runner.job!.id,
+            jobProgress: runner.job!.progress,
+            jobStage: runner.job!.stage,
+            jobDetail: runner.job!.detail
+          }
+        : turn
+    ));
+  }, [activeTurnId, runner.job]);
+
+  useEffect(() => {
+    if (!runner.job || !activeTurnId) return;
     if (runner.job.status === "cancelled") {
       setTurns((current) => current.map((turn) =>
         turn.id === activeTurnId
@@ -103,6 +118,9 @@ export function useTurnManager({
       prompt,
       run: null,
       jobId: null,
+      jobProgress: 0,
+      jobStage: "queued",
+      jobDetail: "Waiting for the local model worker.",
       status: "pending",
       startedAt: new Date().toISOString()
     };
