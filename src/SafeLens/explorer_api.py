@@ -2444,7 +2444,9 @@ def _jlens_preflight(
         except (ImportError, KeyError, OSError, TypeError, ValueError) as exc:
             artifact_error = f"The local lens artifact is invalid: {exc}."
     checks = {
-        "Install the SafeLens J-Lens extra before running this analysis.": package_installed,
+        "Install the pinned J-Lens package before running this analysis: "
+        'python -m pip install "jlens @ https://codeload.github.com/anthropics/'
+        'jacobian-lens/tar.gz/581d398613e5602a5af361e1c34d3a92ea82ba8e"': package_installed,
         "The selected model is not enabled for local jobs.": model_allowed,
         f"Layer L{payload.layer} is not available in the source Run.": layer_available,
         "The selected token position is outside the source prompt.": position_valid,

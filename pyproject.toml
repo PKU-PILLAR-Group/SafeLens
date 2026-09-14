@@ -66,8 +66,11 @@ nla = [
   "torch>=2",
   "transformers>=5.8"
 ]
+# The `jlens` package itself is not published on PyPI, so this extra only
+# installs its runtime dependencies. Install the pinned Anthropic build in a
+# separate step (see README "Local Explorer"):
+#   pip install "jlens @ https://codeload.github.com/anthropics/jacobian-lens/tar.gz/581d398613e5602a5af361e1c34d3a92ea82ba8e"
 jlens = [
-  "jlens @ https://codeload.github.com/anthropics/jacobian-lens/tar.gz/581d398613e5602a5af361e1c34d3a92ea82ba8e",
   "huggingface-hub>=0.24",
   "numpy>=1.23",
   "torch>=2",

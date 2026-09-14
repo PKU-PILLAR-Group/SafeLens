@@ -16,7 +16,8 @@ cd SafeLens
 python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install --upgrade pip
-python -m pip install -e ".[explorer,models,sae,attribution,nla,jlens]"
+python -m pip install -e ".[explorer,models,modelscope,sae,attribution,nla,jlens,viz]"
+python -m pip install "jlens @ https://codeload.github.com/anthropics/jacobian-lens/tar.gz/581d398613e5602a5af361e1c34d3a92ea82ba8e"
 ```
 
 The extras have deliberately separate responsibilities:
@@ -28,8 +29,13 @@ The extras have deliberately separate responsibilities:
 | `sae` | SAELens, Hugging Face Hub, and Gemma Scope SAE loading/downloads |
 | `attribution` | Captum Integrated Gradients |
 | `nla` | NLA artifact loading and reconstruction jobs |
-| `jlens` | Jacobian Lens jobs and the pinned J-Lens checkpoint loader |
+| `jlens` | J-Lens runtime dependencies (install the pinned `jlens` package separately) |
 | `modelscope` | Optional ModelScope provider for supported Gemma 3 models |
+| `viz` | CircuitsVis HTML bridges for notebooks and demos |
+
+The `jlens` package is not published on PyPI. The `jlens` extra installs only its
+runtime dependencies, and the pinned Anthropic build above provides the package
+itself; install both lines before starting the server.
 
 For a viewer-only install, `python -m pip install -e ".[explorer]"` is enough.
 For the complete real-model workbench, install the command above and restart the

@@ -5,7 +5,7 @@ All notable changes to SafeLens will be documented in this file.
 The format follows Keep a Changelog, and this project aims to follow Semantic
 Versioning after the first public release.
 
-## [Unreleased]
+## [0.1.0] - 2026-09-14
 
 ### Added
 
@@ -20,15 +20,7 @@ Versioning after the first public release.
   deployment.
 - Open-source repository metadata, contribution guide, security policy,
   citation metadata, and GitHub issue and pull request templates.
-
-### Changed
-
-- No released changes yet.
-
-### Fixed
-
-- No released fixes yet.
-
-### Security
-
-- No released security updates yet.
+- Local Explorer workspace with packaged React frontend, artifact API, job API,
+  NLA/J-Lens/SAE/attribution/patching/intervention workflows, and Docker image.
+- TransformerLens-compatible naming, architecture bridge adapters, and
+  model-adapter registry inspection commands.
