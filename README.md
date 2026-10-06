@@ -630,6 +630,36 @@ finally:
     handle.remove()
 ```
 
+Paired PCA steering uses the top right singular vector of the uncentered
+positive-minus-negative activation differences. It sign-aligns the unit vector
+to the mean difference. The extraction and injection layers can be different:
+
+```python
+from SafeLens.steering import PCASteeringVector
+
+pca = PCASteeringVector.fit_pairs(
+    model,
+    positive_rows,
+    negative_rows,
+    layer="layer_32.resid_post",  # activation extraction layer
+)
+pca.save("pca_steering_vector.json")
+
+output = pca.generate(
+    model,
+    "Prompt to steer",
+    layer="layer_22.resid_post",  # injection layer
+    scale=310.0,
+    position="all",
+    do_sample=False,
+    max_new_tokens=8,
+)
+```
+
+For one labeled dataset, call `PCASteeringVector.fit(...)`. Set `pair_key` for
+explicit positive/negative pair matching, or omit it to pair the two classes in
+input order.
+
 ## Package Layout
 
 ```text

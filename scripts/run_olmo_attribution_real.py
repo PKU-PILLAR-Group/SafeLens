@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -19,10 +20,7 @@ from SafeLens.attribution import (
 from SafeLens.core.base import ModelLoadConfig
 from SafeLens.utils import build_model_wrapper
 
-DEFAULT_MODEL_PATH = Path(
-    "/workspace/cjh/projects/FlowManifold/models/huggingface.co/"
-    "allenai/Olmo-3-7B-Think-SFT/step45000"
-)
+DEFAULT_MODEL_PATH = os.environ.get("SAFELENS_OLMO_MODEL_PATH")
 DEFAULT_DATA_PATH = Path("/tmp/SafetyHeadAttribution/exp_data/maliciousinstruct.csv")
 
 
@@ -103,7 +101,12 @@ def main() -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--model-path", default=str(DEFAULT_MODEL_PATH))
+    parser.add_argument(
+        "--model-path",
+        default=DEFAULT_MODEL_PATH,
+        required=DEFAULT_MODEL_PATH is None,
+        help="Local OLMo checkpoint (or set SAFELENS_OLMO_MODEL_PATH).",
+    )
     parser.add_argument("--data-path", default=str(DEFAULT_DATA_PATH))
     parser.add_argument("--sample-index", type=int, default=0)
     parser.add_argument("--output-dir", default="test_reports/olmo_attribution_real")

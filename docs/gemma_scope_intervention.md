@@ -123,13 +123,11 @@ Download it with:
 
 ```bash
 python scripts/download_gemma_scope_9b_it_sae.py \
-  --output /ssd/yqy/cache/safelens/gemma-scope-9b-it-res/layer_9/width_131k/average_l0_121/params.npz
+  --output .cache/safelens/gemma-scope-9b-it-res/layer_9/width_131k/average_l0_121/params.npz
 ```
 
-On this server the model is `/ssd/models/Gemma2-9b-it` and the downloaded
-checkpoint is `/ssd/yqy/cache/safelens/gemma-scope-9b-it-res/layer_9/width_131k/average_l0_121/params.npz`.
 Set `SAFELENS_GEMMA_2_9B_IT_MODEL_PATH` and
-`SAFELENS_GEMMA_SCOPE_9B_IT_SAE_PATH` to these (or deployment-specific) paths,
+`SAFELENS_GEMMA_SCOPE_9B_IT_SAE_PATH` when using deployment-specific paths,
 then choose `SAFELENS_GEMMA_SAE_DEVICE` (`cpu` or `cuda`) and
 `SAFELENS_GEMMA_SAE_DTYPE` (`float32` or `bfloat16`). The service caches the
 model and decoder once per process. Each request can add one or more feature

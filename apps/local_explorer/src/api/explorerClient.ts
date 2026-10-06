@@ -1,11 +1,11 @@
 import { z } from "zod";
+import { APP_BASE_PATH } from "../appLocation";
 
 import { explorerRunSchema } from "../schemas/explorerArtifact";
 import type { ExplorerRun } from "../types";
 
-// Keep API calls relative so the app also works when mounted below a proxy
-// prefix (for example `/v1/proxy/7860/`) instead of at the domain root.
-const API_BASE = "./api";
+// Keep API calls under the mount path across all SPA screens.
+const API_BASE = `${APP_BASE_PATH}api`;
 
 const remoteSummarySchema = z.object({
   runId: z.string().min(1),
@@ -487,6 +487,14 @@ export const promptJobSchema = z.object({
   stage: z.string(),
   progress: z.number().int().min(0).max(100),
   detail: z.string(),
+  task: z.string().optional(),
+  groundTruth: z.string().optional(),
+  baselineSuccess: z.boolean().optional(),
+  steeredSuccess: z.boolean().optional(),
+  baselinePrediction: z.string().nullable().optional(),
+  steeredPrediction: z.string().nullable().optional(),
+  baselineLabel: z.string().optional(),
+  steeredLabel: z.string().optional(),
   createdAt: z.string(),
   updatedAt: z.string(),
   request: z.object({
@@ -524,12 +532,17 @@ const datasetMetricSchema = z.object({
 const datasetSampleSchema = z.object({
   id: z.string().min(1),
   category: z.string().min(1),
+  task: z.string().nullable().optional(),
+  source: z.string().nullable().optional(),
   prompt: z.string().nullable().optional(),
   cleanPrompt: z.string().nullable().optional(),
   corruptedPrompt: z.string().nullable().optional(),
   desiredPrompt: z.string().nullable().optional(),
   undesiredPrompt: z.string().nullable().optional(),
   targetText: z.string().nullable().optional(),
+  groundTruth: z.string().nullable().optional(),
+  expectedBehavior: z.string().nullable().optional(),
+  failureBehavior: z.string().nullable().optional(),
   expected: z.string().min(1)
 });
 
@@ -545,7 +558,7 @@ const datasetDefinitionSchema = z.object({
 });
 
 const datasetAlgorithmSchema = z.object({
-  id: z.enum(["steering", "patching"]),
+  id: z.enum(["pca_minus_neg", "mean_minus_neg"]),
   name: z.string().min(1),
   kind: z.literal("optimization"),
   description: z.string().min(1),
@@ -563,13 +576,22 @@ const datasetCatalogSchema = z.object({
 const datasetTestRowSchema = z.object({
   sampleId: z.string().min(1),
   category: z.string().min(1),
+  task: z.string().optional(),
   prompt: z.string(),
+  groundTruth: z.string().optional(),
   status: z.enum(["complete", "error"]),
   passed: z.boolean(),
   detail: z.string(),
   original: z.string().optional(),
   steered: z.string().optional(),
   patched: z.string().optional(),
+  baselinePrediction: z.string().nullable().optional(),
+  steeredPrediction: z.string().nullable().optional(),
+  baselineLabel: z.string().optional(),
+  steeredLabel: z.string().optional(),
+  baselineSuccess: z.boolean().optional(),
+  steeredSuccess: z.boolean().optional(),
+  steeringApplied: z.boolean().optional(),
   diagnostics: z.record(z.string(), z.unknown()).optional()
 });
 
@@ -578,7 +600,7 @@ const datasetTestResultSchema = z.object({
     id: z.string(), name: z.string(), version: z.string(), sampleCount: z.number().int()
   }),
   algorithm: z.object({
-    id: z.enum(["steering", "patching"]),
+    id: z.enum(["pca_minus_neg", "mean_minus_neg"]),
     name: z.string(),
     implementation: z.string()
   }),
@@ -593,15 +615,27 @@ const datasetTestResultSchema = z.object({
     seed: z.number().int().optional(),
     layer: z.number().int().optional(),
     requestedLayer: z.number().int().optional(),
+    sourceLayer: z.number().int().optional(),
+    requestedSourceLayer: z.number().int().optional(),
+    injectionLayer: z.number().int().optional(),
     component: z.string().optional(),
-    maxNewTokens: z.number().int().optional()
+    maxNewTokens: z.number().int().optional(),
+    positionMode: z.string().optional(),
+    baselineSamples: z.number().int().nonnegative().optional(),
+    steeredSamples: z.number().int().nonnegative().optional(),
+    taskConfigs: z.record(z.string(), z.unknown()).optional()
   }),
   metric: datasetMetricSchema.extend({
     passed: z.number().int().nonnegative(),
     completed: z.number().int().nonnegative(),
     errors: z.number().int().nonnegative(),
     accuracy: z.number().min(0).max(1),
-    meetsThreshold: z.boolean()
+    meetsThreshold: z.boolean(),
+    baselineSuccess: z.number().int().nonnegative().optional(),
+    baselineFailure: z.number().int().nonnegative().optional(),
+    failureToSuccess: z.number().int().nonnegative().optional(),
+    successToFailure: z.number().int().nonnegative().optional(),
+    tasks: z.record(z.string(), z.unknown()).optional()
   }),
   rows: z.array(datasetTestRowSchema)
 });
@@ -617,10 +651,11 @@ export const datasetTestJobSchema = z.object({
   updatedAt: z.string(),
   request: z.object({
     datasetId: z.string(),
-    algorithmId: z.enum(["steering", "patching"]),
+    algorithmId: z.enum(["pca_minus_neg", "mean_minus_neg"]),
     model: z.string(),
     sampleIds: z.array(z.string()),
     layer: z.number().int(),
+    sourceLayer: z.number().int().nullable().optional(),
     strength: z.number(),
     seed: z.number().int(),
     maxNewTokens: z.number().int()
@@ -1733,10 +1768,21 @@ async function jobResponseError(response: Response, fallbackCode: string) {
   let serverCode: string | undefined;
   try {
     const body = await response.json() as {
-      detail?: string | { code?: string; message?: string };
+      detail?: string | { code?: string; message?: string } | Array<{
+        loc?: Array<string | number>;
+        msg?: string;
+      }>;
     };
     if (typeof body.detail === "string") {
       message = body.detail;
+    } else if (Array.isArray(body.detail)) {
+      message = body.detail
+        .map((item) => {
+          const field = item.loc?.slice(1).join(".");
+          return [field, item.msg].filter(Boolean).join(": ");
+        })
+        .filter(Boolean)
+        .join("; ") || message;
     } else if (body.detail) {
       if (typeof body.detail.message === "string") message = body.detail.message;
       if (typeof body.detail.code === "string") serverCode = body.detail.code;

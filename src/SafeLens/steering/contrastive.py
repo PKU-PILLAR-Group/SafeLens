@@ -131,11 +131,12 @@ class ContrastiveSteeringVector:
         *,
         scale: float = 1.0,
         position: SteeringPosition = "all",
+        layer: LayerRef | None = None,
         remove_after: bool = True,
         **generation_kwargs: Any,
     ) -> Any:
         """Generate with a temporary steering hook."""
-        handle = self.apply(model, scale=scale, position=position)
+        handle = self.apply(model, scale=scale, position=position, layer=layer)
         try:
             return model.generate(prompt, **generation_kwargs)
         finally:

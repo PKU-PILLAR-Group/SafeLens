@@ -62,18 +62,18 @@ def _configured_local_model_path(model_id: str) -> Path | None:
         )
         if explicit:
             return Path(explicit).expanduser()
-        for candidate in ("/ssd/models/Gemma2-9b-it", "/ssd/models/gemma-2-9b-it"):
-            path = Path(candidate)
-            if path.is_dir():
-                return path
     # Research workspaces commonly keep downloaded Hugging Face snapshots in a
     # shared model directory rather than the per-job cache. Discover those
     # directories so Explorer jobs can run offline without copying multi-GB
     # checkpoints or requiring a JSON environment override.
-    model_roots = (
-        Path("/workspace/model"),
-        Path("/workspace/models"),
-        Path("/ssd/models"),
+    configured_roots = tuple(
+        Path(item).expanduser()
+        for item in os.environ.get("SAFELENS_MODEL_ROOTS", "").split(os.pathsep)
+        if item
+    )
+    model_roots = configured_roots + (
+        Path(__file__).resolve().parents[3] / "models",
+        Path.cwd().parent / "models",
         Path.cwd() / "models",
     )
     directory_names = (model_id.replace("/", "--"), model_id.rsplit("/", 1)[-1])

@@ -7,7 +7,6 @@ import {
   Database,
   ExternalLink,
   FileCheck2,
-  FlaskConical,
   LoaderCircle,
   Play,
   Square,
@@ -19,7 +18,6 @@ import {
   cancelDatasetTestJob,
   fetchDatasetCatalog,
   fetchDatasetTestJob,
-  fetchPromptOptions,
   submitDatasetTestJob,
   type DatasetAlgorithm,
   type DatasetDefinition,
@@ -27,19 +25,15 @@ import {
   type DatasetTestResult
 } from "../api/explorerClient";
 
-const DEFAULT_MODEL = "Qwen/Qwen2.5-7B-Instruct";
+const DEFAULT_MODEL = "google/gemma-2-9b-it";
 
 export function DatasetTestScreen({ onOpenChat }: { onOpenChat: () => void }) {
   const [datasets, setDatasets] = useState<DatasetDefinition[]>([]);
   const [algorithms, setAlgorithms] = useState<DatasetAlgorithm[]>([]);
-  const [algorithmId, setAlgorithmId] = useState<DatasetAlgorithm["id"]>("steering");
-  const [datasetId, setDatasetId] = useState("safelens-steering-v1");
+  const [algorithmId, setAlgorithmId] = useState<DatasetAlgorithm["id"]>("pca_minus_neg");
+  const [datasetId, setDatasetId] = useState("safelens-final-300-v1.1");
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
-  const [models, setModels] = useState([DEFAULT_MODEL]);
-  const [model, setModel] = useState(DEFAULT_MODEL);
-  const [layer, setLayer] = useState(12);
-  const [strength, setStrength] = useState(1);
-  const [maxNewTokens, setMaxNewTokens] = useState(24);
+  const model = DEFAULT_MODEL;
   const [job, setJob] = useState<DatasetTestJob | null>(null);
   const [catalogError, setCatalogError] = useState<string | null>(null);
   const [runError, setRunError] = useState<string | null>(null);
@@ -55,15 +49,10 @@ export function DatasetTestScreen({ onOpenChat }: { onOpenChat: () => void }) {
 
   useEffect(() => {
     const controller = new AbortController();
-    Promise.all([
-      fetchDatasetCatalog(controller.signal),
-      fetchPromptOptions(controller.signal)
-    ]).then(([catalog, options]) => {
+    fetchDatasetCatalog(controller.signal).then((catalog) => {
       setDatasets(catalog.datasets);
       setAlgorithms(catalog.algorithms);
-      setModels(options.models);
-      if (!options.models.includes(DEFAULT_MODEL)) setModel(options.models[0]);
-      const first = catalog.datasets.find((item) => item.id === "safelens-steering-v1") ?? catalog.datasets[0];
+      const first = catalog.datasets.find((item) => item.id === "safelens-final-300-v1.1") ?? catalog.datasets[0];
       setDatasetId(first.id);
       setSelectedIds(new Set(first.samples.map((sample) => sample.id)));
     }).catch((error) => {
@@ -127,10 +116,11 @@ export function DatasetTestScreen({ onOpenChat }: { onOpenChat: () => void }) {
         algorithmId: algorithm.id,
         model,
         sampleIds: dataset.samples.filter((item) => selectedIds.has(item.id)).map((item) => item.id),
-        layer,
-        strength,
+        layer: 22,
+        sourceLayer: null,
+        strength: 1,
         seed: 0,
-        maxNewTokens
+        maxNewTokens: 160
       });
       setJob(next);
     } catch (error) {
@@ -170,7 +160,7 @@ export function DatasetTestScreen({ onOpenChat }: { onOpenChat: () => void }) {
           <dl>
             <div><dt>Samples</dt><dd>{dataset?.samples.length ?? 0}</dd></div>
             <div><dt>Selected</dt><dd>{selectedIds.size}</dd></div>
-            <div><dt>Pass target</dt><dd>{formatPercent(dataset?.metric.threshold ?? 0)}</dd></div>
+            <div><dt>Repair rate</dt><dd>{formatPercent(dataset?.metric.threshold ?? 0)}</dd></div>
           </dl>
         </section>
 
@@ -218,8 +208,9 @@ export function DatasetTestScreen({ onOpenChat }: { onOpenChat: () => void }) {
                       >
                         {selectedIds.has(sample.id) ? <CheckSquare2 size={17} /> : <Square size={17} />}
                         <span>
-                          <small>{sample.id} / {sample.category}</small>
+                          <small>{sample.id} / {sample.task ?? sample.category} / {sample.source}</small>
                           <strong>{sample.prompt ?? sample.corruptedPrompt}</strong>
+                          {sample.groundTruth && <em>Ground truth: {sample.groundTruth}</em>}
                           {sample.cleanPrompt && <em>Clean: {sample.cleanPrompt}</em>}
                           {sample.desiredPrompt && <em>Toward: {sample.desiredPrompt}</em>}
                         </span>
@@ -244,7 +235,7 @@ export function DatasetTestScreen({ onOpenChat }: { onOpenChat: () => void }) {
                     className={item.id === algorithmId ? "active" : ""}
                     onClick={() => chooseAlgorithm(item)}
                   >
-                    {item.id === "steering" ? <FileCheck2 size={18} /> : <FlaskConical size={18} />}
+                    {item.id === "pca_minus_neg" ? <BrainCircuit size={18} /> : <FileCheck2 size={18} />}
                     <span><strong>{item.name}</strong><small>{item.implementation.replace(/_/g, " ")}</small></span>
                   </button>
                 ))}
@@ -262,14 +253,12 @@ export function DatasetTestScreen({ onOpenChat }: { onOpenChat: () => void }) {
                 <div className="dataset-metric-note">
                   <strong>{dataset.metric.name}</strong>
                   <p>{dataset.metric.definition}</p>
-                  <span>Required pass rate &gt; {formatPercent(dataset.metric.threshold)}</span>
+                  <span>Required repair rate ≥ {formatPercent(dataset.metric.threshold)}</span>
                 </div>
               )}
               <div className="dataset-run-controls">
-                <label className="wide"><span>Local model</span><select value={model} disabled={running} onChange={(event) => setModel(event.target.value)}>{models.map((item) => <option key={item} value={item}>{shortModelName(item)}</option>)}</select></label>
-                <label><span>Layer</span><input type="number" min={0} max={127} value={layer} disabled={running} onChange={(event) => setLayer(clampNumber(event.target.value, 0, 127))} /></label>
-                <label><span>Output tokens</span><input type="number" min={1} max={64} value={maxNewTokens} disabled={running} onChange={(event) => setMaxNewTokens(clampNumber(event.target.value, 1, 64))} /></label>
-                {algorithmId === "steering" && <label className="wide"><span>Steering strength <b>{strength.toFixed(1)}</b></span><input type="range" min={-5} max={5} step={0.5} value={strength} disabled={running} onChange={(event) => setStrength(Number(event.target.value))} /></label>}
+                <label className="wide"><span>Local model</span><select value={model} disabled><option value={DEFAULT_MODEL}>{shortModelName(DEFAULT_MODEL)}</option></select></label>
+                <p className="wide">The run first evaluates every selected sample without intervention, then applies steering only to baseline failures. Layer, alpha, and injection scope use the fixed final_300 protocol.</p>
               </div>
               <button className="dataset-run-button" disabled={running || !dataset || selectedIds.size === 0} onClick={runTest}>
                 {running ? <LoaderCircle size={18} className="spin" /> : <Play size={18} fill="currentColor" />}
@@ -319,7 +308,7 @@ function DatasetJobResults({
           <h2 id="dataset-results-title">{result.dataset.name}</h2>
           <p>
             {result.execution.model} / {result.execution.layer === undefined
-              ? "automatic layer"
+              ? "fixed task layers"
               : `L${result.execution.layer}`}
             {result.execution.requestedLayer !== undefined &&
               result.execution.requestedLayer !== result.execution.layer
@@ -335,10 +324,11 @@ function DatasetJobResults({
           <span>{result.metric.meetsThreshold ? "Threshold met" : "Below threshold"}</span>
         </div>
         <dl>
-          <div><dt>Passed</dt><dd>{result.metric.passed}</dd></div>
+          <div><dt>Baseline failures</dt><dd>{result.metric.baselineFailure ?? 0}</dd></div>
+          <div><dt>Repaired</dt><dd>{result.metric.failureToSuccess ?? 0}</dd></div>
           <div><dt>Completed</dt><dd>{result.metric.completed}</dd></div>
           <div><dt>Errors</dt><dd>{result.metric.errors}</dd></div>
-          <div><dt>Target</dt><dd>{formatPercent(result.metric.threshold)}</dd></div>
+          <div><dt>Repair target</dt><dd>{formatPercent(result.metric.threshold)}</dd></div>
         </dl>
       </header>
       <div className="dataset-result-toolbar">
@@ -374,7 +364,7 @@ function DatasetResultRow({ row, result }: {
       {(row.original !== undefined || modified !== undefined) && (
         <div className="dataset-output-compare">
           <div><span>Original</span><p>{row.original || "No visible continuation"}</p></div>
-          <div><span>{result.algorithm.id === "steering" ? "Steered" : "Patched"}</span><p>{modified || "No visible continuation"}</p></div>
+          <div><span>Steered</span><p>{row.steeringApplied === false ? "Not run (baseline successful)" : modified || "No visible continuation"}</p></div>
         </div>
       )}
       {row.diagnostics && (
@@ -394,12 +384,7 @@ function shortModelName(model: string) {
 }
 
 function formatPercent(value: number) {
-  return `${Math.round(value * 100)}%`;
-}
-
-function clampNumber(value: string, minimum: number, maximum: number) {
-  const parsed = Number.parseInt(value, 10);
-  return Math.min(maximum, Math.max(minimum, Number.isFinite(parsed) ? parsed : minimum));
+  return `${(value * 100).toFixed(2)}%`;
 }
 
 function formatKey(value: string) {

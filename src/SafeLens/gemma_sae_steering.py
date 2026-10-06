@@ -321,12 +321,7 @@ def _default_gemma_sae_path() -> str:
     candidates: list[Path] = []
     if configured_root:
         candidates.append(Path(configured_root).expanduser() / _GEMMA_9B_SAE_RELATIVE_PATH)
-    candidates.extend(
-        [
-            Path("/ssd/yqy/cache/safelens") / _GEMMA_9B_SAE_RELATIVE_PATH,
-            Path(DEFAULT_GEMMA_9B_SAE_PATH).expanduser(),
-        ]
-    )
+    candidates.append(Path(DEFAULT_GEMMA_9B_SAE_PATH).expanduser())
     default_path = candidates[-1]
     return str(next((path for path in candidates if path.is_file()), default_path))
 
@@ -344,12 +339,7 @@ def _gemma_scope_layer_path(layer: int) -> Path:
     configured_root = os.environ.get("SAFELENS_GEMMA_SAE_CACHE")
     if configured_root:
         candidates.append(Path(configured_root).expanduser() / relative)
-    candidates.extend(
-        [
-            Path("/ssd/yqy/cache/safelens") / relative,
-            Path(".cache/safelens") / relative,
-        ]
-    )
+    candidates.append(Path(".cache/safelens") / relative)
     # The layer-9 path may be explicitly overridden by the existing setting.
     if layer == GEMMA_SCOPE_9B_IT_LAYER:
         configured = os.environ.get("SAFELENS_GEMMA_SCOPE_9B_IT_SAE_PATH") or os.environ.get(

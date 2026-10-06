@@ -378,12 +378,7 @@ def _gemma_scope_9b_checkpoint_path(layer: int = 9) -> Path:
     configured_root = os.environ.get("SAFELENS_GEMMA_SAE_CACHE")
     if configured_root:
         candidates.append(Path(configured_root).expanduser() / relative)
-    candidates.extend(
-        [
-            Path("/ssd/yqy/cache/safelens") / relative,
-            Path(".cache/safelens") / relative,
-        ]
-    )
+    candidates.append(Path(".cache/safelens") / relative)
     return next((candidate for candidate in candidates if candidate.is_file()), candidates[-1])
 
 

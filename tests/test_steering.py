@@ -8,7 +8,12 @@ from typing import Any
 import pytest
 
 from SafeLens.core.base import Batch, HookFn, LayerRef, ModelWrapper
-from SafeLens.steering import ContrastiveSteeringVector, add_steering_vector
+from SafeLens.steering import (
+    ContrastiveSteeringVector,
+    PCASteeringVector,
+    add_steering_vector,
+    pca_direction_from_pairs,
+)
 
 
 def test_contrastive_steering_vector_fits_saves_and_loads(tmp_path: Path) -> None:
@@ -85,6 +90,75 @@ def test_add_steering_vector_range_is_noop_for_short_incremental_sequence() -> N
     patched = add_steering_vector(activation, [3.0, 4.0], position=(2, 4))
 
     assert torch.equal(patched, activation)
+
+
+def test_pca_direction_uses_uncentered_pairs_and_mean_orientation() -> None:
+    torch = pytest.importorskip("torch")
+
+    vector = pca_direction_from_pairs(
+        [torch.tensor([2.0, 1.0]), torch.tensor([4.0, 2.0])],
+        [torch.tensor([0.0, 1.0]), torch.tensor([0.0, 2.0])],
+    )
+
+    assert torch.allclose(vector, torch.tensor([1.0, 0.0]))
+    assert torch.allclose(vector.norm(), torch.tensor(1.0))
+
+
+def test_pca_steering_fits_pairs_saves_loads_and_overrides_injection_layer(
+    tmp_path: Path,
+) -> None:
+    torch = pytest.importorskip("torch")
+    model = _TextActivationModel()
+    steering = PCASteeringVector.fit_pairs(
+        model,
+        [{"text": "unsafe one"}, {"text": "unsafe two"}],
+        [{"text": "safe one"}, {"text": "safe two"}],
+        layer="source_layer",
+    )
+    path = tmp_path / "pca-steering.json"
+    steering.save(path)
+    loaded = PCASteeringVector.load(path)
+
+    assert loaded.metadata["method"] == "pca_minus_neg"
+    assert loaded.metadata["pair_count"] == 2
+    assert loaded.metadata["centered"] is False
+    assert torch.allclose(torch.as_tensor(loaded.vector).norm(), torch.tensor(1.0))
+    output = loaded.generate(model, "safe prompt", layer="injection_layer", scale=2.0)
+    expected = -2.0 + 2.0 / (2.0**0.5)
+    assert output == pytest.approx([expected, expected])
+    assert model._hooks == []
+
+
+def test_pca_steering_can_pair_labeled_rows_by_key() -> None:
+    model = _TextActivationModel()
+    dataset = [
+        {"text": "safe b", "label": 0, "pair": "b", "split": "train"},
+        {"text": "unsafe a", "label": 1, "pair": "a", "split": "train"},
+        {"text": "safe a", "label": 0, "pair": "a", "split": "train"},
+        {"text": "unsafe b", "label": 1, "pair": "b", "split": "train"},
+        {"text": "safe ignored", "label": 0, "pair": "c", "split": "test"},
+    ]
+
+    steering = PCASteeringVector.fit(
+        model,
+        dataset,
+        layer="layer_0.resid_post",
+        pair_key="pair",
+        train_split="train",
+    )
+
+    assert steering.metadata["pair_count"] == 2
+    assert steering.metadata["pairing"] == "key:pair"
+
+
+def test_pca_steering_rejects_incomplete_pairs() -> None:
+    with pytest.raises(ValueError, match="one positive and one negative"):
+        PCASteeringVector.fit(
+            _TextActivationModel(),
+            [{"text": "unsafe", "label": 1, "pair": "a"}],
+            layer="layer_0.resid_post",
+            pair_key="pair",
+        )
 
 
 class _Handle:

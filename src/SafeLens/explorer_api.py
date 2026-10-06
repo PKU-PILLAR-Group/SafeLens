@@ -204,12 +204,17 @@ class DatasetMetricResponse(BaseModel):
 class DatasetSampleResponse(BaseModel):
     id: str
     category: str
+    task: str | None = None
+    source: str | None = None
     prompt: str | None = None
     cleanPrompt: str | None = None
     corruptedPrompt: str | None = None
     desiredPrompt: str | None = None
     undesiredPrompt: str | None = None
     targetText: str | None = None
+    groundTruth: str | None = None
+    expectedBehavior: str | None = None
+    failureBehavior: str | None = None
     expected: str
 
 
@@ -225,7 +230,7 @@ class DatasetDefinitionResponse(BaseModel):
 
 
 class DatasetAlgorithmResponse(BaseModel):
-    id: Literal["steering", "patching"]
+    id: Literal["pca_minus_neg", "mean_minus_neg"]
     name: str
     kind: Literal["optimization"]
     description: str
@@ -242,13 +247,14 @@ class DatasetCatalogResponse(BaseModel):
 
 class DatasetTestRequest(BaseModel):
     datasetId: str = Field(min_length=1, max_length=128)
-    algorithmId: Literal["steering", "patching"]
-    model: str = DEFAULT_PROMPT_MODEL
-    sampleIds: list[str] = Field(default_factory=list, max_length=20)
+    algorithmId: Literal["pca_minus_neg", "mean_minus_neg"]
+    model: Literal["google/gemma-2-9b-it"] = "google/gemma-2-9b-it"
+    sampleIds: list[str] = Field(default_factory=list, max_length=300)
     layer: int = Field(default=12, ge=0, le=127)
-    strength: float = Field(default=1.0, ge=-20.0, le=20.0)
+    sourceLayer: int | None = Field(default=None, ge=0, le=127)
+    strength: float = Field(default=1.0, ge=-1_000.0, le=1_000.0)
     seed: int = Field(default=0, ge=0, le=2_147_483_647)
-    maxNewTokens: int = Field(default=24, ge=1, le=64)
+    maxNewTokens: int = Field(default=24, ge=1, le=256)
 
 
 class TokenizeRequest(BaseModel):

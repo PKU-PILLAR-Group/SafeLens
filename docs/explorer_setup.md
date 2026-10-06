@@ -112,8 +112,11 @@ Explorer resolves real models in this order:
 
 1. An explicit local directory from `SAFELENS_GEMMA_2_9B_IT_MODEL_PATH` or
    `SAFELENS_EXPLORER_MODEL_PATHS`.
-2. A complete local Hugging Face cache snapshot.
-3. The configured provider (`huggingface` by default, or ModelScope for the
+2. A matching directory below the colon-separated `SAFELENS_MODEL_ROOTS`, a
+   `models/` directory beside the repository, or `models/` below the current
+   working directory.
+3. A complete local Hugging Face cache snapshot.
+4. The configured provider (`huggingface` by default, or ModelScope for the
    supported Gemma 3 models when `modelscope` is installed).
 
 For an explicit model directory, set a path containing `config.json`, tokenizer
@@ -122,6 +125,12 @@ metadata, and all model weight shards:
 ```bash
 export SAFELENS_GEMMA_2_9B_IT_MODEL_PATH=/data/models/gemma-2-9b-it
 ```
+
+Dataset Test uses `google/gemma-3-27b-it` as its safety judge. Override its
+model and device with `SAFELENS_DATASET_JUDGE_MODEL` and
+`SAFELENS_DATASET_JUDGE_DEVICE`. The final-300 steering vectors ship with the
+package; `SAFELENS_FINAL_300_VECTOR_ROOT` is available for an intentional
+external vector bundle.
 
 Alternatively leave the variable unset and select `gemma-2-9b-it` in the chat
 model picker. With Hugging Face access configured, the first real prompt job

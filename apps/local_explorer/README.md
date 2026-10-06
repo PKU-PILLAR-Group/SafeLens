@@ -311,14 +311,14 @@ Install the model/SAE runtime and download the checkpoint:
 ```bash
 python -m pip install -e ".[explorer,models,sae]"
 python scripts/download_gemma_scope_9b_it_sae.py \
-  --output /ssd/yqy/cache/safelens/gemma-scope-9b-it-res/layer_9/width_131k/average_l0_121/params.npz
+  --output .cache/safelens/gemma-scope-9b-it-res/layer_9/width_131k/average_l0_121/params.npz
 ```
 
 Configure the local model, SAE path, device, and dtype before launching:
 
 ```bash
-export SAFELENS_GEMMA_2_9B_IT_MODEL_PATH=/ssd/models/Gemma2-9b-it
-export SAFELENS_GEMMA_SCOPE_9B_IT_SAE_PATH=/ssd/yqy/cache/safelens/gemma-scope-9b-it-res/layer_9/width_131k/average_l0_121/params.npz
+export SAFELENS_GEMMA_2_9B_IT_MODEL_PATH=/path/to/gemma-2-9b-it
+export SAFELENS_GEMMA_SCOPE_9B_IT_SAE_PATH=.cache/safelens/gemma-scope-9b-it-res/layer_9/width_131k/average_l0_121/params.npz
 export SAFELENS_GEMMA_SAE_DEVICE=auto
 # Leave SAFELENS_GEMMA_SAE_DTYPE unset for automatic bfloat16/float32 selection.
 safelens explorer --artifact-root outputs/local-explorer --no-browser

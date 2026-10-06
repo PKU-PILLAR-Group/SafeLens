@@ -70,7 +70,9 @@ def test_sae_feature_info_endpoint_exposes_concept_metadata(tmp_path: Path, monk
     }
 
 
-def test_sae_steering_scan_endpoint_enriches_real_activation_rows(tmp_path: Path, monkeypatch) -> None:
+def test_sae_steering_scan_endpoint_enriches_real_activation_rows(
+    tmp_path: Path, monkeypatch
+) -> None:
     monkeypatch.setattr(
         "SafeLens.gemma_sae_steering.scan_gemma_prompt",
         lambda prompt, limit: {
@@ -245,10 +247,13 @@ def test_dataset_catalog_exposes_versioned_samples_and_paper_sources(tmp_path: P
     assert response.status_code == 200
     payload = response.json()
     assert {item["id"] for item in payload["datasets"]} == {
-        "safelens-steering-v1",
-        "safelens-patching-v1",
+        "safelens-final-300-v1.1",
     }
-    assert {item["id"] for item in payload["algorithms"]} == {"steering", "patching"}
+    assert {item["id"] for item in payload["algorithms"]} == {
+        "pca_minus_neg",
+        "mean_minus_neg",
+    }
+    assert len(payload["datasets"][0]["samples"]) == 300
     assert all(item["samples"] for item in payload["datasets"])
     assert all(item["paperUrl"].startswith("https://arxiv.org/") for item in payload["algorithms"])
 
@@ -258,18 +263,18 @@ def test_dataset_job_validates_and_reports_real_execution_result(tmp_path: Path)
 
     def runner(request, _cancel_event, progress):
         received.append(request)
-        progress(50, "sample", "Testing steer-01.")
+        progress(50, "sample", "Testing final-001.")
         return {
             "dataset": {
                 "id": request.datasetId,
-                "name": "SafeLens Steering Regression v1",
-                "version": "1.0.0",
+                "name": "SafeLens final_300",
+                "version": "1.1",
                 "sampleCount": 1,
             },
             "algorithm": {
                 "id": request.algorithmId,
-                "name": "Residual steering",
-                "implementation": "contrastive_mean_difference",
+                "name": "PCA steering",
+                "implementation": request.algorithmId,
             },
             "execution": {"source": "real-local-model", "model": request.model},
             "metric": {
@@ -290,20 +295,20 @@ def test_dataset_job_validates_and_reports_real_execution_result(tmp_path: Path)
         create_app(
             tmp_path,
             dataset_test_runner=runner,
-            allowed_models=("test/model",),
+            allowed_models=("google/gemma-2-9b-it",),
         )
     )
     response = client.post(
         "/api/jobs/dataset-test",
         json={
-            "datasetId": "safelens-steering-v1",
-            "algorithmId": "steering",
-            "model": "test/model",
-            "sampleIds": ["steer-01"],
+            "datasetId": "safelens-final-300-v1.1",
+            "algorithmId": "pca_minus_neg",
+            "model": "google/gemma-2-9b-it",
+            "sampleIds": ["final-001"],
             "layer": 1,
             "strength": 1.5,
             "seed": 7,
-            "maxNewTokens": 8,
+            "maxNewTokens": 160,
         },
     )
 
@@ -312,18 +317,35 @@ def test_dataset_job_validates_and_reports_real_execution_result(tmp_path: Path)
     assert job["kind"] == "dataset-test"
     assert job["result"]["execution"]["source"] == "real-local-model"
     assert job["result"]["metric"]["accuracy"] == 1.0
-    assert received and received[0].sampleIds == ["steer-01"]
+    assert received and received[0].sampleIds == ["final-001"]
+
+    mean_payload = {
+        "datasetId": "safelens-final-300-v1.1",
+        "algorithmId": "mean_minus_neg",
+        "model": "google/gemma-2-9b-it",
+        "sampleIds": ["final-001"],
+        "layer": 22,
+        "sourceLayer": 32,
+        "strength": 310.0,
+        "seed": 7,
+        "maxNewTokens": 8,
+    }
+    mean_response = client.post("/api/jobs/dataset-test", json=mean_payload)
+    assert mean_response.status_code == 202
+    mean_job = _wait_for_job(client, mean_response.json()["id"], "ready")
+    assert mean_job["request"]["sourceLayer"] == 32
+    assert mean_job["result"]["algorithm"]["id"] == "mean_minus_neg"
 
     incompatible = client.post(
         "/api/jobs/dataset-test",
         json={
-            "datasetId": "safelens-patching-v1",
-            "algorithmId": "steering",
-            "model": "test/model",
+            "datasetId": "unknown-dataset",
+            "algorithmId": "pca_minus_neg",
+            "model": "google/gemma-2-9b-it",
         },
     )
     assert incompatible.status_code == 422
-    assert incompatible.json()["detail"]["code"] == "incompatible_dataset_algorithm"
+    assert incompatible.json()["detail"]["code"] == "unknown_dataset"
 
 
 def test_explorer_api_serves_metadata_and_range_filtered_chunks(tmp_path: Path) -> None:

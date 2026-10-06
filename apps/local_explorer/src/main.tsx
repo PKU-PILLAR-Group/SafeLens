@@ -29,6 +29,7 @@ import {
   X
 } from "lucide-react";
 import { realRun } from "./realRunData";
+import { APP_BASE_PATH, appScreenPath } from "./appLocation";
 import { formatMetricDelta, formatMetricNumber, metricDisplayLabel } from "./metricFormatting";
 import { MatrixHeatmap } from "./components/MatrixHeatmap";
 import { RunLibraryPanel } from "./components/RunLibraryPanel";
@@ -179,9 +180,9 @@ function initialWorkspaceLayout(): WorkspaceLayout {
 }
 
 function screenFromLocation(): AppScreen {
-  const path = window.location.pathname.replace(/\/+$/, "");
-  if (path === "/dataset-test") return "dataset-test";
-  if (path === "/explorer") return "explorer";
+  const path = window.location.pathname.slice(APP_BASE_PATH.length).replace(/\/+$/, "");
+  if (path === "dataset-test") return "dataset-test";
+  if (path === "explorer") return "explorer";
   const params = new URLSearchParams(window.location.search);
   const explorerKeys = [
     "view", "mode", "run", "sample", "token", "layer", "head", "neuron", "track", "metric"
@@ -260,18 +261,18 @@ function App() {
     params.set("layout", "focus");
     params.set("view", view);
     if (setup) params.set("setup", setup);
-    window.history.pushState(null, "", `/explorer?${params.toString()}`);
+    window.history.pushState(null, "", `${appScreenPath("explorer")}?${params.toString()}`);
     library.selectRun(record.key, undefined, "none");
     setScreen("explorer");
   }
 
   function openHome() {
-    window.history.pushState(null, "", "/");
+    window.history.pushState(null, "", appScreenPath());
     setScreen("home");
   }
 
   function openDatasetTest() {
-    window.history.pushState(null, "", "/dataset-test");
+    window.history.pushState(null, "", appScreenPath("dataset-test"));
     setScreen("dataset-test");
   }
 
