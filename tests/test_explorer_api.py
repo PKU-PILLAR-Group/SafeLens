@@ -22,6 +22,7 @@ from SafeLens.explorer_api import (
     create_app,
 )
 from SafeLens.explorer_chunks import build_explorer_sidecar
+from SafeLens.explorer_sae import model_names_match
 from SafeLens.sae_profiles import list_sae_profiles
 
 
@@ -1578,6 +1579,15 @@ def test_neuron_intervention_preflight_requires_a_real_cached_neuron(tmp_path: P
     assert blocked.status_code == 200
     assert blocked.json()["canSubmit"] is False
     assert blocked.json()["featureAvailable"] is False
+
+
+def test_sae_model_names_accept_short_and_hub_ids() -> None:
+    assert model_names_match("gemma-2-9b-it", "google/gemma-2-9b-it")
+    assert model_names_match("Qwen2.5-7B-Instruct", "Qwen/Qwen2.5-7B-Instruct")
+    assert model_names_match("google/gemma-2-9b-it", "google/gemma-2-9b-it")
+    assert not model_names_match("gemma-3-270m-it", "google/gemma-2-9b-it")
+    assert not model_names_match("gemma-2-9b", "google/gemma-2-9b-it")
+    assert model_names_match(None, "google/gemma-2-9b-it")
 
 
 def test_qwen_sae_profile_is_exposed() -> None:

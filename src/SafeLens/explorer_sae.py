@@ -449,6 +449,23 @@ def _download_gemma_scope_270m_checkpoint(sae_id: str, cache_root: Path) -> tupl
     return snapshot / folder / "config.json", snapshot / folder / "params.safetensors"
 
 
+def model_names_match(recorded_model: Any, expected_model_name: str) -> bool:
+    """Return True when two Hub-style model ids name the same checkpoint.
+
+    SAE metadata often stores the short model name (``gemma-2-9b-it``) while
+    Explorer runs use the full Hub id (``google/gemma-2-9b-it``). The SAE
+    profile allow-list remains the source of truth for the full id; this
+    helper only avoids rejecting the same model because of the org prefix.
+    """
+    if recorded_model is None:
+        return True
+    recorded = str(recorded_model).strip().rstrip("/")
+    expected = str(expected_model_name).strip().rstrip("/")
+    if not recorded or not expected:
+        return False
+    return recorded.rsplit("/", 1)[-1].lower() == expected.rsplit("/", 1)[-1].lower()
+
+
 def _qwen25_sae_cache_root() -> Path:
     return Path(
         os.environ.get(
@@ -509,7 +526,7 @@ def load_local_qwen25_sae(
     recorded_model = getattr(metadata, "model_name", None) or getattr(
         getattr(sae, "cfg", None), "model_name", None
     )
-    if recorded_model and str(recorded_model) != model_name:
+    if not model_names_match(recorded_model, model_name):
         raise ValueError(f"SAE was trained for {recorded_model}, not {model_name}.")
     return sae
 

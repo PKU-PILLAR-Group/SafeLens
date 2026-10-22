@@ -24,6 +24,7 @@ from SafeLens.explorer_sae import (
     explorer_sae_converter,
     load_local_gemma_scope_sae,
     load_local_qwen25_sae,
+    model_names_match,
     neuronpedia_feature_info,
 )
 from SafeLens.sae_profiles import get_sae_profile
@@ -494,7 +495,7 @@ def _load_sae(
     recorded_model = getattr(metadata, "model_name", None) or getattr(
         getattr(sae, "cfg", None), "model_name", None
     )
-    if recorded_model and str(recorded_model) != expected_model_name:
+    if not model_names_match(recorded_model, expected_model_name):
         raise ValueError(f"SAE was trained for {recorded_model}, not {expected_model_name}.")
     if not callable(getattr(sae, "encode", None)) or not callable(getattr(sae, "decode", None)):
         raise TypeError("Loaded SAE object does not expose encode/decode methods.")
