@@ -5,6 +5,12 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Literal
 
+QWEN25_7B_INSTRUCT_MODEL = "Qwen/Qwen2.5-7B-Instruct"
+QWEN25_7B_INSTRUCT_SAE_RELEASE = "qwen2.5-7b-instruct-saes"
+QWEN25_7B_INSTRUCT_SAE_ID = "BT(F)/blocks_20_hook_resid_post_8X_2048_jumprelu"
+QWEN25_7B_INSTRUCT_SAE_LAYER = 20
+QWEN25_7B_INSTRUCT_SAE_WIDTH = 28_672
+
 GEMMA_SCOPE_2_270M_IT_MODEL = "google/gemma-3-270m-it"
 GEMMA_SCOPE_2_270M_IT_RELEASE = "gemma-scope-2-270m-it-res"
 GEMMA_SCOPE_9B_IT_MODEL = "google/gemma-2-9b-it"
@@ -44,6 +50,21 @@ class SAEProfile:
         return payload
 
 
+QWEN25_7B_INSTRUCT_PROFILES = (
+    SAEProfile(
+        id="qwen2.5-7b-instruct-resid-post-l20-28k-jumprelu",
+        label="Qwen2.5-7B-Instruct · L20 · residual · 28k · JumpReLU",
+        model_name=QWEN25_7B_INSTRUCT_MODEL,
+        release=QWEN25_7B_INSTRUCT_SAE_RELEASE,
+        sae_id=QWEN25_7B_INSTRUCT_SAE_ID,
+        layer=QWEN25_7B_INSTRUCT_SAE_LAYER,
+        component="resid_post",
+        width=QWEN25_7B_INSTRUCT_SAE_WIDTH,
+        architecture="jump_relu",
+        source="Geaming/Qwen2.5-7B-Instruct_SAEs",
+    ),
+)
+
 GEMMA_SCOPE_2_PROFILES = tuple(
     SAEProfile(
         id=f"gemma-scope-2-270m-it-resid-post-l{layer}-16k-small",
@@ -79,7 +100,7 @@ GEMMA_SCOPE_9B_IT_PROFILES = tuple(
     for layer in GEMMA_SCOPE_9B_IT_SAE_FOLDERS
 )
 
-SAE_PROFILES = GEMMA_SCOPE_2_PROFILES + GEMMA_SCOPE_9B_IT_PROFILES
+SAE_PROFILES = QWEN25_7B_INSTRUCT_PROFILES + GEMMA_SCOPE_2_PROFILES + GEMMA_SCOPE_9B_IT_PROFILES
 
 
 def list_sae_profiles(*, model_name: str | None = None) -> tuple[SAEProfile, ...]:

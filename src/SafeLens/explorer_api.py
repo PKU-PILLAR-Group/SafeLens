@@ -1332,7 +1332,7 @@ def create_app(
                     # The UI can use this exact value as the initial coefficient
                     # while still showing the measured prompt activation above.
                     "suggestedStrength": float(default_strength)
-                    if isinstance(default_strength, (int, float))
+                    if isinstance(default_strength, int | float)
                     else max_activation,
                 }
 
@@ -1780,11 +1780,9 @@ def create_app(
                 sae_id=payload.saeId,
             )
             if profile is None:
-                raise ValueError(
-                    "Model, release, and SAE ID are not an enabled Gemma Scope profile."
-                )
+                raise ValueError("Model, release, and SAE ID are not an enabled SAE profile.")
             if payload.layer != profile.layer or payload.component != profile.component:
-                raise ValueError("Gemma Scope profile does not match the requested layer and site.")
+                raise ValueError("SAE profile does not match the requested layer and site.")
             if payload.layer not in payload.run["layers"]:
                 raise ValueError(f"Layer L{payload.layer} is not available in the source run.")
             token_count = len(payload.run["tokens"])
@@ -2729,16 +2727,12 @@ def _intervention_preflight(
     if payload.mode == "neuron":
         checks["selected MLP neuron is not available in the source run"] = feature_available
     elif payload.mode == "sae_feature":
-        checks["model, release, and SAE ID are not an enabled Gemma Scope profile"] = (
-            sae_profile_valid
-        )
+        checks["model, release, and SAE ID are not an enabled SAE profile"] = sae_profile_valid
         checks["SAE feature index is outside the selected dictionary"] = feature_available
         checks[
-            "Gemma Scope SAE checkpoint is unavailable (install the `sae` extra or "
+            "SAE checkpoint is unavailable (install the `sae` extra or "
             "download the public checkpoint)"
-        ] = (
-            sae_runtime_available
-        )
+        ] = sae_runtime_available
     failures = [message for message, passed in checks.items() if not passed]
     can_submit = not failures
     return InterventionPreflightResponse(

@@ -19,8 +19,11 @@ if str(SRC) not in sys.path:
 
 from SafeLens.explorer_model import load_explorer_hf_model
 from SafeLens.explorer_sae import (
+    QWEN25_7B_INSTRUCT_MODEL,
+    QWEN25_7B_INSTRUCT_SAE_RELEASE,
     explorer_sae_converter,
     load_local_gemma_scope_sae,
+    load_local_qwen25_sae,
     neuronpedia_feature_info,
 )
 from SafeLens.sae_profiles import get_sae_profile
@@ -94,14 +97,14 @@ def main() -> None:
                 sae_id=str(request.get("saeId", "")),
             )
             if profile is None:
-                raise ValueError(
-                    "Model, release, and SAE ID are not an enabled Gemma Scope profile."
-                )
-            requested_features = request.get("saeFeatures") or [{
-                "featureIndex": request.get("featureIndex", -1),
-                "strength": request.get("scale", 0),
-                "layer": request.get("layer", profile.layer),
-            }]
+                raise ValueError("Model, release, and SAE ID are not an enabled SAE profile.")
+            requested_features = request.get("saeFeatures") or [
+                {
+                    "featureIndex": request.get("featureIndex", -1),
+                    "strength": request.get("scale", 0),
+                    "layer": request.get("layer", profile.layer),
+                }
+            ]
             if not isinstance(requested_features, list) or not requested_features:
                 raise ValueError("At least one SAE feature is required.")
             feature_specs: list[dict[str, Any]] = []
@@ -135,12 +138,14 @@ def main() -> None:
                         f"SAE feature {feature_index} is outside dictionary width "
                         f"{feature_width}."
                     )
-                feature_specs.append({
-                    "layer": feature_layer,
-                    "featureIndex": feature_index,
-                    "strength": float(raw_feature.get("strength", request.get("scale", 0))),
-                    "profile": feature_profile,
-                })
+                feature_specs.append(
+                    {
+                        "layer": feature_layer,
+                        "featureIndex": feature_index,
+                        "strength": float(raw_feature.get("strength", request.get("scale", 0))),
+                        "profile": feature_profile,
+                    }
+                )
             primary_spec = feature_specs[0]
             profile = primary_spec["profile"]
             source_layer = profile.layer
@@ -441,16 +446,27 @@ def _load_sae(
 
     model = getattr(wrapper, "model", None)
     if model is None:
-        raise RuntimeError("The base model must be loaded before the Gemma Scope SAE.")
+        raise RuntimeError("The base model must be loaded before the SAE.")
     try:
         model_device = str(next(model.parameters()).device)
     except (AttributeError, StopIteration) as exc:
         raise RuntimeError("Could not determine the base model device for SAE loading.") from exc
+    try:
+        model_dtype = next(model.parameters()).dtype
+    except (AttributeError, StopIteration):
+        model_dtype = None
+    if (
+        expected_model_name == QWEN25_7B_INSTRUCT_MODEL
+        and release == QWEN25_7B_INSTRUCT_SAE_RELEASE
+    ):
+        return load_local_qwen25_sae(
+            model_name=expected_model_name,
+            release=release,
+            sae_id=sae_id,
+            device=model_device,
+            dtype=model_dtype,
+        )
     if SAE is None:
-        try:
-            model_dtype = next(model.parameters()).dtype
-        except (AttributeError, StopIteration):
-            model_dtype = None
         return load_local_gemma_scope_sae(
             model_name=expected_model_name,
             release=release,
@@ -481,7 +497,7 @@ def _load_sae(
     if recorded_model and str(recorded_model) != expected_model_name:
         raise ValueError(f"SAE was trained for {recorded_model}, not {expected_model_name}.")
     if not callable(getattr(sae, "encode", None)) or not callable(getattr(sae, "decode", None)):
-        raise TypeError("Loaded Gemma Scope object does not expose SAE encode/decode methods.")
+        raise TypeError("Loaded SAE object does not expose encode/decode methods.")
     _sae_feature_width(sae)
     return sae
 

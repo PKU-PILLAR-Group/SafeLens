@@ -758,9 +758,9 @@ function FeatureInterventionWorkbench({
       <section className="chat-analysis-workbench chat-feature-workbench" aria-label="SAE feature intervention workbench">
         <header className="chat-workbench-heading">
           <span><Activity size={17} /></span>
-          <div><h2>Gemma Scope SAE</h2><p>No compatible SAE for {run.modelName}</p></div>
+          <div><h2>SAE features</h2><p>No compatible SAE for {run.modelName}</p></div>
         </header>
-        <p className="chat-sae-empty">Select <b>google/gemma-3-270m-it</b> for a new chat run.</p>
+        <p className="chat-sae-empty">Select <b>Qwen/Qwen2.5-7B-Instruct</b> or an enabled Gemma model for a new chat run.</p>
       </section>
     );
   }
@@ -768,7 +768,7 @@ function FeatureInterventionWorkbench({
     <section className="chat-analysis-workbench chat-feature-workbench" aria-label="SAE feature intervention workbench">
       <header className="chat-workbench-heading">
         <span><Activity size={17} /></span>
-        <div><h2>Gemma Scope SAE</h2><p>Sparse feature intervention · residual stream</p></div>
+        <div><h2>SAE features</h2><p>Sparse feature intervention · residual stream</p></div>
         <StatusDot ready={Boolean(preflight?.canSubmit)} pending={discoveryRunning || (!preflight && !preflightError)} />
       </header>
       <section className="chat-sae-discovery" aria-label="Active SAE features">
@@ -810,7 +810,7 @@ function FeatureInterventionWorkbench({
             <label className="chat-sae-profile">
               <span>SAE checkpoint</span>
               <select aria-label="SAE checkpoint" value={selectedProfile?.id ?? ""} disabled={running || discoveryRunning || profiles.length === 0} onChange={(event) => { setSteeringPresetId("custom"); selectProfile(event.target.value); }}>
-                {profiles.map((profile) => <option key={profile.id} value={profile.id}>L{profile.layer} · {profile.width >= 131_072 ? "131k · canonical" : "16k · L0 small"}</option>)}
+                {profiles.map((profile) => <option key={profile.id} value={profile.id}>L{profile.layer} · {Math.round(profile.width / 1024)}k · JumpReLU</option>)}
               </select>
             </label>
             <button

@@ -84,14 +84,16 @@ def test_sae_steering_scan_endpoint_enriches_real_activation_rows(
             "featureCount": 131072,
             "prompt": prompt,
             "tokens": [{"index": 0, "tokenId": 1, "text": "Cats"}],
-            "features": [{
-                "featureIndex": 62610,
-                "maxActivation": 57.7,
-                "meanActivation": 57.7,
-                "activeTokenCount": 1,
-                "peakTokenIndex": 0,
-                "peakTokenText": "Cats",
-            }],
+            "features": [
+                {
+                    "featureIndex": 62610,
+                    "maxActivation": 57.7,
+                    "meanActivation": 57.7,
+                    "activeTokenCount": 1,
+                    "peakTokenIndex": 0,
+                    "peakTokenText": "Cats",
+                }
+            ],
         },
     )
     monkeypatch.setattr(
@@ -1576,6 +1578,19 @@ def test_neuron_intervention_preflight_requires_a_real_cached_neuron(tmp_path: P
     assert blocked.status_code == 200
     assert blocked.json()["canSubmit"] is False
     assert blocked.json()["featureAvailable"] is False
+
+
+def test_qwen_sae_profile_is_exposed() -> None:
+    profiles = list_sae_profiles(model_name="Qwen/Qwen2.5-7B-Instruct")
+    assert len(profiles) == 1
+    profile = profiles[0]
+    assert profile.layer == 20
+    assert profile.width == 28_672
+    assert profile.release == "qwen2.5-7b-instruct-saes"
+    assert profile.sae_id == "BT(F)/blocks_20_hook_resid_post_8X_2048_jumprelu"
+    assert profile.component == "resid_post"
+    assert profile.architecture == "jump_relu"
+    assert profile.source == "Geaming/Qwen2.5-7B-Instruct_SAEs"
 
 
 def test_gemma_scope_profiles_and_sae_preflight_are_exact(monkeypatch) -> None:

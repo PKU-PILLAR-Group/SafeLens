@@ -55,7 +55,7 @@ def _discover(run: dict[str, Any], request: dict[str, Any]) -> dict[str, Any]:
         if profile is None:
             raise ValueError("Model, release, and SAE ID are not an enabled Gemma Scope profile.")
         if int(request["layer"]) != profile.layer or request["component"] != profile.component:
-            raise ValueError("Gemma Scope profile does not match the requested layer and site.")
+            raise ValueError("SAE profile does not match the requested layer and site.")
 
         prompt_tokens = wrapper.to_tokens(str(run["prompt"]), prepend_bos=False)
         prompt_ids = _flat_token_ids(prompt_tokens)

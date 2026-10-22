@@ -21,6 +21,10 @@ from SafeLens.sae_profiles import (
     GEMMA_SCOPE_9B_IT_SAE_ID,
 )
 
+QWEN25_7B_INSTRUCT_MODEL = "Qwen/Qwen2.5-7B-Instruct"
+QWEN25_7B_INSTRUCT_SAE_RELEASE = "qwen2.5-7b-instruct-saes"
+QWEN25_7B_INSTRUCT_SAE_REPO = "Geaming/Qwen2.5-7B-Instruct_SAEs"
+
 GEMMA_SCOPE_2_270M_IT_RELEASE = "gemma-scope-2-270m-it-res"
 GEMMA_SCOPE_2_270M_IT_REPO = "google/gemma-scope-2-270m-it"
 GEMMA_SCOPE_2_270M_IT_MODEL = "google/gemma-3-270m-it"
@@ -121,7 +125,7 @@ def neuronpedia_feature_info(
     """
     url = _neuronpedia_feature_url(model_name, layer, sae_id, feature_index)
     fallback: dict[str, Any] = {
-        "label": f"Gemma Scope feature {feature_index}",
+        "label": f"SAE feature {feature_index}",
         "source": "index",
         "url": url,
         "positiveTokens": [],
@@ -138,9 +142,7 @@ def neuronpedia_feature_info(
     )
     cache_path = _feature_info_cache_path(model_name, layer, sae_id, feature_index)
     cached = _read_feature_info_cache(cache_path)
-    if cached is not None and (
-        "maxActApprox" in cached and "vectorDefaultSteerStrength" in cached
-    ):
+    if cached is not None and ("maxActApprox" in cached and "vectorDefaultSteerStrength" in cached):
         cached_url = cached.get("url")
         if isinstance(cached_url, str) and "/api/feature/" in cached_url:
             cached["url"] = cached_url.replace("/api/feature/", "/", 1)
@@ -406,9 +408,9 @@ def _gemma_scope_270m_checkpoint_paths(sae_id: str) -> tuple[Path, Path]:
         weights_path = candidate / "params.safetensors"
         if config_path.is_file() and weights_path.is_file():
             return config_path, weights_path
-    hf_snapshots = cache_root / (
-        "models--" + GEMMA_SCOPE_2_270M_IT_REPO.replace("/", "--")
-    ) / "snapshots"
+    hf_snapshots = (
+        cache_root / ("models--" + GEMMA_SCOPE_2_270M_IT_REPO.replace("/", "--")) / "snapshots"
+    )
     for snapshot in sorted(hf_snapshots.glob("*/"), reverse=True):
         candidate = snapshot / folder
         if (candidate / "config.json").is_file() and (candidate / "params.safetensors").is_file():
@@ -445,6 +447,71 @@ def _download_gemma_scope_270m_checkpoint(sae_id: str, cache_root: Path) -> tupl
         )
     )
     return snapshot / folder / "config.json", snapshot / folder / "params.safetensors"
+
+
+def _qwen25_sae_cache_root() -> Path:
+    return Path(
+        os.environ.get(
+            "SAFELENS_EXPLORER_SAE_CACHE",
+            ".cache/safelens/explorer-sae",
+        )
+    ).expanduser()
+
+
+def load_local_qwen25_sae(
+    *,
+    model_name: str,
+    release: str,
+    sae_id: str,
+    device: str,
+    dtype: Any = None,
+) -> Any:
+    """Load the public Qwen2.5-7B-Instruct JumpReLU SAE from Hugging Face.
+
+    The checkpoint is stored in SAE Lens disk format (``cfg.json`` plus
+    ``sae_weights.safetensors``), so the official loader can read it directly
+    once the selected folder has been downloaded.
+    """
+    if model_name != QWEN25_7B_INSTRUCT_MODEL or release != QWEN25_7B_INSTRUCT_SAE_RELEASE:
+        raise ValueError(f"Unsupported Qwen SAE profile: {model_name}/{release}/{sae_id}.")
+    try:
+        from huggingface_hub import snapshot_download
+        from sae_lens import SAE
+    except ImportError as exc:
+        raise RuntimeError(
+            "Qwen SAE loading requires the `sae` extra (sae_lens and huggingface_hub)."
+        ) from exc
+
+    folder = sae_id.strip("/")
+    snapshot = Path(
+        snapshot_download(
+            repo_id=QWEN25_7B_INSTRUCT_SAE_REPO,
+            cache_dir=str(_qwen25_sae_cache_root()),
+            allow_patterns=[
+                f"{folder}/cfg.json",
+                f"{folder}/sae_weights.safetensors",
+            ],
+        )
+    )
+    checkpoint = snapshot / folder
+    config_path = checkpoint / "cfg.json"
+    weights_path = checkpoint / "sae_weights.safetensors"
+    if not config_path.is_file() or not weights_path.is_file():
+        raise FileNotFoundError(
+            f"Qwen SAE checkpoint not found under {checkpoint}. "
+            "Set SAFELENS_EXPLORER_SAE_CACHE to a persistent cache directory."
+        )
+    dtype_name = None
+    if dtype is not None:
+        dtype_name = str(dtype).removeprefix("torch.")
+    sae = SAE.load_from_disk(str(checkpoint), device=device, dtype=dtype_name)
+    metadata = getattr(getattr(sae, "cfg", None), "metadata", None)
+    recorded_model = getattr(metadata, "model_name", None) or getattr(
+        getattr(sae, "cfg", None), "model_name", None
+    )
+    if recorded_model and str(recorded_model) != model_name:
+        raise ValueError(f"SAE was trained for {recorded_model}, not {model_name}.")
+    return sae
 
 
 def load_local_gemma_scope_sae(
