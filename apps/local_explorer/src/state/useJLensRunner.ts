@@ -20,8 +20,10 @@ import {
 export function useJLensRunner(onRunReady: (run: ExplorerRun, job: JLensJob) => void) {
   const [job, setJob] = useState<JLensJob | null>(null);
   const [error, setError] = useState<JobFailure | null>(null);
+  const [submitting, setSubmitting] = useState(false);
   const streamRef = useRef<EventSource | null>(null);
   const activeRef = useRef<{ id: string; generation: number } | null>(null);
+  const cancelRequestedRef = useRef(false);
   const generationRef = useRef(0);
   const deliveredRef = useRef(new Set<string>());
 
@@ -48,14 +50,27 @@ export function useJLensRunner(onRunReady: (run: ExplorerRun, job: JLensJob) => 
   const submit = useCallback(async (input: JLensRunInput) => {
     closeStream();
     const generation = ++generationRef.current;
+    cancelRequestedRef.current = false;
     activeRef.current = { id: "submitting", generation };
     setJob(null);
     setError(null);
+    setSubmitting(true);
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
     try {
       const submitted = await submitJLensJob(input);
       if (activeRef.current?.generation !== generation) return;
       activeRef.current = { id: submitted.id, generation };
       setJob(submitted);
+      setSubmitting(false);
+      if (cancelRequestedRef.current) {
+        cancelRequestedRef.current = false;
+        try {
+          applySnapshot(await cancelJLensJob(submitted.id), generation);
+        } catch (caught) {
+          setError(jobFailureFromError(caught, "cancellation", "J-Lens cancellation failed."));
+        }
+        return;
+      }
       const stream = new EventSource(promptJobEventsUrl(submitted.id));
       streamRef.current = stream;
       stream.addEventListener("job", (event) => {
@@ -92,13 +107,18 @@ export function useJLensRunner(onRunReady: (run: ExplorerRun, job: JLensJob) => 
     } catch (caught) {
       if (activeRef.current?.generation !== generation) return;
       activeRef.current = null;
+      setSubmitting(false);
       setError(jobFailureFromError(caught, "submission", "J-Lens submission failed."));
     }
   }, [applySnapshot, closeStream]);
 
   const cancel = useCallback(async () => {
     const active = activeRef.current;
-    if (!active || active.id === "submitting") return;
+    if (!active) return;
+    if (active.id === "submitting") {
+      cancelRequestedRef.current = true;
+      return;
+    }
     try {
       applySnapshot(await cancelJLensJob(active.id), active.generation);
     } catch (caught) {
@@ -112,5 +132,5 @@ export function useJLensRunner(onRunReady: (run: ExplorerRun, job: JLensJob) => 
     if (active && active.id !== "submitting") void cancelJLensJob(active.id).catch(() => undefined);
   }, [closeStream]);
 
-  return { job, error, submit, cancel, submitting: activeRef.current?.id === "submitting" };
+  return { job, error, submit, cancel, submitting };
 }

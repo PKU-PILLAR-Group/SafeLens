@@ -111,14 +111,16 @@ export function TurnCard({
       {turn.run && showAnalysisControls && (
         <>
           <div className="chat-turn-explore-bar" aria-label="Explore this run">
-            <button
-              type="button"
-              className={analysisOpen === "neuron" ? "active" : ""}
-              aria-pressed={analysisOpen === "neuron"}
-              onClick={() => onToggleAnalysis("neuron")}
-            >
-              <Activity size={16} /> Neuron
-            </button>
+            {turn.run.mlpNeurons.length > 0 && (
+              <button
+                type="button"
+                className={analysisOpen === "neuron" ? "active" : ""}
+                aria-pressed={analysisOpen === "neuron"}
+                onClick={() => onToggleAnalysis("neuron")}
+              >
+                <Activity size={16} /> Neuron
+              </button>
+            )}
             <button
               type="button"
               className={analysisOpen === "feature" ? "active" : ""}

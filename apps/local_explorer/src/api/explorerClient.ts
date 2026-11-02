@@ -899,6 +899,8 @@ export const patchingJobSchema = z.object({
     positions: z.array(z.number().int()).min(1),
     head: z.number().int().nonnegative().optional(),
     targetTokenId: z.number().int().nonnegative(),
+    generateAfterPatch: z.boolean().optional(),
+    maxNewTokens: z.number().int().positive().optional(),
     sourceRun: z.object({ runId: z.string(), sampleId: z.string(), modelName: z.string() }),
     preflight: patchingPreflightSchema
   }),
@@ -915,6 +917,8 @@ export interface PatchingRunInput {
   positions: number[];
   head?: number;
   targetTokenId: number;
+  generateAfterPatch?: boolean;
+  maxNewTokens?: number;
 }
 
 export const interventionPreflightSchema = z.object({

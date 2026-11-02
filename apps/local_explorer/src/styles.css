@@ -3367,6 +3367,37 @@ h1 {
   padding: 0 34px 220px;
 }
 
+.chat-history-notice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 14px 0 0;
+  padding: 10px 12px;
+  border: 1px solid #d9c9a8;
+  border-radius: 10px;
+  background: #fff8e8;
+  color: #6d551f;
+  font-size: 12px;
+}
+
+.chat-history-notice.error {
+  border-color: #e3c1c8;
+  background: #fdf1f3;
+  color: #8a2f40;
+}
+
+.chat-history-notice button {
+  flex: none;
+  padding: 4px 10px;
+  border: 1px solid currentColor;
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
 .chat-home-main:has(.chat-home-welcome) {
   padding-bottom: 176px;
 }
@@ -4216,6 +4247,34 @@ h1 {
   border-bottom: 1px solid #e8e9ea;
 }
 
+.chat-patching-generation-option {
+  padding: 10px 0;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px 18px;
+  border-bottom: 1px solid #e8e9ea;
+}
+
+.chat-patching-generation-option label {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: #4d5054;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.chat-patching-generation-option label input[type="number"] {
+  width: 82px;
+}
+
+.chat-patching-generation-option small {
+  margin-left: auto;
+  color: #777a7e;
+  font-size: 11px;
+}
+
 .chat-patching-controls fieldset,
 .chat-patching-controls label {
   min-width: 0;
@@ -4392,6 +4451,40 @@ h1 {
 .chat-patching-result {
   padding: 22px 0 4px;
   border-top: 1px solid #dfe2e3;
+}
+
+.chat-patching-generation {
+  margin-top: 18px;
+  padding-top: 18px;
+  border-top: 1px solid #dfe2e3;
+}
+
+.chat-patching-generation > header {
+  margin-bottom: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  color: #65686c;
+  font-size: 11px;
+}
+
+.chat-patching-generation > header > div {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: #34363a;
+  font-size: 13px;
+}
+
+.chat-patching-generation-error {
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid #e3c1c8;
+  border-radius: 8px;
+  background: #fdf1f3;
+  color: #8a2f40;
+  font-size: 12px;
 }
 
 .chat-steering-result > header,

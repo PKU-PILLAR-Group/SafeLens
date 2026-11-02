@@ -404,6 +404,8 @@ class PatchingRunRequest(BaseModel):
     positions: list[int] = Field(min_length=1, max_length=128)
     head: int | None = Field(default=None, ge=0)
     targetTokenId: int = Field(ge=0)
+    generateAfterPatch: bool = False
+    maxNewTokens: int = Field(default=64, ge=1, le=512)
 
 
 class SAEProfileResponse(BaseModel):
@@ -730,6 +732,7 @@ class ExplorerJobManager:
         self._error_detail = error_detail
         self._jobs: dict[str, _ExplorerJob] = {}
         self._queue: queue.Queue[str | None] = queue.Queue()
+        self._pending_job_ids: set[str] = set()
         self._lock = threading.Lock()
         self._active_job_id: str | None = None
         self._worker = threading.Thread(target=self._work, daemon=True)
@@ -744,7 +747,7 @@ class ExplorerJobManager:
         job_id = uuid.uuid4().hex
         now = _utc_now()
         with self._lock:
-            jobs_ahead = self._queue.qsize() + int(self._active_job_id is not None)
+            jobs_ahead = len(self._pending_job_ids) + int(self._active_job_id is not None)
             queue_detail = (
                 f"Queued behind {jobs_ahead} local model job{'' if jobs_ahead == 1 else 's'}."
                 if jobs_ahead
@@ -766,6 +769,7 @@ class ExplorerJobManager:
                 cancel_event=threading.Event(),
             )
             self._jobs[job_id] = job
+            self._pending_job_ids.add(job_id)
         self._queue.put(job_id)
         return job.snapshot.model_copy(deep=True)
 
@@ -784,6 +788,7 @@ class ExplorerJobManager:
             if job.snapshot.status in TERMINAL_JOB_STATES:
                 return job.snapshot.model_copy(deep=True)
             job.cancel_event.set()
+            self._pending_job_ids.discard(job_id)
             job.snapshot = job.snapshot.model_copy(
                 update={
                     "status": "cancelled",
@@ -801,6 +806,7 @@ class ExplorerJobManager:
             if job_id is None:
                 return
             with self._lock:
+                self._pending_job_ids.discard(job_id)
                 job = self._jobs.get(job_id)
                 if job is None or job.cancel_event.is_set():
                     continue

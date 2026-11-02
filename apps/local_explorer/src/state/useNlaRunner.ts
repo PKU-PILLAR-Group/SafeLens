@@ -20,8 +20,10 @@ import {
 export function useNlaRunner(onRunReady: (run: ExplorerRun, job: NLAJob) => void) {
   const [job, setJob] = useState<NLAJob | null>(null);
   const [error, setError] = useState<JobFailure | null>(null);
+  const [submitting, setSubmitting] = useState(false);
   const streamRef = useRef<EventSource | null>(null);
   const activeRef = useRef<{ id: string; generation: number } | null>(null);
+  const cancelRequestedRef = useRef(false);
   const generationRef = useRef(0);
   const deliveredRef = useRef(new Set<string>());
 
@@ -48,14 +50,27 @@ export function useNlaRunner(onRunReady: (run: ExplorerRun, job: NLAJob) => void
   const submit = useCallback(async (input: NLARunInput) => {
     closeStream();
     const generation = ++generationRef.current;
+    cancelRequestedRef.current = false;
     activeRef.current = { id: "submitting", generation };
     setJob(null);
     setError(null);
+    setSubmitting(true);
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
     try {
       const submitted = await submitNlaJob(input);
       if (activeRef.current?.generation !== generation) return;
       activeRef.current = { id: submitted.id, generation };
       setJob(submitted);
+      setSubmitting(false);
+      if (cancelRequestedRef.current) {
+        cancelRequestedRef.current = false;
+        try {
+          applySnapshot(await cancelNlaJob(submitted.id), generation);
+        } catch (caught) {
+          setError(jobFailureFromError(caught, "cancellation", "NLA cancellation failed."));
+        }
+        return;
+      }
       const stream = new EventSource(promptJobEventsUrl(submitted.id));
       streamRef.current = stream;
       stream.addEventListener("job", (event) => {
@@ -92,13 +107,18 @@ export function useNlaRunner(onRunReady: (run: ExplorerRun, job: NLAJob) => void
     } catch (caught) {
       if (activeRef.current?.generation !== generation) return;
       activeRef.current = null;
+      setSubmitting(false);
       setError(jobFailureFromError(caught, "submission", "NLA submission failed."));
     }
   }, [applySnapshot, closeStream]);
 
   const cancel = useCallback(async () => {
     const active = activeRef.current;
-    if (!active || active.id === "submitting") return;
+    if (!active) return;
+    if (active.id === "submitting") {
+      cancelRequestedRef.current = true;
+      return;
+    }
     try {
       applySnapshot(await cancelNlaJob(active.id), active.generation);
     } catch (caught) {
@@ -109,7 +129,9 @@ export function useNlaRunner(onRunReady: (run: ExplorerRun, job: NLAJob) => void
   const reset = useCallback(() => {
     closeStream();
     generationRef.current += 1;
+    cancelRequestedRef.current = false;
     activeRef.current = null;
+    setSubmitting(false);
     setJob(null);
     setError(null);
   }, [closeStream]);
@@ -120,5 +142,5 @@ export function useNlaRunner(onRunReady: (run: ExplorerRun, job: NLAJob) => void
     if (active && active.id !== "submitting") void cancelNlaJob(active.id).catch(() => undefined);
   }, [closeStream]);
 
-  return { job, error, submit, cancel, reset, submitting: activeRef.current?.id === "submitting" };
+  return { job, error, submit, cancel, reset, submitting };
 }

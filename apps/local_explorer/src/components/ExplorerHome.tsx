@@ -70,6 +70,7 @@ export function ExplorerHome({
   const [hiddenRunKeys, setHiddenRunKeys] = useState<Set<string>>(loadHiddenRunKeys);
   const [pendingDelete, setPendingDelete] = useState<ConversationSummary | null>(null);
   const [pendingConversationKey, setPendingConversationKey] = useState<string | null>(null);
+  const [historyNotice, setHistoryNotice] = useState<string | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
 
   const visibleRecords = useMemo(
@@ -142,6 +143,7 @@ export function ExplorerHome({
   }
 
   function restoreConversation(record: RunRecord & { run: ExplorerRun }) {
+    setHistoryNotice(null);
     const conversation = conversations.find((item) =>
       item.records.some((candidate) => candidate.key === record.key)
     );
@@ -171,8 +173,15 @@ export function ExplorerHome({
 
   function selectConversation(conversation: ConversationSummary) {
     const first = conversation.firstRecord;
+    setHistoryNotice(null);
     if (first.run) {
       restoreConversation(first as RunRecord & { run: ExplorerRun });
+      return;
+    }
+    if (!first.remoteSummary) {
+      setHistoryNotice(
+        "This conversation's run is not available in the current workspace. Start a new chat or reload the run."
+      );
       return;
     }
     setPendingConversationKey(first.key);
@@ -185,6 +194,7 @@ export function ExplorerHome({
     turnManager.reset();
     setConversationId(null);
     setPendingConversationKey(null);
+    setHistoryNotice(null);
     setPrompt("");
     setAnalysisOpen(null);
     setHistoryOpen(false);
@@ -276,6 +286,28 @@ export function ExplorerHome({
           onClose={() => setHistoryOpen(false)}
         />
         <main className="chat-home-main">
+          {(pendingConversationKey || historyNotice) && (
+            <div
+              className={`chat-history-notice ${remoteState.status === "error" || historyNotice ? "error" : ""}`}
+              role="status"
+            >
+              {historyNotice ? (
+                <span>{historyNotice}</span>
+              ) : remoteState.status === "error" ? (
+                <>
+                  <span>Could not load this conversation. {remoteState.detail}</span>
+                  <button
+                    type="button"
+                    onClick={() => pendingConversationKey && onSelectConversation(pendingConversationKey)}
+                  >
+                    Retry
+                  </button>
+                </>
+              ) : (
+                <span>Loading conversation from the workspace…</span>
+              )}
+            </div>
+          )}
           {turnManager.turns.length === 0 ? (
             <section className="chat-home-welcome" aria-labelledby="chat-home-title">
               <div>

@@ -24,8 +24,10 @@ interface PromptRunnerState {
 
 export function usePromptRunner(onRunReady: (run: ExplorerRun, job: PromptJob) => void) {
   const [state, setState] = useState<PromptRunnerState>({ job: null, error: null });
+  const [submitting, setSubmitting] = useState(false);
   const streamRef = useRef<EventSource | null>(null);
   const activeRef = useRef<{ id: string; generation: number } | null>(null);
+  const cancelRequestedRef = useRef(false);
   const generationRef = useRef(0);
   const deliveredRef = useRef(new Set<string>());
 
@@ -54,13 +56,29 @@ export function usePromptRunner(onRunReady: (run: ExplorerRun, job: PromptJob) =
   const submit = useCallback(async (input: PromptRunInput) => {
     closeStream();
     const generation = ++generationRef.current;
+    cancelRequestedRef.current = false;
     activeRef.current = { id: "submitting", generation };
     setState({ job: null, error: null });
+    setSubmitting(true);
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
     try {
       const submitted = await submitPromptJob(input);
       if (activeRef.current?.generation !== generation) return;
       activeRef.current = { id: submitted.id, generation };
       setState({ job: submitted, error: null });
+      setSubmitting(false);
+      if (cancelRequestedRef.current) {
+        cancelRequestedRef.current = false;
+        try {
+          applySnapshot(await cancelPromptJob(submitted.id), generation);
+        } catch (caught) {
+          setState((current) => ({
+            ...current,
+            error: jobFailureFromError(caught, "cancellation", "Prompt job cancellation failed.")
+          }));
+        }
+        return;
+      }
       const stream = new EventSource(promptJobEventsUrl(submitted.id));
       streamRef.current = stream;
       stream.addEventListener("job", (event) => {
@@ -106,6 +124,7 @@ export function usePromptRunner(onRunReady: (run: ExplorerRun, job: PromptJob) =
     } catch (error) {
       if (activeRef.current?.generation !== generation) return;
       activeRef.current = null;
+      setSubmitting(false);
       setState({
         job: null,
         error: jobFailureFromError(error, "submission", "Prompt job submission failed.")
@@ -115,7 +134,11 @@ export function usePromptRunner(onRunReady: (run: ExplorerRun, job: PromptJob) =
 
   const cancel = useCallback(async () => {
     const active = activeRef.current;
-    if (!active || active.id === "submitting") return;
+    if (!active) return;
+    if (active.id === "submitting") {
+      cancelRequestedRef.current = true;
+      return;
+    }
     try {
       const snapshot = await cancelPromptJob(active.id);
       applySnapshot(snapshot, active.generation);
@@ -130,7 +153,9 @@ export function usePromptRunner(onRunReady: (run: ExplorerRun, job: PromptJob) =
   const reset = useCallback(() => {
     closeStream();
     generationRef.current += 1;
+    cancelRequestedRef.current = false;
     activeRef.current = null;
+    setSubmitting(false);
     setState({ job: null, error: null });
   }, [closeStream]);
 
@@ -140,5 +165,5 @@ export function usePromptRunner(onRunReady: (run: ExplorerRun, job: PromptJob) =
     if (active && active.id !== "submitting") void cancelPromptJob(active.id).catch(() => undefined);
   }, [closeStream]);
 
-  return { ...state, submit, cancel, reset, submitting: activeRef.current?.id === "submitting" };
+  return { ...state, submit, cancel, reset, submitting };
 }

@@ -22,8 +22,10 @@ export function useSAEFeatureDiscovery(
 ) {
   const [job, setJob] = useState<SAEFeatureDiscoveryJob | null>(null);
   const [error, setError] = useState<JobFailure | null>(null);
+  const [submitting, setSubmitting] = useState(false);
   const streamRef = useRef<EventSource | null>(null);
   const activeRef = useRef<{ id: string; generation: number } | null>(null);
+  const cancelRequestedRef = useRef(false);
   const generationRef = useRef(0);
 
   const closeStream = useCallback(() => {
@@ -50,14 +52,27 @@ export function useSAEFeatureDiscovery(
   const submit = useCallback(async (input: SAEFeatureDiscoveryInput) => {
     closeStream();
     const generation = ++generationRef.current;
+    cancelRequestedRef.current = false;
     activeRef.current = { id: "submitting", generation };
     setJob(null);
     setError(null);
+    setSubmitting(true);
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
     try {
       const submitted = await submitSAEFeatureDiscoveryJob(input);
       if (activeRef.current?.generation !== generation) return;
       activeRef.current = { id: submitted.id, generation };
       setJob(submitted);
+      setSubmitting(false);
+      if (cancelRequestedRef.current) {
+        cancelRequestedRef.current = false;
+        try {
+          applySnapshot(await cancelSAEFeatureDiscoveryJob(submitted.id), generation);
+        } catch (caught) {
+          setError(jobFailureFromError(caught, "cancellation", "SAE discovery cancellation failed."));
+        }
+        return;
+      }
       const stream = new EventSource(promptJobEventsUrl(submitted.id));
       streamRef.current = stream;
       stream.addEventListener("job", (event) => {
@@ -94,13 +109,18 @@ export function useSAEFeatureDiscovery(
     } catch (caught) {
       if (activeRef.current?.generation !== generation) return;
       activeRef.current = null;
+      setSubmitting(false);
       setError(jobFailureFromError(caught, "submission", "SAE feature discovery failed."));
     }
   }, [applySnapshot, closeStream]);
 
   const cancel = useCallback(async () => {
     const active = activeRef.current;
-    if (!active || active.id === "submitting") return;
+    if (!active) return;
+    if (active.id === "submitting") {
+      cancelRequestedRef.current = true;
+      return;
+    }
     try {
       applySnapshot(await cancelSAEFeatureDiscoveryJob(active.id), active.generation);
     } catch (caught) {
@@ -111,7 +131,9 @@ export function useSAEFeatureDiscovery(
   const reset = useCallback(() => {
     closeStream();
     generationRef.current += 1;
+    cancelRequestedRef.current = false;
     activeRef.current = null;
+    setSubmitting(false);
     setJob(null);
     setError(null);
   }, [closeStream]);
@@ -130,6 +152,7 @@ export function useSAEFeatureDiscovery(
     submit,
     cancel,
     reset,
-    running: activeRef.current !== null
+    submitting,
+    running: submitting || activeRef.current !== null
   };
 }

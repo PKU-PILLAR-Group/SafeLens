@@ -15,8 +15,8 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from SafeLens.core.hooks import ActivationCache
-from SafeLens.core.patching import PatchSpec, run_activation_patch
+from SafeLens.core.hooks import ActivationCache, extract_hook_output
+from SafeLens.core.patching import PatchSpec, make_patch_hook, run_activation_patch
 from SafeLens.explorer_model import load_explorer_hf_model
 from SafeLens.utils import HuggingFaceModelWrapper
 
@@ -113,6 +113,31 @@ def main() -> None:
             }
             for index, token_id in enumerate(corrupted_ids)
         ]
+        generation: dict[str, Any] | None = None
+        if bool(request.get("generateAfterPatch", False)):
+            strongest = max(
+                cells,
+                key=lambda cell: abs(
+                    cell["recoveryPercentage"]
+                    if cell["recoveryPercentage"] is not None
+                    else cell["causalEffect"]
+                ),
+            )
+            try:
+                generation = _generate_after_patch(
+                    wrapper,
+                    corrupted_prompt=str(request["corruptedPrompt"]),
+                    clean_cache=clean_cache,
+                    component=component,
+                    head=head,
+                    layer=int(strongest["layer"]),
+                    position=int(strongest["tokenIndex"]),
+                    max_new_tokens=max(1, min(512, int(request.get("maxNewTokens", 64)))),
+                    cell=strongest,
+                )
+            except Exception as exc:
+                generation = {"error": f"{type(exc).__name__}: {exc}"}
+
         target_text = str(tokenizer.decode([target_token_id], clean_up_tokenization_spaces=False))
         derived = _merge_patching_result(
             run,
@@ -128,6 +153,7 @@ def main() -> None:
             clean_score=clean_score,
             corrupted_score=corrupted_score,
             cells=cells,
+            generation=generation,
         )
     finally:
         wrapper.remove_hooks()
@@ -210,6 +236,123 @@ def _flat_token_ids(tokens: Any) -> list[int]:
     return [int(token_id) for token_id in value]
 
 
+def _generate_after_patch(
+    wrapper: HuggingFaceModelWrapper,
+    *,
+    corrupted_prompt: str,
+    clean_cache: ActivationCache,
+    component: str,
+    head: int | None,
+    layer: int,
+    position: int,
+    max_new_tokens: int,
+    cell: dict[str, Any],
+) -> dict[str, Any]:
+    activation_name = f"layer_{layer}.{component}"
+    spec = PatchSpec(
+        layer=activation_name,
+        activation_name=activation_name,
+        target_index=_patch_index(component, position, head),
+        source_index=_patch_index(component, position, head),
+    )
+    corrupted = _generate_text(
+        wrapper,
+        corrupted_prompt,
+        max_new_tokens=max_new_tokens,
+        seed=0,
+    )
+    patched = _generate_text(
+        wrapper,
+        corrupted_prompt,
+        max_new_tokens=max_new_tokens,
+        seed=0,
+        patch=(activation_name, clean_cache, spec),
+    )
+    return {
+        "cell": {
+            "layer": layer,
+            "tokenIndex": position,
+            "patchedScore": cell["patchedScore"],
+            "causalEffect": cell["causalEffect"],
+            "recoveryPercentage": cell["recoveryPercentage"],
+        },
+        "corrupted": corrupted,
+        "patched": patched,
+        "maxNewTokens": max_new_tokens,
+    }
+
+
+def _generate_text(
+    wrapper: HuggingFaceModelWrapper,
+    prompt: str,
+    *,
+    max_new_tokens: int,
+    seed: int,
+    patch: tuple[str, ActivationCache, PatchSpec] | None = None,
+) -> dict[str, Any]:
+    import random
+
+    import torch
+
+    random.seed(seed)
+    torch.manual_seed(seed)
+    prompt_token_count = len(_flat_token_ids(wrapper.to_tokens(prompt, prepend_bos=False)))
+    handle = None
+    if patch is not None:
+        hook_name, clean_cache, spec = patch
+        base_hook = make_patch_hook(spec, clean_cache)
+
+        def guarded_patch_hook(*args: Any, **kwargs: Any) -> Any:
+            activation = extract_hook_output(args, kwargs)
+            if getattr(activation, "shape", (0, 0))[1] != prompt_token_count:
+                return None
+            return base_hook(*args, **kwargs)
+
+        handle = wrapper.add_hook(hook_name, guarded_patch_hook)
+    try:
+        generated_output = wrapper.generate(
+            prompt,
+            max_new_tokens=max_new_tokens,
+            do_sample=False,
+            pad_token_id=wrapper.tokenizer.eos_token_id,
+            prepend_bos=False,
+            return_type="model_output",
+            return_dict_in_generate=True,
+            output_scores=False,
+            use_cache=True,
+        )
+    finally:
+        if handle is not None:
+            handle.remove()
+    generated = getattr(generated_output, "sequences", generated_output)
+    generated_ids = _flat_token_ids(generated)
+    continuation_ids = generated_ids[prompt_token_count:]
+    text = str(
+        wrapper.tokenizer.decode(
+            continuation_ids,
+            skip_special_tokens=False,
+            clean_up_tokenization_spaces=False,
+        )
+    )
+    return {
+        "text": text,
+        "tokenIds": continuation_ids,
+        "tokens": [
+            {
+                "index": index,
+                "tokenId": token_id,
+                "text": str(
+                    wrapper.tokenizer.decode(
+                        [token_id],
+                        clean_up_tokenization_spaces=False,
+                    )
+                ),
+            }
+            for index, token_id in enumerate(continuation_ids)
+        ],
+    }
+
+
 def _patch_index(component: str, position: int, head: int | None) -> tuple[Any, ...]:
     if component == "z":
         if head is None:
@@ -237,6 +380,7 @@ def _merge_patching_result(
     clean_score: float,
     corrupted_score: float,
     cells: list[dict[str, Any]],
+    generation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     source_run = {"runId": run["runId"], "sampleId": run["sampleId"]}
     denominator = clean_score - corrupted_score
@@ -258,6 +402,7 @@ def _merge_patching_result(
         "cells": cells,
         "sourceRun": source_run,
         "sourceKey": source_key,
+        **({"generation": generation} if generation is not None else {}),
     }
     provenance = run.setdefault("metricProvenance", {})
     provenance["patchingCausalEffect"] = {

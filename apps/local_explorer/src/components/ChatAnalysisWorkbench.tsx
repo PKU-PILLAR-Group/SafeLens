@@ -228,7 +228,7 @@ function NeuronInterventionWorkbench({
       </div>
       <div className="chat-token-range"><header><span>Apply to</span><div><button className={positionStart === 0 && positionEnd === run.tokens.length ? "active" : ""} aria-pressed={positionStart === 0 && positionEnd === run.tokens.length} disabled={running} onClick={() => setRange(0, run.tokens.length)}>Entire input</button><button className={positionStart === run.tokens.length - 1 && positionEnd === run.tokens.length ? "active" : ""} aria-pressed={positionStart === run.tokens.length - 1 && positionEnd === run.tokens.length} disabled={running} onClick={() => setRange(run.tokens.length - 1, run.tokens.length)}>Last token</button></div><small>T{positionStart}–T{positionEnd - 1}</small></header><div aria-label="Neuron intervention token range">{run.tokens.map((token) => <button key={token.index} className={token.index >= positionStart && token.index < positionEnd ? "active" : ""} aria-pressed={token.index >= positionStart && token.index < positionEnd} disabled={running} onClick={() => setRange(token.index, token.index + 1)}>{visibleToken(token.text)}</button>)}</div></div>
       <div className="chat-feature-selected"><strong>{selectedNeuron?.id}</strong><span>{selectedNeuron?.label}</span><small>peak activation {selectedNeuron?.maxAbsoluteActivation.toFixed(4)} · factor {scale.toFixed(1)}</small></div>
-      <WorkbenchActions running={running} disabled={!preflight?.canSubmit || !selectedNeuron} runLabel="Run neuron intervention" status={runner.error?.message ?? preflightError ?? preflight?.reason} progress={runner.job?.progress} onRun={submit} onCancel={() => void runner.cancel()} onReset={runner.reset} failed={Boolean(runner.error)} />
+      <WorkbenchActions running={running} disabled={!preflight?.canSubmit || !selectedNeuron} runLabel="Run neuron intervention" status={runner.error?.message ?? preflightError ?? runner.job?.detail ?? preflight?.reason} progress={runner.job?.progress} onRun={submit} onCancel={() => void runner.cancel()} onReset={runner.reset} failed={Boolean(runner.error)} />
       {result?.intervention && <SteeringResult experiment={result.intervention} />}
     </section>
   );
@@ -248,6 +248,10 @@ function PatchingWorkbench({
   const targetOptions = useMemo(() => steeringTargetOptions(run), [run]);
   const [targetTokenId, setTargetTokenId] = useState(
     prior?.targetTokenId ?? targetOptions[0]?.tokenId ?? 0
+  );
+  const [generateAfterPatch, setGenerateAfterPatch] = useState(Boolean(prior?.generation));
+  const [generationMaxNewTokens, setGenerationMaxNewTokens] = useState(
+    prior?.generation?.maxNewTokens ?? 64
   );
   const [preflight, setPreflight] = useState<PatchingPreflight | null>(null);
   const [preflightError, setPreflightError] = useState<string | null>(null);
@@ -333,7 +337,9 @@ function PatchingWorkbench({
       layers,
       positions,
       ...(component === "z" ? { head } : {}),
-      targetTokenId
+      targetTokenId,
+      generateAfterPatch,
+      maxNewTokens: generationMaxNewTokens
     });
   }
 
@@ -402,6 +408,36 @@ function PatchingWorkbench({
           <strong>{preflight?.canSubmit ? "Aligned" : preflight ? "Needs alignment" : "Checking"}</strong>
           <span>{preflight ? `${preflight.cleanTokenCount} clean · ${preflight.corruptedTokenCount} corrupt · ${preflight.changedPositions.length} changed` : "Tokenizing both inputs"}</span>
         </div>
+      </div>
+
+      <div className="chat-patching-generation-option">
+        <label>
+          <input
+            type="checkbox"
+            checked={generateAfterPatch}
+            disabled={running}
+            onChange={(event) => setGenerateAfterPatch(event.target.checked)}
+          />
+          <span>Generate after patch</span>
+        </label>
+        {generateAfterPatch && (
+          <label>
+            <span>Output tokens</span>
+            <input
+              type="number"
+              min={1}
+              max={512}
+              step={1}
+              aria-label="Patched generation output tokens"
+              value={generationMaxNewTokens}
+              disabled={running}
+              onChange={(event) => setGenerationMaxNewTokens(
+                Math.max(1, Math.min(512, Number(event.target.value) || 1))
+              )}
+            />
+          </label>
+        )}
+        <small>Generation uses the strongest patch cell (max |recovery|).</small>
       </div>
 
       {preflight?.corruptedTokens.length ? (
@@ -920,7 +956,7 @@ function FeatureInterventionWorkbench({
         </div>
       </section>
       <div className="chat-token-range"><header><span><b className="chat-sae-step">3</b> Apply to</span><div><button className={positionStart === outputBoundary && positionEnd === run.tokens.length ? "active" : ""} aria-pressed={positionStart === outputBoundary && positionEnd === run.tokens.length} disabled={running || !hasSelectedFeature} onClick={() => setRange(outputBoundary, run.tokens.length)}>Output boundary</button><button className={positionStart === 0 && positionEnd === run.tokens.length ? "active" : ""} aria-pressed={positionStart === 0 && positionEnd === run.tokens.length} disabled={running || !hasSelectedFeature} onClick={() => setRange(0, run.tokens.length)}>Entire input</button></div><small>{hasSelectedFeature ? `T${positionStart}–T${positionEnd - 1}` : "Select a feature first"}</small></header>{hasSelectedFeature ? <div aria-label="SAE intervention token range">{run.tokens.map((token) => <button key={token.index} className={token.index >= positionStart && token.index < positionEnd ? "active" : ""} aria-pressed={token.index >= positionStart && token.index < positionEnd} disabled={running} onClick={() => setRange(token.index, token.index + 1)}>{visibleToken(token.text)}</button>)}</div> : <p className="chat-sae-range-hint">The intervention will apply to the output boundary by default.</p>}</div>
-      <WorkbenchActions running={running} disabled={!preflight?.canSubmit || !selectedProfile || !hasSelectedFeature} runLabel="Run SAE intervention" status={runner.error?.message ?? profileError ?? preflightError ?? preflight?.reason} progress={runner.job?.progress} onRun={submit} onCancel={() => void runner.cancel()} onReset={runner.reset} failed={Boolean(runner.error)} />
+      <WorkbenchActions running={running} disabled={!preflight?.canSubmit || !selectedProfile || !hasSelectedFeature} runLabel="Run SAE intervention" status={runner.error?.message ?? profileError ?? preflightError ?? runner.job?.detail ?? preflight?.reason} progress={runner.job?.progress} onRun={submit} onCancel={() => void runner.cancel()} onReset={runner.reset} failed={Boolean(runner.error)} />
       {result?.intervention && <SteeringResult experiment={result.intervention} />}
     </section>
   );
@@ -938,7 +974,9 @@ function SteeringWorkbench({
   suggestionQuery,
   onRunReady
 }: Omit<ChatAnalysisWorkbenchProps, "mode">) {
-  const prior = savedRun?.intervention ?? run.intervention;
+  const prior =
+    (savedRun?.intervention?.mode === "direction" ? savedRun.intervention : undefined) ??
+    (run.intervention?.mode === "direction" ? run.intervention : undefined);
   const [expanded, setExpanded] = useState(false);
   const [concept, setConcept] = useState<SteeringConcept>("Custom");
   const [positivePreset, setPositivePreset] = useState("Custom samples");
@@ -962,7 +1000,9 @@ function SteeringWorkbench({
   const [targetTokenId, setTargetTokenId] = useState(prior?.targetTokenId ?? targetOptions[0]?.tokenId ?? 0);
   const [preflight, setPreflight] = useState<InterventionPreflight | null>(null);
   const [preflightError, setPreflightError] = useState<string | null>(null);
-  const [result, setResult] = useState<ExplorerRun | null>(savedRun?.intervention ? savedRun : prior ? run : null);
+  const [result, setResult] = useState<ExplorerRun | null>(
+    savedRun?.intervention?.mode === "direction" ? savedRun : prior ? run : null
+  );
   const positiveRequest = useMemo(() => positivePrompts.map((prompt) => prompt.trim()).filter(Boolean), [positivePrompts]);
   const negativeRequest = useMemo(() => negativePrompts.map((prompt) => prompt.trim()).filter(Boolean), [negativePrompts]);
 
@@ -1163,7 +1203,7 @@ function SteeringWorkbench({
         running={running}
         disabled={!canRun}
         runLabel="Run steering"
-        status={runner.error?.message ?? preflightError ?? preflight?.reason ?? "Checking steering inputs..."}
+        status={runner.error?.message ?? preflightError ?? runner.job?.detail ?? preflight?.reason ?? "Checking steering inputs..."}
         progress={runner.job?.progress}
         onRun={submit}
         onCancel={() => void runner.cancel()}
@@ -1596,6 +1636,39 @@ function PatchingResult({ experiment }: { experiment: PatchingExperiment }) {
           <span>Causal effect <b>{signed(selected.causalEffect)}</b></span>
           <span>Recovery <b>{selected.recoveryPercentage === null ? "n/a" : `${selected.recoveryPercentage.toFixed(1)}%`}</b></span>
         </footer>
+      )}
+      {experiment.generation && (
+        <section className="chat-patching-generation" aria-label="Generation after patch">
+          <header>
+            <div><GitCompareArrows size={16} /><strong>Generation after patch</strong></div>
+            {experiment.generation.cell && (
+              <span>
+                Strongest cell L{experiment.generation.cell.layer} · T{experiment.generation.cell.tokenIndex}
+              </span>
+            )}
+          </header>
+          {experiment.generation.error ? (
+            <p className="chat-patching-generation-error" role="alert">
+              Patched generation failed: {experiment.generation.error}
+            </p>
+          ) : experiment.generation.corrupted && experiment.generation.patched ? (
+            <div className="chat-steering-output">
+              <article className="is-original">
+                <span>Corrupt</span>
+                <p>{experiment.generation.corrupted.text || "No continuation"}</p>
+                <small>{experiment.generation.corrupted.tokenIds.length} generated tokens</small>
+              </article>
+              <div className="chat-steering-transition" title="Generation after patch">
+                <ArrowRight size={20} />
+              </div>
+              <article className="is-steered">
+                <span>Patched</span>
+                <p>{experiment.generation.patched.text || "No continuation"}</p>
+                <small>{experiment.generation.patched.tokenIds.length} generated tokens</small>
+              </article>
+            </div>
+          ) : null}
+        </section>
       )}
     </section>
   );

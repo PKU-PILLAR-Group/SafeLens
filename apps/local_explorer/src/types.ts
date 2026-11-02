@@ -319,6 +319,12 @@ export interface PatchingCell {
   sourceKey: string;
 }
 
+export interface PatchingGeneration {
+  text: string;
+  tokenIds: number[];
+  tokens: Array<{ index: number; tokenId: number; text: string }>;
+}
+
 export interface PatchingExperiment {
   cleanPrompt: string;
   corruptedPrompt: string;
@@ -333,6 +339,19 @@ export interface PatchingExperiment {
   positions: number[];
   corruptedTokens: PatchingToken[];
   cells: PatchingCell[];
+  generation?: {
+    cell?: {
+      layer: number;
+      tokenIndex: number;
+      patchedScore: number;
+      causalEffect: number;
+      recoveryPercentage: number | null;
+    };
+    corrupted?: PatchingGeneration;
+    patched?: PatchingGeneration;
+    maxNewTokens?: number;
+    error?: string;
+  };
   sourceRun: { runId: string; sampleId: string };
   sourceKey: string;
 }

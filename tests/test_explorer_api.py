@@ -9,10 +9,13 @@ import time
 from pathlib import Path
 
 from fastapi.testclient import TestClient
+from pydantic import BaseModel
 
 from SafeLens.explorer_api import (
+    ExplorerJobManager,
     InterventionPreflightRequest,
     NLARunRequest,
+    PatchingRunRequest,
     PromptMessage,
     _intervention_preflight,
     _read_artifact_cached,
@@ -1588,6 +1591,62 @@ def test_sae_model_names_accept_short_and_hub_ids() -> None:
     assert not model_names_match("gemma-3-270m-it", "google/gemma-2-9b-it")
     assert not model_names_match("gemma-2-9b", "google/gemma-2-9b-it")
     assert model_names_match(None, "google/gemma-2-9b-it")
+
+
+class _QueuePayload(BaseModel):
+    value: int = 0
+
+
+def test_job_queue_does_not_count_cancelled_jobs() -> None:
+    import threading
+
+    release = threading.Event()
+    started = threading.Event()
+
+    def runner(payload, cancel_event, progress):
+        _ = payload, cancel_event, progress
+        started.set()
+        release.wait(5)
+        return {}
+
+    manager = ExplorerJobManager(
+        runner,
+        kind="patching",
+        ready_detail="ready",
+        error_detail="failed",
+    )
+    try:
+        manager.submit(_QueuePayload())
+        assert started.wait(2)
+        second = manager.submit(_QueuePayload())
+        third = manager.submit(_QueuePayload())
+        assert "Queued behind 1 local model job." in second.detail
+        assert "Queued behind 2 local model jobs." in third.detail
+
+        cancelled = manager.cancel(second.id)
+        assert cancelled.status == "cancelled"
+
+        fourth = manager.submit(_QueuePayload())
+        assert "Queued behind 2 local model jobs." in fourth.detail
+    finally:
+        release.set()
+
+
+def test_patching_request_accepts_optional_generation() -> None:
+    request = PatchingRunRequest.model_validate(
+        {
+            "run": {},
+            "corruptedPrompt": "corrupted",
+            "component": "resid_post",
+            "layers": [0],
+            "positions": [0],
+            "targetTokenId": 1,
+            "generateAfterPatch": True,
+            "maxNewTokens": 32,
+        }
+    )
+    assert request.generateAfterPatch is True
+    assert request.maxNewTokens == 32
 
 
 def test_qwen_sae_profile_is_exposed() -> None:

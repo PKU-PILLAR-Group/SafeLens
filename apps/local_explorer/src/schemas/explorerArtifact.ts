@@ -182,6 +182,35 @@ const patchingExperimentSchema = z.object({
     recoveryPercentage: z.number().finite().nullable(),
     sourceKey: z.string().min(1)
   })).min(1),
+  generation: z.object({
+    cell: z.object({
+      layer: z.number().int().nonnegative(),
+      tokenIndex: z.number().int().nonnegative(),
+      patchedScore: z.number().finite(),
+      causalEffect: z.number().finite(),
+      recoveryPercentage: z.number().finite().nullable()
+    }).optional(),
+    corrupted: z.object({
+      text: z.string(),
+      tokenIds: z.array(z.number().int().nonnegative()),
+      tokens: z.array(z.object({
+        index: z.number().int().nonnegative(),
+        tokenId: z.number().int().nonnegative(),
+        text: z.string()
+      }))
+    }).optional(),
+    patched: z.object({
+      text: z.string(),
+      tokenIds: z.array(z.number().int().nonnegative()),
+      tokens: z.array(z.object({
+        index: z.number().int().nonnegative(),
+        tokenId: z.number().int().nonnegative(),
+        text: z.string()
+      }))
+    }).optional(),
+    maxNewTokens: z.number().int().positive().optional(),
+    error: z.string().optional()
+  }).optional(),
   sourceRun: z.object({ runId: z.string().min(1), sampleId: z.string().min(1) }),
   sourceKey: z.string().min(1)
 }).superRefine((experiment, context) => {
