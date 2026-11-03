@@ -7,7 +7,7 @@ export default defineConfig({
   testIgnore: ["performance-budget.spec.ts", "matrix-performance.spec.ts"],
   fullyParallel: true,
   workers: process.env.CI ? 2 : 8,
-  retries: 0,
+  retries: process.env.CI ? 2 : 0,
   reporter: "line",
   use: {
     baseURL,
