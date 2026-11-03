@@ -1275,11 +1275,15 @@ test("hydrates chunk-v1 views and loads the full sample for experiments or matri
   expect((await chunkLoadingState.boundingBox())?.height).toBeGreaterThanOrEqual(320);
   expect((await chunkSkeleton.locator(".analysis-loading-stage").boundingBox())?.height)
     .toBeGreaterThanOrEqual(220);
-  const loadingAccessibility = await new AxeBuilder({ page })
-    .include(".view-chunk-state.loading")
-    .withTags(["wcag2a", "wcag2aa"])
-    .analyze();
-  expect(loadingAccessibility.violations).toEqual([]);
+  let loadingViolations: unknown;
+  await expect(async () => {
+    const loadingAccessibility = await new AxeBuilder({ page })
+      .include(".view-chunk-state.loading")
+      .withTags(["wcag2a", "wcag2aa"])
+      .analyze();
+    loadingViolations = loadingAccessibility.violations;
+  }).toPass({ timeout: 5_000 });
+  expect(loadingViolations).toEqual([]);
   await page.emulateMedia({ reducedMotion: "reduce" });
   await expect(chunkSkeleton.locator(".analysis-loading-toolbar span").first())
     .toHaveCSS("animation-name", "none");
