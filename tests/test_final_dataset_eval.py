@@ -250,6 +250,7 @@ def test_sample_error_cannot_meet_threshold() -> None:
 def test_dataset_runner_rejects_unavailable_safety_judge(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    pytest.importorskip("transformers")
     from transformers import AutoConfig
 
     sample = next(

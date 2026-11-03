@@ -17,7 +17,6 @@ import pandas as pd
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-
 LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 
 
@@ -90,7 +89,8 @@ def load_examples(current_path: Path, v1_path: Path, wiki_path: Path, seed: int)
         options = shuffled_options(raw_options, seed, "wiki_factor", i)
         labels = [label for _, label in options]
         prompt = format_question(
-            "Choose the factually correct continuation of the passage. Reply with only the option letter.",
+            "Choose the factually correct continuation of the passage. "
+            "Reply with only the option letter.",
             "Passage",
             str(row["turncated_prefixes"]),
             [text.lstrip(" ") for text, _ in options],
@@ -140,7 +140,9 @@ def make_batches(items: list[dict[str, Any]], max_batch_tokens: int, max_batch_s
     for item in items:
         proposed_size = len(batch) + 1
         proposed_width = max(len(item["ids"]), len(batch[-1]["ids"]) if batch else 0)
-        if batch and (proposed_size > max_batch_size or proposed_size * proposed_width > max_batch_tokens):
+        if batch and (
+            proposed_size > max_batch_size or proposed_size * proposed_width > max_batch_tokens
+        ):
             yield batch
             batch = [item]
         else:
@@ -187,7 +189,9 @@ def generate_batch(model: Any, tokenizer: Any, batch: list[dict[str, Any]], devi
     return tokenizer.batch_decode(output[:, width:], skip_special_tokens=True)
 
 
-def summarize(records: list[dict[str, Any]], args: argparse.Namespace, world_size: int, truncated: int):
+def summarize(
+    records: list[dict[str, Any]], args: argparse.Namespace, world_size: int, truncated: int
+):
     metrics: dict[str, dict[str, Any]] = {}
     for task in sorted({record["task"] for record in records}):
         rows = [record for record in records if record["task"] == task]
@@ -222,10 +226,18 @@ def main() -> None:
         "--model",
         default=os.environ.get("SAFELENS_GEMMA_2_9B_IT_MODEL", "google/gemma-2-9b-it"),
     )
-    parser.add_argument("--truthfulqa", default="yjr_local_test/external/TruthfulQA/data/mc_task.json")
-    parser.add_argument("--truthfulqa-v1", default="yjr_local_test/external/TruthfulQA/data/v1/mc_task.json")
-    parser.add_argument("--wiki-factor", default="yjr_local_test/external/factor/data/wiki_factor.csv")
-    parser.add_argument("--output", default="yjr_local_test/results/gemma-2-9b-it_direct_choice_generation.json")
+    parser.add_argument(
+        "--truthfulqa", default="yjr_local_test/external/TruthfulQA/data/mc_task.json"
+    )
+    parser.add_argument(
+        "--truthfulqa-v1", default="yjr_local_test/external/TruthfulQA/data/v1/mc_task.json"
+    )
+    parser.add_argument(
+        "--wiki-factor", default="yjr_local_test/external/factor/data/wiki_factor.csv"
+    )
+    parser.add_argument(
+        "--output", default="yjr_local_test/results/gemma-2-9b-it_direct_choice_generation.json"
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--max-input-length", type=int, default=4096)
     parser.add_argument("--max-batch-tokens", type=int, default=32768)
@@ -252,38 +264,49 @@ def main() -> None:
     encoded, local_truncated = encode_examples(
         tokenizer, local_examples, args.max_input_length, args.disable_thinking
     )
-    model = AutoModelForCausalLM.from_pretrained(
-        args.model, dtype=torch.bfloat16, attn_implementation="sdpa", low_cpu_mem_usage=True
-    ).to(device).eval()
+    model = (
+        AutoModelForCausalLM.from_pretrained(
+            args.model, dtype=torch.bfloat16, attn_implementation="sdpa", low_cpu_mem_usage=True
+        )
+        .to(device)
+        .eval()
+    )
 
     records: list[dict[str, Any]] = []
     batches = list(make_batches(encoded, args.max_batch_tokens, args.max_batch_size))
     for batch_index, batch in enumerate(batches, 1):
         responses = generate_batch(model, tokenizer, batch, device)
-        for item, response in zip(batch, responses):
+        for item, response in zip(batch, responses, strict=False):
             example = item["example"]
             prediction = parse_letter(response, example.option_count)
-            records.append({
-                "task": example.task,
-                "example_id": example.example_id,
-                "answer": example.answer,
-                "prediction": prediction,
-                "response": response,
-                "correct": int(prediction == example.answer),
-            })
+            records.append(
+                {
+                    "task": example.task,
+                    "example_id": example.example_id,
+                    "answer": example.answer,
+                    "prediction": prediction,
+                    "response": response,
+                    "correct": int(prediction == example.answer),
+                }
+            )
         if batch_index % 10 == 0 or batch_index == len(batches):
             print(
-                f"rank={rank} batches={batch_index}/{len(batches)} examples={len(records)}/{len(encoded)}",
+                f"rank={rank} batches={batch_index}/{len(batches)} "
+                f"examples={len(records)}/{len(encoded)}",
                 flush=True,
             )
 
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
     run_id = os.environ.get("MASTER_PORT", "single")
-    shard_paths = [output.with_suffix(output.suffix + f".{run_id}.rank{i}.tmp") for i in range(world_size)]
+    shard_paths = [
+        output.with_suffix(output.suffix + f".{run_id}.rank{i}.tmp") for i in range(world_size)
+    ]
     shard_path = shard_paths[rank]
     pending = shard_path.with_suffix(shard_path.suffix + ".pending")
-    pending.write_text(json.dumps({"records": records, "truncated": local_truncated}), encoding="utf-8")
+    pending.write_text(
+        json.dumps({"records": records, "truncated": local_truncated}), encoding="utf-8"
+    )
     pending.replace(shard_path)
     if rank == 0:
         deadline = time.monotonic() + 300

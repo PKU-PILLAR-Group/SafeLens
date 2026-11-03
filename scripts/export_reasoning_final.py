@@ -8,7 +8,6 @@ import random
 from pathlib import Path
 from typing import Any
 
-
 ROOT = Path(__file__).resolve().parents[1]
 DATASET = ROOT / "yjr_local_test/build_benchmark/trustworthy_benchmark_success (1).json"
 PCA_DIR = ROOT / "yjr_local_test/results/reasoning_pca_full_prompt_gemma2_9b"
@@ -105,7 +104,10 @@ def main() -> None:
         },
         "model": "google/gemma-2-9b-it",
         "prompt_and_decoding": {
-            "user_prompt": "Choose the correct answer. Reply with only the option letter.\n\n{native_input}\n\nAnswer:",
+            "user_prompt": (
+                "Choose the correct answer. Reply with only the option letter.\n\n"
+                "{native_input}\n\nAnswer:"
+            ),
             "chat_template": "Gemma tokenizer.apply_chat_template(add_generation_prompt=True)",
             "decoding": "greedy, do_sample=False, max_new_tokens=8",
             "answer_parser": "first valid option letter, limited by each question's option count",
@@ -125,11 +127,16 @@ def main() -> None:
                 "accuracy": baseline["accuracy"],
             },
             "repair_test": "77 held-out baseline-wrong examples; baseline repair accuracy is 0/77",
-            "injection_scope": "all prompt tokens during prefill and every generated token during decoding",
+            "injection_scope": (
+                "all prompt tokens during prefill and every generated token during decoding"
+            ),
             "layer_indexing": "zero-based model.model.layers indices",
         },
         "pca_full_prompt": {
-            "construction": "top right singular vector of paired (positive_hidden - negative_hidden), sign-aligned to the mean delta; unit norm",
+            "construction": (
+                "top right singular vector of paired "
+                "(positive_hidden - negative_hidden), sign-aligned to the mean delta; unit norm"
+            ),
             "source_layer": int(pca_best["source_layer"]),
             "injection_layer": int(pca_best["inject_layer"]),
             "alpha": float(pca_best["alpha"]),
@@ -141,7 +148,9 @@ def main() -> None:
             "best_result": {"repaired": len(pca_repaired), "total": 77},
         },
         "mean_full_prompt": {
-            "construction": "mean(positive_hidden - paired_negative_hidden), without unit normalization",
+            "construction": (
+                "mean(positive_hidden - paired_negative_hidden), without unit normalization"
+            ),
             "source_layer": int(mean_best["source_layer"]),
             "injection_layer": int(mean_best["inject_layer"]),
             "alpha": float(mean_best["alpha"]),
@@ -159,9 +168,14 @@ def main() -> None:
             "union": len(pca_repaired | mean_repaired),
         },
         "export": {
-            "correct_cases_selection": "all 20 steering positives plus 80 sampled without replacement from the other baseline-correct examples",
+            "correct_cases_selection": (
+                "all 20 steering positives plus 80 sampled without replacement "
+                "from the other baseline-correct examples"
+            ),
             "random_seed": SEED,
-            "null_repair_flag": "not evaluated because the example belongs to steering-vector training",
+            "null_repair_flag": (
+                "not evaluated because the example belongs to steering-vector training"
+            ),
         },
     }
 

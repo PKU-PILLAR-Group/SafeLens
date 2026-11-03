@@ -96,9 +96,7 @@ def test_gemma_feature_index_range_and_presets() -> None:
         validate_feature_index(131_072)
     assert len(GEMMA_9B_STEERING_PRESETS) == 10
     presets = {item["id"]: item for item in GEMMA_9B_STEERING_PRESETS}
-    assert presets["cats"]["features"] == [
-        {"featureIndex": 62_610, "strength": 192.0, "layer": 9}
-    ]
+    assert presets["cats"]["features"] == [{"featureIndex": 62_610, "strength": 192.0, "layer": 9}]
     assert presets["chinese"]["features"] == [
         {"featureIndex": 121_465, "strength": 74.0, "layer": 9}
     ]

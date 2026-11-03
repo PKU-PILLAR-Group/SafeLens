@@ -12,15 +12,13 @@ from pathlib import Path
 from typing import Any
 
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
-
 from run_reasoning_pca_full_prompt_2b import (
     DEFAULT_DATASET,
     DEFAULT_MODEL,
     INJECT_LAYERS,
     SOURCE_LAYERS,
-    atomic_json,
     append_jsonl,
+    atomic_json,
     generate_predictions,
     load_examples,
     make_batches,
@@ -28,7 +26,7 @@ from run_reasoning_pca_full_prompt_2b import (
     wait_for,
 )
 from run_truthfulqa_mean_full_prompt_wrong_only_2b import MEAN_ALPHAS, build_mean_vectors
-
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_REFERENCE = ROOT / "yjr_local_test/results/reasoning_pca_full_prompt_gemma2_2b"
@@ -40,7 +38,8 @@ def main() -> None:
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--pca-results", default=str(DEFAULT_REFERENCE))
     parser.add_argument(
-        "--output-dir", default="yjr_local_test/results/reasoning_mean_full_prompt_wrong_only_gemma2_2b"
+        "--output-dir",
+        default="yjr_local_test/results/reasoning_mean_full_prompt_wrong_only_gemma2_2b",
     )
     parser.add_argument("--max-batch-tokens", type=int, default=98304)
     parser.add_argument("--max-batch-size", type=int, default=384)
@@ -59,12 +58,16 @@ def main() -> None:
     tokenizer = AutoTokenizer.from_pretrained(args.model, padding_side="left", use_fast=True)
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token_id = tokenizer.eos_token_id
-    model = AutoModelForCausalLM.from_pretrained(
-        args.model,
-        dtype=torch.bfloat16,
-        attn_implementation="sdpa",
-        low_cpu_mem_usage=True,
-    ).to(device).eval()
+    model = (
+        AutoModelForCausalLM.from_pretrained(
+            args.model,
+            dtype=torch.bfloat16,
+            attn_implementation="sdpa",
+            low_cpu_mem_usage=True,
+        )
+        .to(device)
+        .eval()
+    )
     model.config.use_cache = True
 
     examples = load_examples(Path(args.dataset))
@@ -83,7 +86,9 @@ def main() -> None:
         device,
     )
     if rank == 0:
-        torch.save({str(layer): vector for layer, vector in vectors.items()}, output_dir / "vectors.pt")
+        torch.save(
+            {str(layer): vector for layer, vector in vectors.items()}, output_dir / "vectors.pt"
+        )
         atomic_json(output_dir / "vector_metadata.json", vector_metadata)
 
     train_negative_ids = set(negative_ids)

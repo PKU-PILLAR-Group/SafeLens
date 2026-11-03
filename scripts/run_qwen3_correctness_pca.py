@@ -9,11 +9,9 @@ import os
 from pathlib import Path
 from typing import Any
 
+import run_correctness_steering as core
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
-
-import run_correctness_steering as core
-
 
 ROOT = Path(__file__).resolve().parents[1]
 MODEL_PATH = os.environ.get("SAFELENS_QWEN3_4B_MODEL", "Qwen/Qwen3-4B")
@@ -21,8 +19,24 @@ BASELINE_PATH = ROOT / "yjr_local_test/results/qwen3-4b_direct_choice_generation
 OUTPUT_DIR = ROOT / "yjr_local_test/results/qwen3-4b_correctness_pca"
 SOURCE_LAYERS = [19, 28]
 INJECT_LAYERS = [19, 28]
-ALPHAS = [25.0, 50.0, 75.0, 100.0, 125.0, 150.0, 175.0, 200.0,
-          250.0, 300.0, 350.0, 400.0, 450.0, 500.0, 550.0, 600.0]
+ALPHAS = [
+    25.0,
+    50.0,
+    75.0,
+    100.0,
+    125.0,
+    150.0,
+    175.0,
+    200.0,
+    250.0,
+    300.0,
+    350.0,
+    400.0,
+    450.0,
+    500.0,
+    550.0,
+    600.0,
+]
 
 
 def render_prompt(tokenizer: Any, example: core.Example) -> str:
@@ -102,17 +116,23 @@ def main() -> None:
     tokenizer = AutoTokenizer.from_pretrained(args.model, padding_side="left", use_fast=True)
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token_id = tokenizer.eos_token_id
-    model = AutoModelForCausalLM.from_pretrained(
-        args.model, dtype=torch.bfloat16, attn_implementation="sdpa", low_cpu_mem_usage=True
-    ).to(device).eval()
+    model = (
+        AutoModelForCausalLM.from_pretrained(
+            args.model, dtype=torch.bfloat16, attn_implementation="sdpa", low_cpu_mem_usage=True
+        )
+        .to(device)
+        .eval()
+    )
     model.config.use_cache = True
     all_examples = core.load_examples(core.CURRENT_TQA, core.V1_TQA, core.WIKI_FACTOR, args.seed)
     baseline = json.loads(Path(args.baseline).read_text(encoding="utf-8"))
     requested = args.tasks or core.TASK_ORDER
     if world_size == 2 and not args.tasks:
-        assigned = ["wiki_factor"] if rank == 0 else [
-            task for task in core.TASK_ORDER if task != "wiki_factor"
-        ]
+        assigned = (
+            ["wiki_factor"]
+            if rank == 0
+            else [task for task in core.TASK_ORDER if task != "wiki_factor"]
+        )
     else:
         assigned = requested[rank::world_size]
     print(f"[RANK {rank}] assigned={assigned}", flush=True)

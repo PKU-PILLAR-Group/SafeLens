@@ -12,22 +12,20 @@ from pathlib import Path
 from typing import Any
 
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
-
 from run_reasoning_pca_full_prompt_2b import (
     ALPHAS,
     INJECT_LAYERS,
     SOURCE_LAYERS,
     Example,
-    atomic_json,
     append_jsonl,
+    atomic_json,
     build_pca_vectors,
     generate_predictions,
     make_batches,
     paired_balanced_samples,
     read_jsonl,
 )
-
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DATASET = ROOT / "yjr_local_test/data/truthfulqa_binary_mc1_790_seed42.jsonl"
@@ -69,8 +67,7 @@ def load_examples(path: Path) -> dict[str, list[Example]]:
 
 def completed_keys(path: Path) -> set[tuple[int, int, float]]:
     return {
-        (row["source_layer"], row["inject_layer"], float(row["alpha"]))
-        for row in read_jsonl(path)
+        (row["source_layer"], row["inject_layer"], float(row["alpha"])) for row in read_jsonl(path)
     }
 
 
@@ -92,7 +89,9 @@ def process_task(
         "task": task,
         "model": args.model,
         "dataset": str(Path(args.dataset).resolve()),
-        "prompt_protocol": "Use the JSONL prompt verbatim; it ends in Answer: and requests only a letter.",
+        "prompt_protocol": (
+            "Use the JSONL prompt verbatim; it ends in Answer: and requests only a letter."
+        ),
         "total": len(baseline_details),
         "correct": sum(row["correct"] for row in baseline_details),
         "accuracy": sum(row["correct"] for row in baseline_details) / len(baseline_details),
@@ -202,10 +201,14 @@ def process_task(
             vector=vectors[source_layer],
         )
         repaired_ids = [
-            row["example_id"] for row in predictions if row["example_id"] in wrong_ids and row["correct"]
+            row["example_id"]
+            for row in predictions
+            if row["example_id"] in wrong_ids and row["correct"]
         ]
         damaged_ids = [
-            row["example_id"] for row in predictions if row["example_id"] in correct_ids and not row["correct"]
+            row["example_id"]
+            for row in predictions
+            if row["example_id"] in correct_ids and not row["correct"]
         ]
         correct_after = sum(row["correct"] for row in predictions)
         invalid_ids = [row["example_id"] for row in predictions if row["prediction"] is None]
@@ -278,7 +281,9 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", default=str(DEFAULT_DATASET))
     parser.add_argument("--model", default=DEFAULT_MODEL)
-    parser.add_argument("--output-dir", default="yjr_local_test/results/truthfulqa_pca_full_prompt_gemma2_2b")
+    parser.add_argument(
+        "--output-dir", default="yjr_local_test/results/truthfulqa_pca_full_prompt_gemma2_2b"
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--max-batch-tokens", type=int, default=98304)
     parser.add_argument("--max-batch-size", type=int, default=384)
@@ -292,12 +297,16 @@ def main() -> None:
     tokenizer = AutoTokenizer.from_pretrained(args.model, padding_side="left", use_fast=True)
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token_id = tokenizer.eos_token_id
-    model = AutoModelForCausalLM.from_pretrained(
-        args.model,
-        dtype=torch.bfloat16,
-        attn_implementation="sdpa",
-        low_cpu_mem_usage=True,
-    ).to(device).eval()
+    model = (
+        AutoModelForCausalLM.from_pretrained(
+            args.model,
+            dtype=torch.bfloat16,
+            attn_implementation="sdpa",
+            low_cpu_mem_usage=True,
+        )
+        .to(device)
+        .eval()
+    )
     model.config.use_cache = True
     by_task = load_examples(Path(args.dataset))
     assigned = TASKS[rank::world_size]

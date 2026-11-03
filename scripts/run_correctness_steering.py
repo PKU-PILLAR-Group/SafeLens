@@ -28,19 +28,21 @@ if STEERING_MINIMAL_ROOT.is_dir():
 from eval_direct_choice_generation import Example, load_examples, parse_letter  # noqa: E402
 from some_SAEs import GemmaScope1SAE  # noqa: E402
 
-
 MODEL_PATH = os.environ.get("SAFELENS_GEMMA_2_9B_IT_MODEL", "google/gemma-2-9b-it")
 BASELINE_PATH = ROOT / "yjr_local_test/results/gemma-2-9b-it_direct_choice_generation.json"
 CURRENT_TQA = ROOT / "yjr_local_test/external/TruthfulQA/data/mc_task.json"
 V1_TQA = ROOT / "yjr_local_test/external/TruthfulQA/data/v1/mc_task.json"
 WIKI_FACTOR = ROOT / "yjr_local_test/external/factor/data/wiki_factor.csv"
 SAE_SPECS = {
-    20: ROOT / "yjr_local_test/external/SAEs/gemma-scope-9b-it-res-layer_20-width_16k-average_l0_91/params.npz",
+    20: ROOT
+    / (
+        "yjr_local_test/external/SAEs/gemma-scope-9b-it-res-layer_20-"
+        "width_16k-average_l0_91/params.npz"
+    ),
     31: Path(
         os.environ.get(
             "SAFELENS_GEMMA_SCOPE_L31_SAE",
-            ROOT.parent
-            / "models/SAEs/"
+            ROOT.parent / "models/SAEs/"
             "gemma-scope-9b-it-res-layer_31-width_16k-average_l0_76/params.npz",
         )
     ).expanduser(),
@@ -88,7 +90,9 @@ def balanced_sample(
         ]
         random.Random(f"{seed}:{task}:{wanted_correct}:{label}").shuffle(candidates)
         if len(candidates) < quota:
-            raise ValueError(f"Not enough {task} correct={wanted_correct} gold={label}: {len(candidates)}")
+            raise ValueError(
+                f"Not enough {task} correct={wanted_correct} gold={label}: {len(candidates)}"
+            )
         picked.extend(candidates[:quota])
     return picked
 
@@ -259,11 +263,13 @@ def make_batches(
         for i, (_, _, ids) in enumerate(batch):
             ids_tensor[i, -len(ids) :] = torch.tensor(ids)
             mask[i, -len(ids) :] = 1
-        result.append({
-            "examples": [item[1] for item in batch],
-            "input_ids": ids_tensor,
-            "attention_mask": mask,
-        })
+        result.append(
+            {
+                "examples": [item[1] for item in batch],
+                "input_ids": ids_tensor,
+                "attention_mask": mask,
+            }
+        )
     return result
 
 
@@ -336,22 +342,22 @@ def generate_predictions(
         responses = tokenizer.batch_decode(
             generated[:, inputs["input_ids"].shape[1] :], skip_special_tokens=True
         )
-        for example, response in zip(batch["examples"], responses):
+        for example, response in zip(batch["examples"], responses, strict=False):
             prediction = parse_letter(response, example.option_count)
-            records.append({
-                "example_id": example.example_id,
-                "answer": example.answer,
-                "prediction": prediction,
-                "response": response,
-                "correct": bool(prediction == example.answer),
-            })
+            records.append(
+                {
+                    "example_id": example.example_id,
+                    "answer": example.answer,
+                    "prediction": prediction,
+                    "response": response,
+                    "correct": bool(prediction == example.answer),
+                }
+            )
     return records
 
 
 def config_key(row: dict[str, Any]) -> tuple[Any, ...]:
-    return (
-        row["method"], row["source_layer"], row["inject_layer"], row["alpha"], row["scope"]
-    )
+    return (row["method"], row["source_layer"], row["inject_layer"], row["alpha"], row["scope"])
 
 
 def load_completed(path: Path) -> tuple[set[tuple[Any, ...]], list[dict[str, Any]]]:
@@ -385,11 +391,7 @@ def process_task(
     fresh_baseline_details = generate_predictions(model, tokenizer, full_batches, device)
     for row in fresh_baseline_details:
         row["task"] = task
-    saved_rows = {
-        row["example_id"]: row
-        for row in baseline["details"]
-        if row["task"] == task
-    }
+    saved_rows = {row["example_id"]: row for row in baseline["details"] if row["task"] == task}
     full_baseline_mismatch = sum(
         row["prediction"] != saved_rows[row["example_id"]]["prediction"]
         for row in fresh_baseline_details
@@ -408,12 +410,19 @@ def process_task(
         "train_positive": data["train_pos"],
         "train_negative": data["train_neg"],
         "test_negative_ids": [row["example_id"] for row in data["test_neg"]],
-        "counts": {"train_positive": 20, "train_negative": 20, "test_negative": len(data["test_neg"])},
+        "counts": {
+            "train_positive": 20,
+            "train_negative": 20,
+            "test_negative": len(data["test_neg"]),
+        },
     }
     vectors, vector_meta = build_vectors(
         model, tokenizer, data["pos_examples"], data["neg_examples"], saes, device
     )
-    torch.save({f"{method}:{layer}": vector for (method, layer), vector in vectors.items()}, task_dir / "vectors.pt")
+    torch.save(
+        {f"{method}:{layer}": vector for (method, layer), vector in vectors.items()},
+        task_dir / "vectors.pt",
+    )
     atomic_json(task_dir / "vector_metadata.json", vector_meta)
     # Keep these batches bit-for-bit fixed for alpha=0 and every steering config.
     # A few near-tie BF16 predictions can depend on batch shape; score only IDs
@@ -539,9 +548,13 @@ def main() -> None:
     tokenizer = AutoTokenizer.from_pretrained(args.model, padding_side="left", use_fast=True)
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token_id = tokenizer.eos_token_id
-    model = AutoModelForCausalLM.from_pretrained(
-        args.model, dtype=torch.bfloat16, attn_implementation="sdpa", low_cpu_mem_usage=True
-    ).to(device).eval()
+    model = (
+        AutoModelForCausalLM.from_pretrained(
+            args.model, dtype=torch.bfloat16, attn_implementation="sdpa", low_cpu_mem_usage=True
+        )
+        .to(device)
+        .eval()
+    )
     model.config.use_cache = True
     print(f"[RANK {rank}] loading SAEs", flush=True)
     saes = {
@@ -552,7 +565,9 @@ def main() -> None:
     baseline = json.loads(Path(args.baseline).read_text(encoding="utf-8"))
     requested = args.tasks or TASK_ORDER
     if world_size == 2 and not args.tasks:
-        assigned = ["wiki_factor"] if rank == 0 else [task for task in TASK_ORDER if task != "wiki_factor"]
+        assigned = (
+            ["wiki_factor"] if rank == 0 else [task for task in TASK_ORDER if task != "wiki_factor"]
+        )
     else:
         assigned = requested[rank::world_size]
     print(f"[RANK {rank}] assigned={assigned}", flush=True)

@@ -39,11 +39,7 @@ class PCASteeringVector(ContrastiveSteeringVector):
         key, positive and negative rows are paired in their respective input
         order and their counts must match.
         """
-        rows = [
-            row
-            for row in dataset
-            if train_split is None or row.get(split_key) == train_split
-        ]
+        rows = [row for row in dataset if train_split is None or row.get(split_key) == train_split]
         if pair_key is None:
             positives = [row for row in rows if row.get(label_key) == positive_label]
             negatives = [row for row in rows if row.get(label_key) != positive_label]

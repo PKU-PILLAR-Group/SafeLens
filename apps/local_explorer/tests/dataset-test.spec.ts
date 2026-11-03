@@ -61,23 +61,23 @@ const catalog = {
   ],
   algorithms: [
     {
-      id: "steering",
-      name: "Residual steering",
+      id: "pca_minus_neg",
+      name: "PCA steering",
       kind: "optimization",
       description: "Add a contrastive direction to the residual stream.",
       paperTitle: "Steering Language Models With Activation Engineering",
       paperUrl: "https://arxiv.org/abs/2308.10248",
-      implementation: "contrastive_mean_difference",
+      implementation: "pca_minus_neg",
       supportedDatasetIds: ["safelens-steering-v1"]
     },
     {
-      id: "patching",
-      name: "Activation patching",
+      id: "mean_minus_neg",
+      name: "Mean steering",
       kind: "optimization",
-      description: "Replace corrupt residual activations with clean activations.",
-      paperTitle: "Towards Best Practices of Activation Patching in Language Models: Metrics and Methods",
-      paperUrl: "https://arxiv.org/abs/2309.16042",
-      implementation: "residual_stream_replacement",
+      description: "Add the mean contrastive direction to the residual stream.",
+      paperTitle: "Steering Language Models With Activation Engineering",
+      paperUrl: "https://arxiv.org/abs/2308.10248",
+      implementation: "mean_minus_neg",
       supportedDatasetIds: ["safelens-patching-v1"]
     }
   ]
@@ -85,7 +85,7 @@ const catalog = {
 
 const request = {
   datasetId: "safelens-steering-v1",
-  algorithmId: "steering",
+  algorithmId: "pca_minus_neg",
   model: "Qwen/Qwen2.5-7B-Instruct",
   sampleIds: ["steer-01", "steer-02"],
   layer: 12,
@@ -108,7 +108,7 @@ function job(status: "idle" | "ready") {
     error: null,
     result: status === "ready" ? {
       dataset: { id: request.datasetId, name: "SafeLens Steering Regression v1", version: "1.0.0", sampleCount: 2 },
-      algorithm: { id: "steering", name: "Residual steering", implementation: "contrastive_mean_difference" },
+      algorithm: { id: "pca_minus_neg", name: "PCA steering", implementation: "pca_minus_neg" },
       execution: { mode: "dataset-test", source: "real-local-model", model: request.model, seed: 0, layer: 12, component: "resid_post", maxNewTokens: 24 },
       metric: { ...catalog.datasets[0].metric, passed: 1, completed: 2, errors: 0, accuracy: 0.5, meetsThreshold: false },
       rows: [
@@ -137,13 +137,13 @@ test("dataset mode selects a method and exposes correct and incorrect samples", 
 
   await expect(page.getByRole("heading", { name: "Test white-box methods on a fixed dataset" })).toBeVisible();
   await expect(page.getByText("Real local evaluation")).toBeVisible();
-  await expect(page.getByRole("radio", { name: /Residual steering/ })).toHaveAttribute("aria-checked", "true");
+  await expect(page.getByRole("radio", { name: /PCA steering/ })).toHaveAttribute("aria-checked", "true");
   await expect(page.getByRole("link", { name: /Activation Engineering/ })).toHaveAttribute("href", "https://arxiv.org/abs/2308.10248");
 
   await page.getByRole("button", { name: "Test 2 samples" }).click();
 
   await expect(page.getByRole("heading", { name: "SafeLens Steering Regression v1" })).toBeVisible();
-  await expect(page.getByText("50%")).toBeVisible();
+  await expect(page.getByText("50.00%")).toBeVisible();
   await expect(page.getByText("Threshold met")).toHaveCount(0);
   await expect(page.getByText("Below threshold")).toBeVisible();
   await expect(page.locator(".dataset-result-row.passed").getByText("Correct", { exact: true })).toBeVisible();

@@ -12,20 +12,18 @@ from pathlib import Path
 from typing import Any
 
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
-
 from run_reasoning_pca_full_prompt_2b import (
     INJECT_LAYERS,
     SOURCE_LAYERS,
-    atomic_json,
     append_jsonl,
+    atomic_json,
     capture_hidden,
     generate_predictions,
     make_batches,
     read_jsonl,
 )
 from run_truthfulqa_pca_full_prompt_2b import DEFAULT_DATASET, DEFAULT_MODEL, TASKS, load_examples
-
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 ROOT = Path(__file__).resolve().parents[1]
 MEAN_ALPHAS = [1.0, 1.5, 2.0, 2.5, 3.0]
@@ -226,7 +224,8 @@ def main() -> None:
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--pca-results", default=str(DEFAULT_PCA_RESULTS))
     parser.add_argument(
-        "--output-dir", default="yjr_local_test/results/truthfulqa_mean_full_prompt_wrong_only_gemma2_2b"
+        "--output-dir",
+        default="yjr_local_test/results/truthfulqa_mean_full_prompt_wrong_only_gemma2_2b",
     )
     parser.add_argument("--max-batch-tokens", type=int, default=98304)
     parser.add_argument("--max-batch-size", type=int, default=384)
@@ -240,12 +239,16 @@ def main() -> None:
     tokenizer = AutoTokenizer.from_pretrained(args.model, padding_side="left", use_fast=True)
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token_id = tokenizer.eos_token_id
-    model = AutoModelForCausalLM.from_pretrained(
-        args.model,
-        dtype=torch.bfloat16,
-        attn_implementation="sdpa",
-        low_cpu_mem_usage=True,
-    ).to(device).eval()
+    model = (
+        AutoModelForCausalLM.from_pretrained(
+            args.model,
+            dtype=torch.bfloat16,
+            attn_implementation="sdpa",
+            low_cpu_mem_usage=True,
+        )
+        .to(device)
+        .eval()
+    )
     model.config.use_cache = True
     by_task = load_examples(Path(args.dataset))
     assigned = TASKS[rank::world_size]

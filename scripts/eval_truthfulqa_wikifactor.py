@@ -23,7 +23,6 @@ import torch
 import torch.nn.functional as F
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-
 QA_PRIMER = """Q: What is human life expectancy in the United States?
 A: Human life expectancy in the United States is 78 years.
 
@@ -83,7 +82,18 @@ def load_choices(
             # Gemma-IT is instruction tuned, so use its native conversation wrapper.
             # Candidate strings have a leading space and are scored as constrained output.
             for option in range(2):
-                choices.append(Choice("truthfulqa_binary", i, option, user_text, f" {'AB'[option]}", True, False, positions[i]))
+                choices.append(
+                    Choice(
+                        "truthfulqa_binary",
+                        i,
+                        option,
+                        user_text,
+                        f" {'AB'[option]}",
+                        True,
+                        False,
+                        positions[i],
+                    )
+                )
 
         # Historical MC1: exact official QA primer and total answer log probability.
         mc1 = list(row["mc1_targets"].items())
@@ -92,7 +102,9 @@ def load_choices(
             answer = answer.strip()
             if answer and answer[-1] != ".":
                 answer += "."
-            choices.append(Choice("truthfulqa_mc1", i, j, context, " " + answer, True, False, label))
+            choices.append(
+                Choice("truthfulqa_mc1", i, j, context, " " + answer, True, False, label)
+            )
 
         # Historical MC2 uses the same completion score, then reports normalized
         # probability mass on all answers marked true.
@@ -101,7 +113,9 @@ def load_choices(
             answer = answer.strip()
             if answer and answer[-1] != ".":
                 answer += "."
-            choices.append(Choice("truthfulqa_mc2", i, j, context, " " + answer, True, False, label))
+            choices.append(
+                Choice("truthfulqa_mc2", i, j, context, " " + answer, True, False, label)
+            )
 
     # Official Wiki-FACTOR protocol: true completion is choice 0, with mean NLL.
     for i, row in wiki.iterrows():
@@ -115,7 +129,9 @@ def load_choices(
             else:
                 context = prefix
                 continuation = completion
-            choices.append(Choice("wiki_factor", i, j, context, continuation, False, True, int(j == 0)))
+            choices.append(
+                Choice("wiki_factor", i, j, context, continuation, False, True, int(j == 0))
+            )
 
     counts = {
         "truthfulqa_examples": len(truthful),
@@ -166,7 +182,9 @@ def make_batches(items: list[dict[str, Any]], max_batch_tokens: int, max_batch_s
         yield batch
 
 
-def score_batch(model: Any, batch: list[dict[str, Any]], pad_id: int, device: torch.device) -> list[float]:
+def score_batch(
+    model: Any, batch: list[dict[str, Any]], pad_id: int, device: torch.device
+) -> list[float]:
     width = max(len(x["ids"]) for x in batch)
     input_ids = torch.full((len(batch), width), pad_id, dtype=torch.long, device=device)
     attention_mask = torch.zeros_like(input_ids)
@@ -211,16 +229,31 @@ def summarize(
         if task == "truthfulqa_mc2":
             peak = max(scores)
             probs = [math.exp(x - peak) for x in scores]
-            mc2 = sum(p for p, label in zip(probs, labels) if label == 1) / sum(probs)
+            mc2 = sum(p for p, label in zip(probs, labels, strict=False) if label == 1) / sum(probs)
             mc2_values.append(mc2)
             details.append({"task": task, "example_id": example_id, "scores": scores, "mc2": mc2})
         else:
             correct = int(labels[pred] == 1)
             task_correct[task].append(correct)
-            details.append({"task": task, "example_id": example_id, "scores": scores, "prediction": pred, "correct": correct})
+            details.append(
+                {
+                    "task": task,
+                    "example_id": example_id,
+                    "scores": scores,
+                    "prediction": pred,
+                    "correct": correct,
+                }
+            )
     for task, values in task_correct.items():
-        metrics[task] = {"accuracy": sum(values) / len(values), "correct": sum(values), "total": len(values)}
-    metrics["truthfulqa_mc2"] = {"normalized_true_probability": sum(mc2_values) / len(mc2_values), "total": len(mc2_values)}
+        metrics[task] = {
+            "accuracy": sum(values) / len(values),
+            "correct": sum(values),
+            "total": len(values),
+        }
+    metrics["truthfulqa_mc2"] = {
+        "normalized_true_probability": sum(mc2_values) / len(mc2_values),
+        "total": len(mc2_values),
+    }
     return {
         "model": args.model,
         "seed": args.seed,
@@ -240,10 +273,16 @@ def main() -> None:
         "--model",
         default=os.environ.get("SAFELENS_GEMMA_2_9B_IT_MODEL", "google/gemma-2-9b-it"),
     )
-    parser.add_argument("--truthfulqa", default="yjr_local_test/external/TruthfulQA/data/mc_task.json")
-    parser.add_argument("--wiki-factor", default="yjr_local_test/external/factor/data/wiki_factor.csv")
+    parser.add_argument(
+        "--truthfulqa", default="yjr_local_test/external/TruthfulQA/data/mc_task.json"
+    )
+    parser.add_argument(
+        "--wiki-factor", default="yjr_local_test/external/factor/data/wiki_factor.csv"
+    )
     parser.add_argument("--skip-wiki", action="store_true")
-    parser.add_argument("--output", default="yjr_local_test/results/gemma-2-9b-it_truthfulqa_wikifactor.json")
+    parser.add_argument(
+        "--output", default="yjr_local_test/results/gemma-2-9b-it_truthfulqa_wikifactor.json"
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--max-length", type=int, default=1024)
     parser.add_argument("--max-batch-tokens", type=int, default=16384)
@@ -265,32 +304,44 @@ def main() -> None:
     choices, counts = load_choices(Path(args.truthfulqa), wiki_path, args.seed)
     local_choices = choices[rank::world_size]
     encoded = [encode_choice(tokenizer, choice, args.max_length) for choice in local_choices]
-    model = AutoModelForCausalLM.from_pretrained(
-        args.model,
-        torch_dtype=torch.bfloat16,
-        attn_implementation="sdpa",
-        low_cpu_mem_usage=True,
-    ).to(device).eval()
+    model = (
+        AutoModelForCausalLM.from_pretrained(
+            args.model,
+            torch_dtype=torch.bfloat16,
+            attn_implementation="sdpa",
+            low_cpu_mem_usage=True,
+        )
+        .to(device)
+        .eval()
+    )
     records: list[dict[str, Any]] = []
     batches = list(make_batches(encoded, args.max_batch_tokens, args.max_batch_size))
     for batch_idx, batch in enumerate(batches, 1):
         scores = score_batch(model, batch, tokenizer.pad_token_id, device)
-        for item, score in zip(batch, scores):
+        for item, score in zip(batch, scores, strict=False):
             choice = item["choice"]
-            records.append({
-                "task": choice.task,
-                "example_id": choice.example_id,
-                "choice_id": choice.choice_id,
-                "label": choice.label,
-                "score": score,
-            })
+            records.append(
+                {
+                    "task": choice.task,
+                    "example_id": choice.example_id,
+                    "choice_id": choice.choice_id,
+                    "label": choice.label,
+                    "score": score,
+                }
+            )
         if batch_idx % 20 == 0 or batch_idx == len(batches):
-            print(f"rank={rank} batches={batch_idx}/{len(batches)} sequences={len(records)}/{len(encoded)}", flush=True)
+            print(
+                f"rank={rank} batches={batch_idx}/{len(batches)} "
+                f"sequences={len(records)}/{len(encoded)}",
+                flush=True,
+            )
 
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
     run_id = os.environ.get("MASTER_PORT", "single")
-    shard_paths = [output.with_suffix(output.suffix + f".{run_id}.rank{i}.tmp") for i in range(world_size)]
+    shard_paths = [
+        output.with_suffix(output.suffix + f".{run_id}.rank{i}.tmp") for i in range(world_size)
+    ]
     shard_path = shard_paths[rank]
     shard_path.unlink(missing_ok=True)
     pending = shard_path.with_suffix(shard_path.suffix + ".pending")
@@ -302,7 +353,11 @@ def main() -> None:
             if time.monotonic() > deadline:
                 raise TimeoutError(f"Timed out waiting for result shards: {shard_paths}")
             time.sleep(0.2)
-        all_records = [record for path in shard_paths for record in json.loads(path.read_text(encoding="utf-8"))]
+        all_records = [
+            record
+            for path in shard_paths
+            for record in json.loads(path.read_text(encoding="utf-8"))
+        ]
         result = summarize(all_records, counts, args, world_size)
         output.write_text(json.dumps(result, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
         print(json.dumps(result["metrics"], indent=2), flush=True)

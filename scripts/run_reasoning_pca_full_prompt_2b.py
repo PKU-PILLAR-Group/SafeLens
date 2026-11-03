@@ -18,7 +18,6 @@ from typing import Any
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DATASET = ROOT / "yjr_local_test/build_benchmark/trustworthy_benchmark_success (1).json"
 DEFAULT_MODEL = os.environ.get("SAFELENS_GEMMA_2_2B_IT_MODEL", "google/gemma-2-2b-it")
@@ -88,8 +87,7 @@ def load_examples(path: Path) -> list[Example]:
         if not option_letters or len(answer) != 1 or answer not in option_letters:
             raise ValueError(f"Malformed example id={row.get('id')}")
         prompt = (
-            "Choose the correct answer. Reply with only the option letter.\n\n"
-            f"{raw}\n\nAnswer:"
+            "Choose the correct answer. Reply with only the option letter.\n\n" f"{raw}\n\nAnswer:"
         )
         examples.append(
             Example(
@@ -128,9 +126,7 @@ def make_batches(
     batch: list[tuple[int, Example, list[int]]] = []
     for item in items:
         proposed_size = len(batch) + 1
-        if batch and (
-            proposed_size > max_batch_size or proposed_size * item[0] > max_batch_tokens
-        ):
+        if batch and (proposed_size > max_batch_size or proposed_size * item[0] > max_batch_tokens):
             raw_batches.append(batch)
             batch = [item]
         else:
@@ -144,8 +140,8 @@ def make_batches(
         input_ids = torch.full((len(batch), width), tokenizer.pad_token_id, dtype=torch.long)
         attention_mask = torch.zeros_like(input_ids)
         for i, (_, _, ids) in enumerate(batch):
-            input_ids[i, -len(ids):] = torch.tensor(ids)
-            attention_mask[i, -len(ids):] = 1
+            input_ids[i, -len(ids) :] = torch.tensor(ids)
+            attention_mask[i, -len(ids) :] = 1
         result.append(
             {
                 "examples": [item[1] for item in batch],
@@ -203,9 +199,9 @@ def generate_predictions(
             if handle is not None:
                 handle.remove()
         responses = tokenizer.batch_decode(
-            generated[:, inputs["input_ids"].shape[1]:], skip_special_tokens=True
+            generated[:, inputs["input_ids"].shape[1] :], skip_special_tokens=True
         )
-        for example, response in zip(batch["examples"], responses):
+        for example, response in zip(batch["examples"], responses, strict=False):
             prediction = parse_letter(response, example.option_count)
             records.append(
                 {
@@ -238,13 +234,15 @@ def paired_balanced_samples(
     for _ in range(20):
         available = [label for label in labels if quota[label] < capacity[label]]
         if not available:
-            raise ValueError(f"Cannot draw 20 paired label-balanced examples; capacities={capacity}")
+            raise ValueError(
+                f"Cannot draw 20 paired label-balanced examples; capacities={capacity}"
+            )
         label = min(available, key=lambda x: (quota[x], x))
         quota[label] += 1
     positive, negative = [], []
     for label in labels:
-        positive.extend(by_status[True][label][:quota[label]])
-        negative.extend(by_status[False][label][:quota[label]])
+        positive.extend(by_status[True][label][: quota[label]])
+        negative.extend(by_status[False][label][: quota[label]])
     return positive, negative, {key: value for key, value in quota.items() if value}
 
 
@@ -314,7 +312,9 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", default=str(DEFAULT_DATASET))
     parser.add_argument("--model", default=DEFAULT_MODEL)
-    parser.add_argument("--output-dir", default="yjr_local_test/results/reasoning_pca_full_prompt_gemma2_2b")
+    parser.add_argument(
+        "--output-dir", default="yjr_local_test/results/reasoning_pca_full_prompt_gemma2_2b"
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--max-batch-tokens", type=int, default=98304)
     parser.add_argument("--max-batch-size", type=int, default=384)
@@ -333,12 +333,16 @@ def main() -> None:
     tokenizer = AutoTokenizer.from_pretrained(args.model, padding_side="left", use_fast=True)
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token_id = tokenizer.eos_token_id
-    model = AutoModelForCausalLM.from_pretrained(
-        args.model,
-        dtype=torch.bfloat16,
-        attn_implementation="sdpa",
-        low_cpu_mem_usage=True,
-    ).to(device).eval()
+    model = (
+        AutoModelForCausalLM.from_pretrained(
+            args.model,
+            dtype=torch.bfloat16,
+            attn_implementation="sdpa",
+            low_cpu_mem_usage=True,
+        )
+        .to(device)
+        .eval()
+    )
     model.config.use_cache = True
     examples = load_examples(Path(args.dataset))
     example_by_id = {example.example_id: example for example in examples}
@@ -365,7 +369,9 @@ def main() -> None:
         baseline = {
             "model": args.model,
             "dataset": str(Path(args.dataset).resolve()),
-            "prompt": "Native input prefixed with a one-letter instruction and suffixed with Answer:",
+            "prompt": (
+                "Native input prefixed with a one-letter instruction and suffixed with Answer:"
+            ),
             "total": len(details),
             "correct": sum(row["correct"] for row in details),
             "accuracy": sum(row["correct"] for row in details) / len(details),
@@ -393,7 +399,9 @@ def main() -> None:
         device,
     )
     if rank == 0:
-        torch.save({str(layer): vector for layer, vector in vectors.items()}, output_dir / "vectors.pt")
+        torch.save(
+            {str(layer): vector for layer, vector in vectors.items()}, output_dir / "vectors.pt"
+        )
         atomic_json(output_dir / "vector_metadata.json", vector_metadata)
 
     train_negative_ids = set(negative_ids)
@@ -403,7 +411,9 @@ def main() -> None:
         if not row["correct"] and row["example_id"] not in train_negative_ids
     ]
     # These tensor batches are reused exactly for alpha=0 and every sweep point.
-    test_batches = make_batches(tokenizer, test_examples, args.max_batch_tokens, args.max_batch_size)
+    test_batches = make_batches(
+        tokenizer, test_examples, args.max_batch_tokens, args.max_batch_size
+    )
     fixed_baseline = generate_predictions(model, tokenizer, test_batches, device)
     eligible_ids = {row["example_id"] for row in fixed_baseline if not row["correct"]}
     removed = sorted(row["example_id"] for row in fixed_baseline if row["correct"])

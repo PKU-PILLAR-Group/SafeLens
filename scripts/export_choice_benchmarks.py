@@ -11,7 +11,6 @@ from typing import Any
 
 import pandas as pd
 
-
 LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 
 
@@ -43,7 +42,10 @@ def make_record(
     options = [text for text, _ in options_with_labels]
     correct_index = labels.index(1)
     instruction = (
-        "Choose the factually correct continuation of the passage. Reply with only the option letter."
+        (
+            "Choose the factually correct continuation of the passage. "
+            "Reply with only the option letter."
+        )
         if task == "wiki_factor"
         else "Choose the truthful answer. Reply with only the option letter."
     )
@@ -65,8 +67,12 @@ def make_record(
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--truthfulqa", default="yjr_local_test/external/TruthfulQA/data/mc_task.json")
-    parser.add_argument("--wiki-factor", default="yjr_local_test/external/factor/data/wiki_factor.csv")
+    parser.add_argument(
+        "--truthfulqa", default="yjr_local_test/external/TruthfulQA/data/mc_task.json"
+    )
+    parser.add_argument(
+        "--wiki-factor", default="yjr_local_test/external/factor/data/wiki_factor.csv"
+    )
     parser.add_argument("--output", default="data/choice_benchmarks.jsonl")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
@@ -120,9 +126,10 @@ def main() -> None:
     with output.open("w", encoding="utf-8") as f:
         for record in records:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
-    counts = {task: sum(record["task"] == task for record in records) for task in {
-        "truthfulqa_binary", "truthfulqa_mc1", "wiki_factor"
-    }}
+    counts = {
+        task: sum(record["task"] == task for record in records)
+        for task in {"truthfulqa_binary", "truthfulqa_mc1", "wiki_factor"}
+    }
     print(json.dumps({"output": str(output), "total": len(records), "counts": counts}, indent=2))
 
 

@@ -130,6 +130,7 @@ def test_pca_steering_fits_pairs_saves_loads_and_overrides_injection_layer(
 
 
 def test_pca_steering_can_pair_labeled_rows_by_key() -> None:
+    pytest.importorskip("torch")
     model = _TextActivationModel()
     dataset = [
         {"text": "safe b", "label": 0, "pair": "b", "split": "train"},

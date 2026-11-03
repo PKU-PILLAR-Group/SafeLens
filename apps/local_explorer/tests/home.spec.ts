@@ -1461,7 +1461,7 @@ test("discovers active SAE features and runs a scale-aware intervention from Cha
   await runReadyAnalysis(page);
 
   await page.getByRole("button", { name: /SAE/ }).click();
-  await expect(page.getByRole("heading", { name: "Gemma Scope SAE" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "SAE features" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Output boundary" })).toHaveAttribute("aria-pressed", "true");
   await expect(page.getByLabel("SAE output tokens")).toHaveValue("64");
   await page.getByRole("button", { name: "Find active features" }).click();

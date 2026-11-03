@@ -3,17 +3,14 @@
 
 import os
 
-import run_reasoning_pca_full_prompt_2b as pca_experiment
+import run_reasoning_pca_full_prompt_2b as pca_experiment  # noqa: E402
 
 pca_experiment.SOURCE_LAYERS = [22, 32]
 pca_experiment.INJECT_LAYERS = [22, 32]
 
-import run_reasoning_mean_full_prompt_wrong_only_2b as experiment
+import run_reasoning_mean_full_prompt_wrong_only_2b as experiment  # noqa: E402
 
-
-experiment.DEFAULT_MODEL = os.environ.get(
-    "SAFELENS_GEMMA_2_9B_IT_MODEL", "google/gemma-2-9b-it"
-)
+experiment.DEFAULT_MODEL = os.environ.get("SAFELENS_GEMMA_2_9B_IT_MODEL", "google/gemma-2-9b-it")
 experiment.SOURCE_LAYERS = [22, 32]
 experiment.INJECT_LAYERS = [22, 32]
 
