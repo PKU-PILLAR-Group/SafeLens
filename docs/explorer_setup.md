@@ -126,11 +126,31 @@ metadata, and all model weight shards:
 export SAFELENS_GEMMA_2_9B_IT_MODEL_PATH=/data/models/gemma-2-9b-it
 ```
 
-Dataset Test uses `google/gemma-3-27b-it` as its safety judge. Override its
-model and device with `SAFELENS_DATASET_JUDGE_MODEL` and
-`SAFELENS_DATASET_JUDGE_DEVICE`. The final-300 steering vectors ship with the
-package; `SAFELENS_FINAL_300_VECTOR_ROOT` is available for an intentional
-external vector bundle.
+Dataset Test uses `google/gemma-3-27b-it` as its safety judge. That repository
+is gated on Hugging Face, so either authenticate with access to it or point the
+judge at a locally available instruction model. A local 12B fallback works:
+
+```bash
+export SAFELENS_DATASET_JUDGE_MODEL=google/gemma-3-12b-it
+```
+
+The ModelScope mirror can also provide the default 27B judge. Place it under
+the model root with the same directory naming convention used for local
+snapshots (the service resolves `<model-root>/google--gemma-3-27b-it`):
+
+```bash
+modelscope download --model google/gemma-3-27b-it \
+  --local-dir /data/models/google--gemma-3-27b-it
+export SAFELENS_MODEL_ROOTS=/data/models
+```
+
+Override its device with `SAFELENS_DATASET_JUDGE_DEVICE`. The run checks the
+judge before loading the evaluated model and stops with an actionable error
+instead of silently dropping the safety task. The result reports the judge
+under `execution.judgeModel`; a result with an unevaluated task or a failed
+sample is marked partial and cannot meet the benchmark threshold. The final-300
+steering vectors ship with the package; `SAFELENS_FINAL_300_VECTOR_ROOT` is
+available for an intentional external vector bundle.
 
 Alternatively leave the variable unset and select `gemma-2-9b-it` in the chat
 model picker. With Hugging Face access configured, the first real prompt job

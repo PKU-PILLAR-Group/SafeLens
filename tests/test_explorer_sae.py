@@ -103,7 +103,7 @@ def test_neuronpedia_feature_info_has_explicit_index_fallback(monkeypatch, tmp_p
         feature_index=2,
     )
 
-    assert info["label"] == "Gemma Scope feature 2"
+    assert info["label"] == "SAE feature 2"
     assert info["source"] == "index"
 
 

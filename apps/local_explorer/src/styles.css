@@ -529,6 +529,20 @@
 .dataset-results > header.failed { border-left-color: #b84a55; background: #fff5f5; }
 .dataset-results > header p { margin: 7px 0 0; color: #69757a; font-size: 12px; }
 
+.dataset-partial-warning {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  border-bottom: 1px solid #f0d9a8;
+  padding: 12px 24px;
+  background: #fff9ea;
+  color: #7a5a16;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.dataset-partial-warning svg { flex: 0 0 auto; margin-top: 1px; }
+
 .dataset-score {
   min-width: 138px;
   display: grid;

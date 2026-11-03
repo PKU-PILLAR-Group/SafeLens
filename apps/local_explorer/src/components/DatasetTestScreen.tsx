@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import {
+  AlertTriangle,
   ArrowLeft,
   BrainCircuit,
   CheckCircle2,
@@ -253,7 +254,7 @@ export function DatasetTestScreen({ onOpenChat }: { onOpenChat: () => void }) {
                 <div className="dataset-metric-note">
                   <strong>{dataset.metric.name}</strong>
                   <p>{dataset.metric.definition}</p>
-                  <span>Required repair rate ≥ {formatPercent(dataset.metric.threshold)}</span>
+                  <span>Required repair rate &gt; {formatPercent(dataset.metric.threshold)}</span>
                 </div>
               )}
               <div className="dataset-run-controls">
@@ -300,6 +301,15 @@ function DatasetJobResults({
   const rows = result.rows.filter((row) =>
     filter === "all" || (filter === "passed" ? row.passed : !row.passed)
   );
+  const missingTasks = result.metric.missingTasks ?? [];
+  const partial = result.metric.partial === true || missingTasks.length > 0;
+  const scoreLabel = missingTasks.length > 0
+    ? "Incomplete result"
+    : partial
+      ? "Partial result"
+      : result.metric.meetsThreshold
+        ? "Threshold met"
+        : "Below threshold";
   return (
     <section className="dataset-results" aria-labelledby="dataset-results-title">
       <header className={result.metric.meetsThreshold ? "passed" : "failed"}>
@@ -316,12 +326,13 @@ function DatasetJobResults({
               : ""} / {result.execution.source}
             {result.execution.device ? ` / ${result.execution.device}` : ""}
             {result.execution.dtype ? ` / ${result.execution.dtype}` : ""}
+            {result.execution.judgeModel ? ` / judge ${result.execution.judgeModel}` : ""}
           </p>
         </div>
         <div className="dataset-score">
           {result.metric.meetsThreshold ? <CheckCircle2 size={24} /> : <XCircle size={24} />}
           <strong>{formatPercent(result.metric.accuracy)}</strong>
-          <span>{result.metric.meetsThreshold ? "Threshold met" : "Below threshold"}</span>
+          <span>{scoreLabel}</span>
         </div>
         <dl>
           <div><dt>Baseline failures</dt><dd>{result.metric.baselineFailure ?? 0}</dd></div>
@@ -331,6 +342,20 @@ function DatasetJobResults({
           <div><dt>Repair target</dt><dd>{formatPercent(result.metric.threshold)}</dd></div>
         </dl>
       </header>
+      {partial && (
+        <div className="dataset-partial-warning" role="status">
+          <AlertTriangle size={17} />
+          <span>
+            {missingTasks.length > 0
+              ? `${missingTasks.join(", ")} ${missingTasks.length === 1 ? "task was" : "tasks were"} not evaluated.`
+              : "Some samples were not evaluated."}
+            {result.metric.errors > 0
+              ? ` ${result.metric.errors} sample${result.metric.errors === 1 ? "" : "s"} reported errors.`
+              : ""}
+            {" "}The displayed score covers only evaluated tasks and cannot satisfy the benchmark threshold.
+          </span>
+        </div>
+      )}
       <div className="dataset-result-toolbar">
         <div role="tablist" aria-label="Result filter">
           {(["all", "passed", "failed"] as const).map((item) => (
