@@ -7,6 +7,7 @@ import os
 import threading
 import time
 from pathlib import Path
+from typing import Any
 
 from fastapi.testclient import TestClient
 from pydantic import BaseModel
@@ -352,6 +353,102 @@ def test_dataset_job_validates_and_reports_real_execution_result(tmp_path: Path)
     )
     assert incompatible.status_code == 422
     assert incompatible.json()["detail"]["code"] == "unknown_dataset"
+
+
+def test_dataset_job_list_keeps_metrics_and_persists_completed_runs(tmp_path: Path) -> None:
+    def runner(
+        request: Any,
+        _cancel_event: Any,
+        progress: Any,
+    ) -> dict[str, Any]:
+        progress(
+            25,
+            "baseline",
+            "Baseline 1/1.",
+            {
+                "reasoning": {
+                    "baselineCompleted": 1,
+                    "baselineTotal": 1,
+                    "steeringCompleted": 0,
+                    "steeringTotal": 0,
+                }
+            },
+        )
+        return {
+            "dataset": {
+                "id": request.datasetId,
+                "name": "SafeLens final_300",
+                "version": "1.1",
+                "sampleCount": 1,
+            },
+            "algorithm": {
+                "id": request.algorithmId,
+                "name": "PCA steering",
+                "implementation": request.algorithmId,
+            },
+            "execution": {"source": "real-local-model", "model": request.model},
+            "metric": {
+                "name": "Steering effect accuracy",
+                "shortName": "causal effect rate",
+                "definition": "fixture",
+                "threshold": 0.6,
+                "passed": 1,
+                "completed": 1,
+                "errors": 0,
+                "accuracy": 1.0,
+                "meetsThreshold": True,
+            },
+            "rows": [{"sampleId": "final-001", "passed": True}],
+        }
+
+    history_dir = tmp_path / "dataset-history"
+    client = TestClient(
+        create_app(
+            tmp_path,
+            dataset_test_runner=runner,
+            dataset_history_dir=history_dir,
+            allowed_models=("google/gemma-2-9b-it",),
+        )
+    )
+    response = client.post(
+        "/api/jobs/dataset-test",
+        json={
+            "datasetId": "safelens-final-300-v1.1",
+            "algorithmId": "pca_minus_neg",
+            "model": "google/gemma-2-9b-it",
+            "sampleIds": ["final-001"],
+            "layer": 22,
+            "strength": 1,
+        },
+    )
+    assert response.status_code == 202
+    job_id = response.json()["id"]
+    job = _wait_for_job(client, job_id, "ready")
+    progress_snapshot = job["taskProgress"]
+    assert isinstance(progress_snapshot, dict)
+    reasoning_progress = progress_snapshot["reasoning"]
+    assert isinstance(reasoning_progress, dict)
+    assert reasoning_progress["baselineCompleted"] == 1
+
+    listing = client.get("/api/jobs?kind=dataset-test&limit=10")
+    assert listing.status_code == 200
+    jobs = listing.json()["jobs"]
+    assert [item["id"] for item in jobs] == [job_id]
+    assert "rows" not in jobs[0]["result"]
+    assert jobs[0]["result"]["metric"]["accuracy"] == 1.0
+
+    # A fresh API process reloads completed dataset history from disk.
+    reloaded = TestClient(
+        create_app(
+            tmp_path,
+            dataset_test_runner=runner,
+            dataset_history_dir=history_dir,
+            allowed_models=("google/gemma-2-9b-it",),
+        )
+    )
+    history = reloaded.get("/api/jobs?kind=dataset-test").json()["jobs"]
+    assert [item["id"] for item in history] == [job_id]
+    assert "rows" not in history[0]["result"]
 
 
 def test_explorer_api_serves_metadata_and_range_filtered_chunks(tmp_path: Path) -> None:

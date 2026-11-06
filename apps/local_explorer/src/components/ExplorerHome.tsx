@@ -9,6 +9,7 @@ import {
   Paperclip,
   Play,
   LoaderCircle,
+  Search,
   Square,
   SquarePen,
   Trash2,
@@ -25,6 +26,7 @@ import {
 } from "../state/useRunLibrary";
 import type { ExplorerRun } from "../types";
 import { TurnList } from "./TurnList";
+import { JobCenter } from "./JobCenter";
 import type { TurnView } from "../state/useTurnManager";
 import type { AnalysisId } from "./TurnCard";
 
@@ -49,6 +51,7 @@ interface ExplorerHomeProps {
   activeRecord: RunRecord & { run: ExplorerRun };
   remoteState: RemoteRunState;
   onOpenDatasetTest: () => void;
+  onOpenDatasetJob: (jobId: string) => void;
   onSelectConversation: (key: string) => void;
   onRunReady: (run: ExplorerRun, job: { id: string; kind: "prompt-run" | "attribution" | "intervention" | "patching" | "nla" | "jlens" }) => void;
   onRemoveRuns: (keys: string[]) => void;
@@ -59,6 +62,7 @@ export function ExplorerHome({
   activeRecord,
   remoteState,
   onOpenDatasetTest,
+  onOpenDatasetJob,
   onSelectConversation,
   onRunReady,
   onRemoveRuns
@@ -79,12 +83,23 @@ export function ExplorerHome({
   const [historyCollapsed, setHistoryCollapsed] = useState(loadHistoryCollapsed);
   const [selectingConversations, setSelectingConversations] = useState(false);
   const [selectedConversationIds, setSelectedConversationIds] = useState<Set<string>>(new Set());
+  const [conversationQuery, setConversationQuery] = useState("");
 
   const visibleRecords = useMemo(
     () => records.filter((record) => !hiddenRunKeys.has(record.key)),
     [hiddenRunKeys, records]
   );
   const conversations = useMemo(() => listConversations(visibleRecords), [visibleRecords]);
+  const visibleConversations = useMemo(() => {
+    const query = conversationQuery.trim().toLowerCase();
+    if (!query) return conversations;
+    return conversations.filter((conversation) =>
+      `${conversation.title} ${conversation.firstRecord.modelName}`.toLowerCase().includes(query)
+    );
+  }, [conversationQuery, conversations]);
+  useEffect(() => {
+    setSelectedConversationIds(new Set());
+  }, [conversationQuery]);
   useEffect(() => {
     setSelectedConversationIds((current) => {
       const available = new Set(conversations.map((conversation) => conversation.conversationId));
@@ -305,7 +320,7 @@ export function ExplorerHome({
 
   function selectAllConversations() {
     setSelectedConversationIds(
-      new Set(conversations.map((conversation) => conversation.conversationId))
+      new Set(visibleConversations.map((conversation) => conversation.conversationId))
     );
   }
 
@@ -344,6 +359,7 @@ export function ExplorerHome({
         </button>
         <nav className="chat-home-nav" aria-label="SafeLens modes">
           <button onClick={onOpenDatasetTest}><Database size={16} /> Dataset test</button>
+          <JobCenter inline onOpenDatasetJob={onOpenDatasetJob} />
           <span className={`chat-home-status ${remoteState.status}`}>
             <i />{remoteState.status === "ready" ? "Local workspace" : "Local mode"}
           </span>
@@ -355,7 +371,10 @@ export function ExplorerHome({
           open={historyOpen}
           collapsed={historyCollapsed}
           onToggleCollapsed={toggleHistoryCollapsed}
-          conversations={conversations}
+          conversations={visibleConversations}
+          totalConversations={conversations.length}
+          query={conversationQuery}
+          onQueryChange={setConversationQuery}
           activeKey={null}
           selecting={selectingConversations}
           selectedIds={selectedConversationIds}
@@ -533,6 +552,9 @@ function ChatHistory({
   collapsed: collapsedPreference,
   onToggleCollapsed,
   conversations,
+  totalConversations,
+  query,
+  onQueryChange,
   activeKey,
   selecting,
   selectedIds,
@@ -550,6 +572,9 @@ function ChatHistory({
   collapsed: boolean;
   onToggleCollapsed: () => void;
   conversations: ConversationSummary[];
+  totalConversations: number;
+  query: string;
+  onQueryChange: (query: string) => void;
   activeKey: string | null;
   selecting: boolean;
   selectedIds: Set<string>;
@@ -616,6 +641,26 @@ function ChatHistory({
                 </button>
               )}
             </div>
+            {totalConversations > 0 && (
+              <div className="chat-history-search">
+                <Search size={14} />
+                <input
+                  aria-label="Search conversations"
+                  placeholder="Search chats"
+                  value={query}
+                  onChange={(event) => onQueryChange(event.target.value)}
+                />
+                {query && (
+                  <button
+                    type="button"
+                    aria-label="Clear conversation search"
+                    onClick={() => onQueryChange("")}
+                  >
+                    <X size={13} />
+                  </button>
+                )}
+              </div>
+            )}
             {selecting && (
               <div className="chat-history-selection-toolbar" role="group" aria-label="Conversation selection">
                 <button type="button" onClick={allSelected ? onClearSelected : onSelectAll}>
@@ -677,7 +722,7 @@ function ChatHistory({
                 </div>
               );
             }) : (
-              <p>No conversations yet.</p>
+              <p>{query ? "No conversations match your search." : "No conversations yet."}</p>
             )}
           </nav>
         )}

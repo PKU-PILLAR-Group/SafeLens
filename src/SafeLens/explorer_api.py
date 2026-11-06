@@ -675,9 +675,26 @@ class JobSnapshot(BaseModel):
     request: dict[str, Any]
     result: dict[str, Any] | None = None
     error: str | None = None
+    taskProgress: dict[str, dict[str, int]] | None = None
 
 
-JobProgress = Callable[[int, str, str], None]
+class JobListResponse(BaseModel):
+    jobs: list[JobSnapshot]
+
+
+def _job_list_summary(snapshot: JobSnapshot) -> JobSnapshot:
+    """Drop per-sample rows from list responses while keeping run metrics."""
+    if not isinstance(snapshot.result, dict):
+        return snapshot
+    summary = {
+        key: snapshot.result[key]
+        for key in ("dataset", "algorithm", "execution", "metric")
+        if key in snapshot.result
+    }
+    return snapshot.model_copy(update={"result": summary or None})
+
+
+JobProgress = Callable[..., None]
 JobRunner = Callable[[Any, threading.Event, JobProgress], dict[str, Any]]
 PromptRunner = Callable[[PromptRunRequest, threading.Event, JobProgress], dict[str, Any]]
 AttributionRunner = Callable[[AttributionRunRequest, threading.Event, JobProgress], dict[str, Any]]
@@ -702,7 +719,7 @@ class PhysicalIndexedSample:
 @dataclass
 class _ExplorerJob:
     snapshot: JobSnapshot
-    payload: BaseModel
+    payload: BaseModel | None
     cancel_event: threading.Event
 
 
@@ -725,18 +742,70 @@ class ExplorerJobManager:
         ],
         ready_detail: str,
         error_detail: str,
+        history_dir: Path | None = None,
     ) -> None:
         self._runner = runner
         self._kind = kind
         self._ready_detail = ready_detail
         self._error_detail = error_detail
+        self._history_dir = history_dir
         self._jobs: dict[str, _ExplorerJob] = {}
         self._queue: queue.Queue[str | None] = queue.Queue()
         self._pending_job_ids: set[str] = set()
         self._lock = threading.Lock()
         self._active_job_id: str | None = None
+        self._load_history()
         self._worker = threading.Thread(target=self._work, daemon=True)
         self._worker.start()
+
+    @property
+    def kind(self) -> str:
+        return self._kind
+
+    def _load_history(self) -> None:
+        if self._history_dir is None or not self._history_dir.is_dir():
+            return
+        for path in sorted(self._history_dir.glob("*.json")):
+            try:
+                snapshot = JobSnapshot.model_validate_json(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if snapshot.kind != self._kind or snapshot.status not in TERMINAL_JOB_STATES:
+                continue
+            self._jobs[snapshot.id] = _ExplorerJob(
+                snapshot=snapshot,
+                payload=None,
+                cancel_event=threading.Event(),
+            )
+
+    def _persist(self, snapshot: JobSnapshot) -> None:
+        if self._history_dir is None:
+            return
+        try:
+            self._history_dir.mkdir(parents=True, exist_ok=True)
+            target = self._history_dir / f"{snapshot.id}.json"
+            temporary = target.with_suffix(".json.tmp")
+            temporary.write_text(snapshot.model_dump_json(indent=2), encoding="utf-8")
+            temporary.replace(target)
+        except OSError:
+            # History is a convenience; a read-only or full artifact root must
+            # not turn a completed evaluation into a failed one.
+            return
+
+    def list_jobs(
+        self,
+        *,
+        statuses: set[str] | None = None,
+        limit: int = 30,
+    ) -> list[JobSnapshot]:
+        with self._lock:
+            snapshots = [
+                job.snapshot.model_copy(deep=True)
+                for job in self._jobs.values()
+                if statuses is None or job.snapshot.status in statuses
+            ]
+        snapshots.sort(key=lambda item: (item.createdAt, item.id), reverse=True)
+        return snapshots[:limit]
 
     def submit(
         self,
@@ -798,6 +867,7 @@ class ExplorerJobManager:
                 }
             )
             snapshot = job.snapshot.model_copy(deep=True)
+        self._persist(snapshot)
         return snapshot
 
     def _work(self) -> None:
@@ -822,6 +892,7 @@ class ExplorerJobManager:
                 )
 
             progress = self._progress_callback(job_id)
+            terminal_snapshot: JobSnapshot | None = None
 
             try:
                 result = self._runner(job.payload, job.cancel_event, progress)
@@ -839,6 +910,7 @@ class ExplorerJobManager:
                             "updatedAt": _utc_now(),
                         }
                     )
+                    terminal_snapshot = current.snapshot.model_copy(deep=True)
             except BaseException as exc:
                 with self._lock:
                     current = self._jobs[job_id]
@@ -853,26 +925,35 @@ class ExplorerJobManager:
                             "updatedAt": _utc_now(),
                         }
                     )
+                    terminal_snapshot = current.snapshot.model_copy(deep=True)
             finally:
                 with self._lock:
                     if self._active_job_id == job_id:
                         self._active_job_id = None
+            if terminal_snapshot is not None:
+                self._persist(terminal_snapshot)
 
     def _progress_callback(self, job_id: str) -> JobProgress:
-        def progress(value: int, stage: str, detail: str) -> None:
+        def progress(
+            value: int,
+            stage: str,
+            detail: str,
+            task_progress: dict[str, dict[str, int]] | None = None,
+        ) -> None:
+            update: dict[str, Any] = {
+                "status": "loading",
+                "stage": stage,
+                "progress": max(0, min(99, value)),
+                "detail": detail,
+                "updatedAt": _utc_now(),
+            }
+            if task_progress is not None:
+                update["taskProgress"] = task_progress
             with self._lock:
                 current = self._jobs.get(job_id)
                 if current is None or current.cancel_event.is_set():
                     return
-                current.snapshot = current.snapshot.model_copy(
-                    update={
-                        "status": "loading",
-                        "stage": stage,
-                        "progress": max(0, min(99, value)),
-                        "detail": detail,
-                        "updatedAt": _utc_now(),
-                    }
-                )
+                current.snapshot = current.snapshot.model_copy(update=update)
 
         return progress
 
@@ -892,6 +973,7 @@ def create_app(
     intervention_tokenizer_loader: Callable[[str], Any] | None = None,
     sae_discovery_runner: JobRunner | None = None,
     dataset_test_runner: JobRunner | None = None,
+    dataset_history_dir: str | Path | None = None,
     allowed_models: tuple[str, ...] | None = None,
 ) -> FastAPI:
     """Create a localhost-oriented API constrained to one artifact root."""
@@ -901,6 +983,15 @@ def create_app(
         artifact_root or os.environ.get("SAFELENS_EXPLORER_ARTIFACT_ROOT") or DEFAULT_ARTIFACT_ROOT
     )
     root = Path(configured_root).expanduser().resolve()
+    history_root = (
+        Path(
+            dataset_history_dir
+            or os.environ.get("SAFELENS_DATASET_HISTORY_DIR")
+            or root / ".safelens" / "dataset-jobs"
+        )
+        .expanduser()
+        .resolve()
+    )
     app = FastAPI(
         title="SafeLens Explorer API",
         version="0.1.0",
@@ -964,6 +1055,7 @@ def create_app(
         kind="dataset-test",
         ready_detail="Dataset test is complete. Review the metric and individual samples.",
         error_detail="Dataset test failed. Inspect model availability and the diagnostic.",
+        history_dir=history_root,
     )
     managers = (
         prompt_manager,
@@ -1817,6 +1909,21 @@ def create_app(
                 },
             },
         )
+
+    @app.get("/api/jobs", response_model=JobListResponse)
+    def list_jobs(
+        kind: str | None = Query(default=None),
+        status: str | None = Query(default=None),
+        limit: int = Query(default=30, ge=1, le=100),
+    ) -> JobListResponse:
+        statuses = {status} if status else None
+        snapshots: list[JobSnapshot] = []
+        for manager in managers:
+            if kind is not None and manager.kind != kind:
+                continue
+            snapshots.extend(manager.list_jobs(statuses=statuses, limit=limit))
+        snapshots.sort(key=lambda item: (item.createdAt, item.id), reverse=True)
+        return JobListResponse(jobs=[_job_list_summary(snapshot) for snapshot in snapshots[:limit]])
 
     @app.get("/api/jobs/{job_id}", response_model=JobSnapshot)
     def get_job(job_id: str) -> JobSnapshot:

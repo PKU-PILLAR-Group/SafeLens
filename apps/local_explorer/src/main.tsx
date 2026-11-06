@@ -192,6 +192,7 @@ function screenFromLocation(): AppScreen {
 
 function App() {
   const [screen, setScreen] = useState<AppScreen>(screenFromLocation);
+  const [datasetJobId, setDatasetJobId] = useState<string | null>(null);
   const library = useRunLibrary(realRun, screen === "explorer");
   const run = library.activeRecord.run;
   const [pendingSession, setPendingSession] = useState<ExplorerSession | null>(null);
@@ -271,8 +272,12 @@ function App() {
     setScreen("home");
   }
 
-  function openDatasetTest() {
-    window.history.pushState(null, "", appScreenPath("dataset-test"));
+  function openDatasetTest(jobId: string | null = null) {
+    setDatasetJobId(jobId);
+    const target = appScreenPath("dataset-test");
+    if (window.location.pathname !== target) {
+      window.history.pushState(null, "", target);
+    }
     setScreen("dataset-test");
   }
 
@@ -283,7 +288,8 @@ function App() {
           records={library.records}
           activeRecord={library.activeRecord}
           remoteState={library.remoteState}
-          onOpenDatasetTest={openDatasetTest}
+          onOpenDatasetTest={() => openDatasetTest()}
+          onOpenDatasetJob={(jobId) => openDatasetTest(jobId)}
           onSelectConversation={(key) => library.selectRun(key, undefined, "none")}
           onRunReady={(generatedRun, job) => library.addGeneratedRun(
             generatedRun,
@@ -299,7 +305,7 @@ function App() {
           onRemoveRuns={library.removeRuns}
         />
       ) : screen === "dataset-test" ? (
-        <DatasetTestScreen onOpenChat={openHome} />
+        <DatasetTestScreen onOpenChat={openHome} initialJobId={datasetJobId} />
       ) : (
         <ExplorerWorkspace
           key={library.activeRecord.key}

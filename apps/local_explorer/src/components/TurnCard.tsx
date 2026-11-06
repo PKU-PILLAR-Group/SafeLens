@@ -111,16 +111,18 @@ export function TurnCard({
       {turn.run && showAnalysisControls && (
         <>
           <div className="chat-turn-explore-bar" aria-label="Explore this run">
-            {turn.run.mlpNeurons.length > 0 && (
-              <button
-                type="button"
-                className={analysisOpen === "neuron" ? "active" : ""}
-                aria-pressed={analysisOpen === "neuron"}
-                onClick={() => onToggleAnalysis("neuron")}
-              >
-                <Activity size={16} /> Neuron
-              </button>
-            )}
+            <button
+              type="button"
+              className={analysisOpen === "neuron" ? "active" : ""}
+              aria-pressed={analysisOpen === "neuron"}
+              disabled={turn.run.mlpNeurons.length === 0}
+              title={turn.run.mlpNeurons.length === 0
+                ? "MLP neuron activations are not available for this run."
+                : "Inspect MLP neuron activations"}
+              onClick={() => onToggleAnalysis("neuron")}
+            >
+              <Activity size={16} /> Neuron
+            </button>
             <button
               type="button"
               className={analysisOpen === "feature" ? "active" : ""}

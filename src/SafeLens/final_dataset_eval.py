@@ -219,12 +219,43 @@ def run_dataset_test(
     if not samples:
         raise ValueError("Select at least one final_300 sample.")
 
+    baseline_total: dict[str, int] = defaultdict(int)
+    baseline_done: dict[str, int] = defaultdict(int)
+    steering_total: dict[str, int] = defaultdict(int)
+    steering_done: dict[str, int] = defaultdict(int)
+    for sample in samples:
+        baseline_total[str(sample["task"])] += 1
+
+    def task_progress() -> dict[str, dict[str, int]]:
+        tasks = sorted(
+            set(baseline_total) | set(baseline_done) | set(steering_total) | set(steering_done)
+        )
+        return {
+            task: {
+                "baselineCompleted": baseline_done.get(task, 0),
+                "baselineTotal": baseline_total.get(task, 0),
+                "steeringCompleted": steering_done.get(task, 0),
+                "steeringTotal": steering_total.get(task, 0),
+            }
+            for task in tasks
+        }
+
     judge_model = _dataset_judge_model()
     if any(str(sample["task"]) == "safety" for sample in samples):
-        progress(2, "judge-preflight", f"Checking the safety judge ({judge_model}).")
+        progress(
+            2,
+            "judge-preflight",
+            f"Checking the safety judge ({judge_model}).",
+            task_progress(),
+        )
         _validate_safety_judge(judge_model)
 
-    progress(3, "baseline-model", f"Loading Gemma-2-9B-it for {len(samples)} baseline samples.")
+    progress(
+        3,
+        "baseline-model",
+        f"Loading Gemma-2-9B-it for {len(samples)} baseline samples.",
+        task_progress(),
+    )
     from SafeLens.explorer_model import explorer_model_source, load_explorer_hf_model
 
     load_kwargs = {"cache_dir": cache_dir} if cache_dir is not None else {}
@@ -234,15 +265,18 @@ def run_dataset_test(
     try:
         for offset, sample in enumerate(samples):
             _require_not_cancelled(cancel_event)
+            task = str(sample["task"])
             progress(
                 5 + int(offset / len(samples) * 40),
                 "baseline",
                 f"Baseline: {sample['id']} ({offset + 1}/{len(samples)}).",
+                task_progress(),
             )
             try:
                 raw_rows.append(_run_baseline_sample(wrapper, sample, payload))
             except Exception as exc:
                 raw_rows.append(_error_row(sample, exc))
+            baseline_done[task] += 1
     finally:
         wrapper.remove_hooks()
         execution_runtime = {
@@ -259,13 +293,25 @@ def run_dataset_test(
         gc.collect()
         _empty_cuda_cache()
 
+    progress(
+        45,
+        "baseline",
+        f"Baseline complete: {len(raw_rows)}/{len(samples)} samples.",
+        task_progress(),
+    )
+
     baseline_safety_rows = [
         row
         for row in raw_rows
         if row.get("task") == "safety" and row["status"] == "pending_baseline_judge"
     ]
     if baseline_safety_rows:
-        progress(47, "baseline-safety-judge", "Judging baseline safety responses.")
+        progress(
+            47,
+            "baseline-safety-judge",
+            "Judging baseline safety responses.",
+            task_progress(),
+        )
         try:
             _judge_safety_rows(baseline_safety_rows, cancel_event, sides=("baseline",))
         except Exception as exc:
@@ -291,10 +337,13 @@ def run_dataset_test(
             )
 
     if baseline_failures:
+        for row in baseline_failures:
+            steering_total[str(row["task"])] += 1
         progress(
             55,
             "steering-model",
             f"Reloading Gemma-2-9B-it to steer {len(baseline_failures)} baseline failures.",
+            task_progress(),
         )
         vectors = _load_method_vectors(method)
         wrapper = load_explorer_hf_model(model_name, **load_kwargs)
@@ -306,6 +355,7 @@ def run_dataset_test(
                     "steering",
                     f"{algorithm['name']}: {row['sampleId']} "
                     f"({offset + 1}/{len(baseline_failures)} failures).",
+                    task_progress(),
                 )
                 try:
                     sample = available[str(row["sampleId"])]
@@ -318,11 +368,18 @@ def run_dataset_test(
                         steeringApplied=True,
                         detail=f"Steering failed: {exc}",
                     )
+                steering_done[str(row["task"])] += 1
         finally:
             wrapper.remove_hooks()
             del wrapper
             gc.collect()
             _empty_cuda_cache()
+        progress(
+            91,
+            "steering",
+            f"Steering complete: {len(baseline_failures)} failures processed.",
+            task_progress(),
+        )
 
     steered_safety_rows = [
         row
@@ -330,7 +387,12 @@ def run_dataset_test(
         if row.get("task") == "safety" and row["status"] == "pending_steered_judge"
     ]
     if steered_safety_rows:
-        progress(92, "steered-safety-judge", "Judging steered safety responses.")
+        progress(
+            92,
+            "steered-safety-judge",
+            "Judging steered safety responses.",
+            task_progress(),
+        )
         try:
             _judge_safety_rows(steered_safety_rows, cancel_event, sides=("steered",))
         except Exception as exc:

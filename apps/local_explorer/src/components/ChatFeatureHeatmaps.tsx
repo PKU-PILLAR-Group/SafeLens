@@ -110,6 +110,12 @@ function HeatmapTable({
   onSelectCell
 }: HeatmapTableProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
+  const [hovered, setHovered] = useState<{
+    row: HeatmapRow;
+    token: TokenInfo;
+    value: number;
+    missing: boolean;
+  } | null>(null);
   const inRange = (tokenIndex: number) =>
     tokenIndex >= selectedRange[0] && tokenIndex < selectedRange[1];
   useEffect(() => {
@@ -132,8 +138,9 @@ function HeatmapTable({
   } as CSSProperties;
 
   return (
-    <div ref={scrollRef} className="feature-heatmap-scroll" style={{ maxHeight }}>
-      <table className="feature-heatmap-table" style={tableStyle} aria-label={ariaLabel}>
+    <>
+      <div ref={scrollRef} className="feature-heatmap-scroll" style={{ maxHeight }}>
+        <table className="feature-heatmap-table" style={tableStyle} aria-label={ariaLabel}>
         <thead>
           <tr>
             <th className="feature-heatmap-corner" scope="col">{cornerLabel}</th>
@@ -174,11 +181,17 @@ function HeatmapTable({
                   <td key={token.index} className={inRange(token.index) ? "in-range" : ""}>
                     <button
                       type="button"
-                      className={`feature-heatmap-cell${missing ? " missing" : ""}`}
+                      className={`feature-heatmap-cell${missing ? " missing" : ""}${!missing && value > max ? " outlier" : ""}`}
                       style={missing ? undefined : { backgroundColor: heatColor(value, min, max, signed, color) }}
                       aria-label={label}
                       title={label}
-                      onClick={() => onSelectCell(row.key, token.index)}
+                      onMouseEnter={() => setHovered({ row, token, value, missing })}
+                      onFocus={() => setHovered({ row, token, value, missing })}
+                      onMouseLeave={() => setHovered(null)}
+                      onClick={() => {
+                        setHovered({ row, token, value, missing });
+                        onSelectCell(row.key, token.index);
+                      }}
                     />
                   </td>
                 );
@@ -186,8 +199,26 @@ function HeatmapTable({
             </tr>
           ))}
         </tbody>
-      </table>
-    </div>
+        </table>
+      </div>
+      <div
+        className="feature-heatmap-inspector"
+        aria-label={`${ariaLabel} cell details`}
+        aria-live="polite"
+      >
+        {hovered ? (
+          <>
+            <strong>{hovered.row.title}</strong>
+            <span>T{hovered.token.index} {tokenText(hovered.token)}</span>
+            <b>{hovered.missing ? "not loaded" : format(hovered.value)}</b>
+            {!hovered.missing && hovered.value > max && <em>above color range</em>}
+            {!hovered.missing && hovered.value < min && <em className="below">below color range</em>}
+          </>
+        ) : (
+          <span>Hover a cell for exact values</span>
+        )}
+      </div>
+    </>
   );
 }
 
@@ -349,6 +380,7 @@ export function ResidualStreamHeatmap({
   onSelectToken: (tokenIndex: number) => void;
 }) {
   const [metric, setMetric] = useState<ResidualMetric>("norm");
+  const [scaleMode, setScaleMode] = useState<"robust" | "full">("robust");
   const meta = RESIDUAL_METRICS.find((item) => item.id === metric) ?? RESIDUAL_METRICS[0];
   const layers = useMemo(
     () => [...new Set(cells.map((cell) => cell.layer))].sort((left, right) => left - right),
@@ -364,6 +396,11 @@ export function ResidualStreamHeatmap({
       .map((cell) => cell[metric])
       .filter((value) => Number.isFinite(value));
     if (finite.length === 0) return { min: 0, max: 1, clipped: false };
+    if (scaleMode === "full") {
+      const minimum = Math.min(...finite);
+      const maximum = Math.max(...finite);
+      return { min: minimum, max: maximum > minimum ? maximum : minimum + 1, clipped: false };
+    }
     const lower = percentile(finite, 0.02);
     const upper = percentile(finite, 0.95);
     if (!(upper > lower)) {
@@ -376,7 +413,7 @@ export function ResidualStreamHeatmap({
       max: upper,
       clipped: finite.some((value) => value < lower || value > upper)
     };
-  }, [cells, metric]);
+  }, [cells, metric, scaleMode]);
   const format = (value: number) => Number.isFinite(value) ? value.toFixed(meta.digits) : "—";
   const rows: HeatmapRow[] = layers.map((layer) => ({
     key: `L${layer}`,
@@ -398,18 +435,31 @@ export function ResidualStreamHeatmap({
             {domain.clipped ? " · color domain clipped to p2–p95; hover cells for raw values" : ""}
           </p>
         </div>
-        <label className="chat-feature-visual-controls">
-          Metric
-          <select
-            aria-label="Residual heatmap metric"
-            value={metric}
-            onChange={(event) => setMetric(event.target.value as ResidualMetric)}
-          >
-            {RESIDUAL_METRICS.map((item) => (
-              <option key={item.id} value={item.id}>{item.label}</option>
-            ))}
-          </select>
-        </label>
+        <div className="chat-feature-visual-controls-group">
+          <label className="chat-feature-visual-controls">
+            Metric
+            <select
+              aria-label="Residual heatmap metric"
+              value={metric}
+              onChange={(event) => setMetric(event.target.value as ResidualMetric)}
+            >
+              {RESIDUAL_METRICS.map((item) => (
+                <option key={item.id} value={item.id}>{item.label}</option>
+              ))}
+            </select>
+          </label>
+          <label className="chat-feature-visual-controls">
+            Scale
+            <select
+              aria-label="Residual heatmap scale"
+              value={scaleMode}
+              onChange={(event) => setScaleMode(event.target.value as "robust" | "full")}
+            >
+              <option value="robust">Robust p2–p95</option>
+              <option value="full">Full range</option>
+            </select>
+          </label>
+        </div>
       </header>
       {rows.length > 0 ? (
         <>

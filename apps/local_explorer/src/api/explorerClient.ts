@@ -595,6 +595,17 @@ const datasetTestRowSchema = z.object({
   diagnostics: z.record(z.string(), z.unknown()).optional()
 });
 
+const datasetTaskMetricSchema = z.object({
+  total: z.number().int().nonnegative(),
+  baselineSuccess: z.number().int().nonnegative(),
+  baselineFailure: z.number().int().nonnegative(),
+  failureToSuccess: z.number().int().nonnegative(),
+  correctionRate: z.number().min(0).max(1),
+  scoreBasis: z.string().optional(),
+  successToFailure: z.number().int().nonnegative().optional(),
+  postInterventionSuccess: z.number().int().nonnegative().optional()
+});
+
 const datasetTestResultSchema = z.object({
   dataset: z.object({
     id: z.string(), name: z.string(), version: z.string(), sampleCount: z.number().int()
@@ -639,10 +650,29 @@ const datasetTestResultSchema = z.object({
     baselineFailure: z.number().int().nonnegative().optional(),
     failureToSuccess: z.number().int().nonnegative().optional(),
     successToFailure: z.number().int().nonnegative().optional(),
-    tasks: z.record(z.string(), z.unknown()).optional()
+    tasks: z.record(z.string(), datasetTaskMetricSchema).optional()
   }),
   rows: z.array(datasetTestRowSchema)
 });
+
+const datasetTestRequestSchema = z.object({
+  datasetId: z.string(),
+  algorithmId: z.enum(["pca_minus_neg", "mean_minus_neg"]),
+  model: z.string(),
+  sampleIds: z.array(z.string()),
+  layer: z.number().int(),
+  sourceLayer: z.number().int().nullable().optional(),
+  strength: z.number(),
+  seed: z.number().int(),
+  maxNewTokens: z.number().int()
+});
+
+const jobTaskProgressSchema = z.record(z.string(), z.object({
+  baselineCompleted: z.number().int().nonnegative(),
+  baselineTotal: z.number().int().nonnegative(),
+  steeringCompleted: z.number().int().nonnegative(),
+  steeringTotal: z.number().int().nonnegative()
+}));
 
 export const datasetTestJobSchema = z.object({
   id: z.string().min(1),
@@ -653,27 +683,52 @@ export const datasetTestJobSchema = z.object({
   detail: z.string(),
   createdAt: z.string(),
   updatedAt: z.string(),
-  request: z.object({
-    datasetId: z.string(),
-    algorithmId: z.enum(["pca_minus_neg", "mean_minus_neg"]),
-    model: z.string(),
-    sampleIds: z.array(z.string()),
-    layer: z.number().int(),
-    sourceLayer: z.number().int().nullable().optional(),
-    strength: z.number(),
-    seed: z.number().int(),
-    maxNewTokens: z.number().int()
-  }),
+  request: datasetTestRequestSchema,
   result: datasetTestResultSchema.nullable(),
-  error: z.string().nullable()
+  error: z.string().nullable(),
+  taskProgress: jobTaskProgressSchema.nullable().optional()
+});
+
+const datasetTestResultSummarySchema = datasetTestResultSchema.omit({ rows: true });
+
+export const datasetTestJobSummarySchema = z.object({
+  id: z.string().min(1),
+  kind: z.literal("dataset-test"),
+  status: z.enum(["idle", "loading", "ready", "error", "cancelled"]),
+  stage: z.string(),
+  progress: z.number().int().min(0).max(100),
+  detail: z.string(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+  request: datasetTestRequestSchema,
+  result: datasetTestResultSummarySchema.nullable(),
+  error: z.string().nullable(),
+  taskProgress: jobTaskProgressSchema.nullable().optional()
+});
+
+export const jobSummarySchema = z.object({
+  id: z.string().min(1),
+  kind: z.string(),
+  status: z.enum(["idle", "loading", "ready", "error", "cancelled"]),
+  stage: z.string(),
+  progress: z.number().int().min(0).max(100),
+  detail: z.string(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+  request: z.record(z.string(), z.unknown()),
+  result: z.record(z.string(), z.unknown()).nullable().optional(),
+  error: z.string().nullable(),
+  taskProgress: jobTaskProgressSchema.nullable().optional()
 });
 
 export type DatasetCatalog = z.infer<typeof datasetCatalogSchema>;
 export type DatasetDefinition = z.infer<typeof datasetDefinitionSchema>;
 export type DatasetAlgorithm = z.infer<typeof datasetAlgorithmSchema>;
 export type DatasetTestJob = z.infer<typeof datasetTestJobSchema>;
+export type DatasetTestJobSummary = z.infer<typeof datasetTestJobSummarySchema>;
 export type DatasetTestResult = z.infer<typeof datasetTestResultSchema>;
 export type DatasetTestInput = DatasetTestJob["request"];
+export type JobSummary = z.infer<typeof jobSummarySchema>;
 
 const tokenizeResponseSchema = z.object({
   modelName: z.string().min(1),
@@ -1336,6 +1391,50 @@ export async function cancelDatasetTestJob(jobId: string): Promise<DatasetTestJo
   });
   if (!response.ok) throw await jobResponseError(response, "dataset_test_cancel_error");
   return parseDatasetTestJob(await response.json());
+}
+
+export async function fetchDatasetTestJobs(limit = 30): Promise<DatasetTestJobSummary[]> {
+  const response = await fetch(`${API_BASE}/jobs?kind=dataset-test&limit=${limit}`, {
+    headers: { Accept: "application/json" },
+    cache: "no-store"
+  });
+  if (!response.ok) throw await jobResponseError(response, "dataset_history_error");
+  const parsed = z.object({
+    jobs: z.array(datasetTestJobSummarySchema)
+  }).safeParse(await response.json());
+  if (!parsed.success) {
+    throw new ExplorerApiError(
+      "invalid_dataset_history",
+      `Dataset history failed validation: ${parsed.error.issues[0]?.message ?? "unknown error"}`
+    );
+  }
+  return parsed.data.jobs;
+}
+
+export async function fetchJobs(limit = 30): Promise<JobSummary[]> {
+  const response = await fetch(`${API_BASE}/jobs?limit=${limit}`, {
+    headers: { Accept: "application/json" },
+    cache: "no-store"
+  });
+  if (!response.ok) throw await jobResponseError(response, "job_list_error");
+  const parsed = z.object({
+    jobs: z.array(jobSummarySchema)
+  }).safeParse(await response.json());
+  if (!parsed.success) {
+    throw new ExplorerApiError(
+      "invalid_job_list",
+      `Job list failed validation: ${parsed.error.issues[0]?.message ?? "unknown error"}`
+    );
+  }
+  return parsed.data.jobs;
+}
+
+export async function cancelJob(jobId: string): Promise<void> {
+  const response = await fetch(`${API_BASE}/jobs/${encodeURIComponent(jobId)}`, {
+    method: "DELETE",
+    headers: { Accept: "application/json" }
+  });
+  if (!response.ok) throw await jobResponseError(response, "job_cancel_error");
 }
 
 export async function fetchTokenizedResponse(

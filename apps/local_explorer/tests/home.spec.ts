@@ -1511,6 +1511,13 @@ test("keeps every residual layer visible and clips extreme activations", async (
   await expect(residual.locator("tbody tr")).toHaveCount(28);
   await expect(residual.locator("tbody tr").first()).toContainText("L0");
   await expect(page.getByText(/color domain clipped to p2–p95/)).toBeVisible();
+
+  await residual.locator("button.feature-heatmap-cell").first().hover();
+  await expect(page.getByLabel("Residual stream heatmap cell details"))
+    .toContainText("Residual stream L0");
+
+  await page.getByLabel("Residual heatmap scale").selectOption("full");
+  await expect(page.getByText(/color domain clipped to p2–p95/)).toHaveCount(0);
 });
 
 test("discovers active SAE features and runs a scale-aware intervention from Chat", async ({ page }) => {
@@ -1710,6 +1717,24 @@ test("restores and deletes a generated conversation after explicit confirmation"
   const saved = await page.evaluate(() => window.localStorage.getItem("safelens.localExplorer.importedRuns.v1"));
   expect(saved).not.toContain("chat-home-generated");
   expect(saved).not.toContain("chat-attribution-derived");
+});
+
+test("filters conversations by title", async ({ page }) => {
+  await prepareHome(page);
+  await mockReadyPromptJob(page);
+  await page.goto("/");
+  await runReadyAnalysis(page);
+  await expect(page.locator(".chat-history-row")).toHaveCount(2);
+
+  const search = page.getByLabel("Search conversations");
+  await search.fill("Compare a benign");
+  await expect(page.locator(".chat-history-row")).toHaveCount(1);
+  await expect(page.getByLabel("Conversation history").getByText("Why does the model focus")).toHaveCount(0);
+
+  await search.fill("no-such-conversation");
+  await expect(page.getByText("No conversations match your search.")).toBeVisible();
+  await page.getByRole("button", { name: "Clear conversation search" }).click();
+  await expect(page.locator(".chat-history-row")).toHaveCount(2);
 });
 
 test("selects and deletes multiple conversations together", async ({ page }) => {
