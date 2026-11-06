@@ -22,6 +22,34 @@ const generatedRun = {
   }
 };
 
+const extremeRun: ExplorerRun = {
+  ...generatedRun,
+  runId: "chat-extreme-neuron",
+  sampleId: "extreme-0",
+  layers: Array.from({ length: 28 }, (_, layer) => layer),
+  residualCells: Array.from({ length: 28 }, (_, layer) =>
+    generatedRun.tokens.map((token, index) => ({
+      ...generatedRun.residualCells[index % generatedRun.residualCells.length],
+      layer,
+      tokenIndex: token.index,
+      norm: layer === 15 && index === 2 ? 13_000 : 40 + layer * 10 + index
+    }))
+  ).flat(),
+  mlpNeurons: Array.from({ length: 28 }, (_, layer) =>
+    generatedRun.mlpNeurons
+      .filter((neuron) => neuron.layer === 0)
+      .map((neuron) => ({
+        ...neuron,
+        id: `L${layer}N${neuron.neuron}`,
+        layer,
+        activationsByToken: neuron.activationsByToken.map((value, index) =>
+          layer === 15 && index === 2 ? 500 : value
+        ),
+        maxAbsoluteActivation: layer === 15 ? 500 : neuron.maxAbsoluteActivation
+      }))
+  ).flat()
+};
+
 const attributionValues = generatedRun.tokens.map((_, index) =>
   Number((((index % 5) - 2) / 2).toFixed(3))
 );
@@ -1018,6 +1046,19 @@ test("opens as the minimal Chat interface shown in the reference figures", async
   expect(layout.document).toBeLessThanOrEqual(layout.viewport);
 });
 
+test("collapses and expands the chat history sidebar", async ({ page }) => {
+  await prepareHome(page);
+  await page.goto("/");
+
+  const history = page.getByLabel("Chat history");
+  await expect(history.getByText("Recent")).toBeVisible();
+  await page.getByRole("button", { name: "Collapse chat history" }).click();
+  await expect(history.getByText("Recent")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Expand chat history" })).toBeVisible();
+  await page.getByRole("button", { name: "Expand chat history" }).click();
+  await expect(history.getByText("Recent")).toBeVisible();
+});
+
 test("submits from an ordinary HTTP preview without crypto.randomUUID", async ({ page }) => {
   await prepareHome(page);
   await mockReadyPromptJob(page);
@@ -1448,8 +1489,28 @@ test("opens real MLP neuron intervention from Chat", async ({ page }) => {
   await expect(page.getByRole("heading", { name: "Neuron intervention" })).toBeVisible();
   await expect(page.getByLabel("MLP neuron", { exact: true })).toBeVisible();
   await expect(page.getByLabel("Neuron activation factor")).toHaveValue("0");
+  await expect(page.getByRole("heading", { name: "MLP activation heatmap" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Residual stream heatmap" })).toBeVisible();
+  await expect(page.getByLabel("MLP activation heatmap").locator("tbody tr")).toHaveCount(8);
+  await expect(page.getByLabel("Residual stream heatmap").locator("tbody tr")).toHaveCount(2);
+  await page.getByLabel("Residual stream heatmap").locator("tbody tr").first()
+    .locator("button.feature-heatmap-cell").first().click();
+  await expect(page.getByLabel("Neuron intervention layer")).toHaveValue("0");
   await expect(page.getByRole("button", { name: "Suppress", exact: true })).toHaveAttribute("aria-pressed", "true");
   await expect(page.getByRole("button", { name: "Run neuron intervention" })).toBeEnabled();
+});
+
+test("keeps every residual layer visible and clips extreme activations", async ({ page }) => {
+  await prepareHome(page);
+  await mockReadyPromptJob(page, extremeRun);
+  await page.goto("/");
+  await runReadyAnalysis(page);
+
+  await page.getByRole("button", { name: /Neuron/ }).click();
+  const residual = page.getByLabel("Residual stream heatmap");
+  await expect(residual.locator("tbody tr")).toHaveCount(28);
+  await expect(residual.locator("tbody tr").first()).toContainText("L0");
+  await expect(page.getByText(/color domain clipped to p2–p95/)).toBeVisible();
 });
 
 test("discovers active SAE features and runs a scale-aware intervention from Chat", async ({ page }) => {
@@ -1649,6 +1710,32 @@ test("restores and deletes a generated conversation after explicit confirmation"
   const saved = await page.evaluate(() => window.localStorage.getItem("safelens.localExplorer.importedRuns.v1"));
   expect(saved).not.toContain("chat-home-generated");
   expect(saved).not.toContain("chat-attribution-derived");
+});
+
+test("selects and deletes multiple conversations together", async ({ page }) => {
+  await prepareHome(page);
+  await mockReadyPromptJob(page);
+  await mockReadyAttributionJob(page);
+  await page.goto("/");
+  await runReadyAnalysis(page);
+
+  await page.getByRole("button", { name: /Attribute/ }).click();
+  await page.getByRole("button", { name: "Run attribution" }).click();
+  await expect(page.getByLabel("Input attribution result")).toBeVisible();
+  await expect(page.locator(".chat-history-row")).toHaveCount(2);
+
+  await page.getByRole("button", { name: "Manage conversations" }).click();
+  await expect(page.getByRole("checkbox")).toHaveCount(2);
+  await page.getByRole("checkbox").first().click();
+  await expect(page.getByText("1 selected")).toBeVisible();
+  await page.getByRole("button", { name: "Select all" }).click();
+  await expect(page.getByText("2 selected")).toBeVisible();
+  await page.getByRole("button", { name: "Delete selected conversations" }).click();
+
+  const dialog = page.getByRole("dialog", { name: "Delete 2 conversations?" });
+  await dialog.getByRole("button", { name: "Delete 2 conversations" }).click();
+  await expect(page.locator(".chat-history-row")).toHaveCount(0);
+  await expect(page.getByText("No conversations yet.")).toBeVisible();
 });
 
 test("persists removal of a read-only workspace entry from Chat", async ({ page }) => {

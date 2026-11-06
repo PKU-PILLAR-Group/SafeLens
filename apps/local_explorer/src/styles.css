@@ -3272,6 +3272,10 @@ h1 {
   grid-template-columns: 240px minmax(0, 1fr);
 }
 
+.chat-home-body.history-collapsed {
+  grid-template-columns: 52px minmax(0, 1fr);
+}
+
 .chat-history {
   height: calc(100vh - 68px);
   padding: 14px 10px 20px;
@@ -3307,6 +3311,57 @@ h1 {
 .chat-history-new:hover { background: #f1f3f3; }
 .chat-history-close { display: none; }
 
+.chat-history-collapse {
+  width: 42px;
+  height: 42px;
+  display: grid;
+  place-items: center;
+  border: 1px solid #dedfe1;
+  border-radius: 7px;
+  background: #fff;
+  color: #5f6266;
+  cursor: pointer;
+}
+
+.chat-history-collapse:hover {
+  border-color: #b8d4cf;
+  background: #f0f7f5;
+  color: #0e615d;
+}
+
+.chat-history.collapsed {
+  padding: 14px 6px;
+}
+
+.chat-history.collapsed > header {
+  grid-template-columns: 1fr;
+}
+
+.chat-history.collapsed .chat-history-collapse {
+  width: 40px;
+  height: 40px;
+  margin: 0 auto;
+}
+
+.chat-history-collapsed-new {
+  width: 40px;
+  height: 40px;
+  margin: 10px auto 0;
+  display: grid;
+  place-items: center;
+  border: 1px solid #dedfe1;
+  border-radius: 7px;
+  background: #fff;
+  color: #34363a;
+  cursor: pointer;
+}
+
+.chat-history-collapsed-new:hover {
+  border-color: #b8d4cf;
+  background: #f0f7f5;
+  color: #0e615d;
+}
+
 .chat-history nav {
   margin-top: 22px;
   display: grid;
@@ -3319,6 +3374,110 @@ h1 {
   font-size: 10px;
   font-weight: 750;
   text-transform: uppercase;
+}
+
+.chat-history-section-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 10px 7px;
+}
+
+.chat-history-section-heading > span {
+  color: #62656a;
+  font-size: 10px;
+  font-weight: 750;
+  text-transform: uppercase;
+}
+
+.chat-history-manage {
+  min-height: 24px;
+  padding: 0 6px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: #4f7168;
+  font-size: 10px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.chat-history-manage:hover {
+  border-color: #c9dcd6;
+  background: #eef8f4;
+  color: #176b5e;
+}
+
+.chat-history-selection-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 6px 7px;
+}
+
+.chat-history-selection-toolbar button {
+  min-height: 26px;
+  padding: 0 7px;
+  border: 1px solid #d4dfdb;
+  border-radius: 4px;
+  background: #fff;
+  color: #55716b;
+  font-size: 10px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.chat-history-selection-toolbar button:hover {
+  border-color: #4a9788;
+  background: #eef8f4;
+  color: #176b5e;
+}
+
+.chat-history-selection-toolbar button.danger {
+  margin-left: auto;
+  border-color: #e3c7cc;
+  background: #fff6f7;
+  color: #a23e50;
+}
+
+.chat-history-selection-toolbar button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.chat-history-selection-toolbar > span {
+  color: #7b8985;
+  font-size: 9px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.chat-history-row.selecting {
+  grid-template-columns: 30px minmax(0, 1fr);
+}
+
+.chat-history-row.selected {
+  background: #e1f0eb;
+}
+
+.chat-history-select {
+  width: 30px;
+  min-height: 50px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  background: transparent;
+  color: #55716b;
+  cursor: pointer;
+}
+
+.chat-history-select:hover {
+  color: #176b5e;
+}
+
+.chat-history-row.selecting .chat-history-open {
+  padding-left: 4px;
 }
 
 .chat-history nav > p {
@@ -5801,6 +5960,7 @@ h1 {
   }
 
   .chat-history.open { transform: translateX(0); }
+  .chat-history-collapse { display: none; }
   .chat-history-close {
     width: 40px;
     height: 40px;
@@ -19577,7 +19737,227 @@ body {
 .chat-sae-range-hint { margin: 0; color: #87928f; font-size: 11px; line-height: 1.45; }
 .chat-feature-workbench > .chat-workbench-actions { margin-top: 2px; }
 
+.chat-feature-visuals {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: start;
+  gap: 14px;
+  padding: 18px 0;
+  border-bottom: 1px solid #e8e9ea;
+}
+
+.chat-feature-visual {
+  min-width: 0;
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid #dfe7e4;
+  border-radius: 6px;
+  background: #fbfcfc;
+}
+
+.chat-feature-visual > header {
+  min-width: 0;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.chat-feature-visual h3 {
+  margin: 0;
+  color: #2a3f3a;
+  font-size: 13px;
+  letter-spacing: 0;
+}
+
+.chat-feature-visual header p {
+  margin: 3px 0 0;
+  color: #7b8985;
+  font-size: 10px;
+  line-height: 1.4;
+}
+
+.chat-feature-visual-controls {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #63736f;
+  font-size: 10px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.chat-feature-visual-controls select {
+  height: 28px;
+  padding: 0 6px;
+  border: 1px solid #d7dfdc;
+  border-radius: 5px;
+  background: #fff;
+  color: #34433f;
+  font: inherit;
+  font-size: 10px;
+}
+
+.feature-heatmap-scroll {
+  max-height: 340px;
+  overflow: auto;
+  border: 1px solid #e2e8e6;
+  border-radius: 4px;
+  background: #fff;
+}
+
+.feature-heatmap-table {
+  border-collapse: separate;
+  border-spacing: 1px;
+  table-layout: fixed;
+}
+
+.feature-heatmap-table th,
+.feature-heatmap-table td {
+  padding: 0;
+}
+
+.feature-heatmap-corner {
+  position: sticky;
+  top: 0;
+  left: 0;
+  z-index: 4;
+  width: var(--heatmap-row-header, 56px);
+  min-width: var(--heatmap-row-header, 56px);
+  height: 72px;
+  padding-left: 4px !important;
+  background: #f3f6f5;
+  color: #66716e;
+  font-size: 10px;
+  font-weight: 700;
+  text-align: left;
+}
+
+.feature-heatmap-token {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  width: var(--heatmap-cell, 22px);
+  min-width: var(--heatmap-cell, 22px);
+  height: 72px;
+  background: #f3f6f5;
+  color: #5f6c68;
+  font-size: 10px;
+  font-weight: 600;
+  text-align: center;
+  vertical-align: bottom;
+}
+
+.feature-heatmap-token span {
+  display: block;
+  max-height: 68px;
+  margin: 0 auto;
+  overflow: hidden;
+  writing-mode: vertical-rl;
+  transform: rotate(180deg);
+}
+
+.feature-heatmap-token.in-range {
+  background: #dceee9;
+  color: #176b5e;
+}
+
+.feature-heatmap-row {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  width: var(--heatmap-row-header, 56px);
+  min-width: var(--heatmap-row-header, 56px);
+  height: var(--heatmap-row-height, 20px);
+  background: #f7f9f8;
+  color: #4e625c;
+  font-size: 9px;
+  font-weight: 700;
+  text-align: left;
+}
+
+.feature-heatmap-row button {
+  width: 100%;
+  height: 100%;
+  padding: 0 4px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.feature-heatmap-row button:focus-visible {
+  outline: 2px solid #176b5e;
+  outline-offset: -2px;
+}
+
+.feature-heatmap-row.selected {
+  background: #dceee9;
+  color: #176b5e;
+}
+
+.feature-heatmap-cell {
+  width: var(--heatmap-cell, 22px);
+  height: var(--heatmap-row-height, 20px);
+  display: block;
+  padding: 0;
+  border: 0;
+  border-radius: 2px;
+  cursor: pointer;
+}
+
+.feature-heatmap-cell:hover,
+.feature-heatmap-cell:focus-visible {
+  outline: 2px solid #176b5e;
+  outline-offset: -2px;
+}
+
+.feature-heatmap-cell.in-range {
+  box-shadow: inset 0 0 0 1px rgba(23, 111, 96, 0.55);
+}
+
+.feature-heatmap-cell.missing {
+  background: repeating-linear-gradient(
+    45deg,
+    #eef1f0,
+    #eef1f0 3px,
+    #f8f9f9 3px,
+    #f8f9f9 6px
+  );
+  opacity: 0.65;
+  cursor: default;
+}
+
+.feature-heatmap-legend {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: #7b8985;
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+}
+
+.feature-heatmap-legend-bar {
+  flex: 1;
+  height: 7px;
+  border-radius: 4px;
+}
+
+.feature-heatmap-empty {
+  margin: 0;
+  padding: 12px;
+  border: 1px dashed #d7dfdc;
+  color: #7b8985;
+  font-size: 11px;
+}
+
 @media (max-width: 760px) {
+  .chat-feature-visuals { grid-template-columns: 1fr; }
+
   .chat-attribution-rankings { grid-template-columns: 1fr; }
   .chat-attribution-rankings > section + section { border-left: 0; border-top: 1px solid #e5e7e8; padding: 14px 0 0; }
   .chat-feature-controls { grid-template-columns: 1fr 1fr; }

@@ -1,12 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   BrainCircuit,
+  CheckSquare2,
   Database,
   MessageSquareText,
+  PanelLeftClose,
   PanelLeftOpen,
   Paperclip,
   Play,
   LoaderCircle,
+  Square,
   SquarePen,
   Trash2,
   X
@@ -39,6 +42,7 @@ const FALLBACK_MODELS = [
 const DEFAULT_MAX_NEW_TOKENS = 128;
 const MAX_NEW_TOKENS_LIMIT = 512;
 const HIDDEN_RUN_STORAGE_KEY = "safelens.localExplorer.hiddenWork.v1";
+const HISTORY_COLLAPSED_STORAGE_KEY = "safelens.localExplorer.historyCollapsed.v1";
 
 interface ExplorerHomeProps {
   records: RunRecord[];
@@ -68,16 +72,29 @@ export function ExplorerHome({
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [analysisOpen, setAnalysisOpen] = useState<{ turnId: string; mode: AnalysisId } | null>(null);
   const [hiddenRunKeys, setHiddenRunKeys] = useState<Set<string>>(loadHiddenRunKeys);
-  const [pendingDelete, setPendingDelete] = useState<ConversationSummary | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<ConversationSummary[] | null>(null);
   const [pendingConversationKey, setPendingConversationKey] = useState<string | null>(null);
   const [historyNotice, setHistoryNotice] = useState<string | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [historyCollapsed, setHistoryCollapsed] = useState(loadHistoryCollapsed);
+  const [selectingConversations, setSelectingConversations] = useState(false);
+  const [selectedConversationIds, setSelectedConversationIds] = useState<Set<string>>(new Set());
 
   const visibleRecords = useMemo(
     () => records.filter((record) => !hiddenRunKeys.has(record.key)),
     [hiddenRunKeys, records]
   );
   const conversations = useMemo(() => listConversations(visibleRecords), [visibleRecords]);
+  useEffect(() => {
+    setSelectedConversationIds((current) => {
+      const available = new Set(conversations.map((conversation) => conversation.conversationId));
+      const next = new Set([...current].filter((id) => available.has(id)));
+      return next.size === current.size ? current : next;
+    });
+    if (selectingConversations && conversations.length === 0) {
+      setSelectingConversations(false);
+    }
+  }, [conversations, selectingConversations]);
   const selectedSource = visibleRecords.find((record) => record.key === sourceKey) ??
     visibleRecords.find((record) => record.key === activeRecord.key) ?? visibleRecords[0] ?? activeRecord;
 
@@ -174,6 +191,8 @@ export function ExplorerHome({
   function selectConversation(conversation: ConversationSummary) {
     const first = conversation.firstRecord;
     setHistoryNotice(null);
+    setSelectingConversations(false);
+    setSelectedConversationIds(new Set());
     if (first.run) {
       restoreConversation(first as RunRecord & { run: ExplorerRun });
       return;
@@ -198,6 +217,20 @@ export function ExplorerHome({
     setPrompt("");
     setAnalysisOpen(null);
     setHistoryOpen(false);
+    setSelectingConversations(false);
+    setSelectedConversationIds(new Set());
+  }
+
+  function toggleHistoryCollapsed() {
+    setHistoryCollapsed((current) => {
+      const next = !current;
+      try {
+        window.localStorage.setItem(HISTORY_COLLAPSED_STORAGE_KEY, String(next));
+      } catch {
+        // The preference remains in memory when persistence is unavailable.
+      }
+      return next;
+    });
   }
 
   function submitPrompt() {
@@ -216,8 +249,12 @@ export function ExplorerHome({
     );
   }
 
-  function removeConversationHistory(conversation: ConversationSummary) {
-    const relatedKeys = new Set(conversation.records.map((record) => record.key));
+  function removeConversationsHistory(items: ConversationSummary[]) {
+    if (items.length === 0) return;
+    const relatedKeys = new Set<string>();
+    for (const conversation of items) {
+      for (const record of conversation.records) relatedKeys.add(record.key);
+    }
     let foundChild = true;
     while (foundChild) {
       foundChild = false;
@@ -257,6 +294,44 @@ export function ExplorerHome({
     window.history.replaceState(null, "", "/");
   }
 
+  function toggleConversationSelection(conversationId: string) {
+    setSelectedConversationIds((current) => {
+      const next = new Set(current);
+      if (next.has(conversationId)) next.delete(conversationId);
+      else next.add(conversationId);
+      return next;
+    });
+  }
+
+  function selectAllConversations() {
+    setSelectedConversationIds(
+      new Set(conversations.map((conversation) => conversation.conversationId))
+    );
+  }
+
+  function clearConversationSelection() {
+    setSelectedConversationIds(new Set());
+  }
+
+  function toggleConversationSelectionMode() {
+    setSelectingConversations((current) => {
+      if (current) setSelectedConversationIds(new Set());
+      return !current;
+    });
+  }
+
+  function requestDeleteConversations(items: ConversationSummary[]) {
+    if (items.length > 0) setPendingDelete(items);
+  }
+
+  function deleteSelectedConversations() {
+    requestDeleteConversations(
+      conversations.filter((conversation) =>
+        selectedConversationIds.has(conversation.conversationId)
+      )
+    );
+  }
+
   return (
     <div className={`chat-home ${turnManager.turns.length > 0 ? "has-conversation" : "is-empty"} ${analysisOpen ? "has-analysis" : ""}`}>
       <header className="chat-home-header">
@@ -275,14 +350,23 @@ export function ExplorerHome({
         </nav>
       </header>
 
-      <div className="chat-home-body">
+      <div className={`chat-home-body ${historyCollapsed ? "history-collapsed" : ""}`}>
         <ChatHistory
           open={historyOpen}
+          collapsed={historyCollapsed}
+          onToggleCollapsed={toggleHistoryCollapsed}
           conversations={conversations}
           activeKey={null}
+          selecting={selectingConversations}
+          selectedIds={selectedConversationIds}
+          onToggleSelecting={toggleConversationSelectionMode}
+          onToggleSelected={toggleConversationSelection}
+          onSelectAll={selectAllConversations}
+          onClearSelected={clearConversationSelection}
+          onDeleteSelected={deleteSelectedConversations}
           onNew={startNewConversation}
           onSelect={selectConversation}
-          onDelete={setPendingDelete}
+          onDelete={requestDeleteConversations}
           onClose={() => setHistoryOpen(false)}
         />
         <main className="chat-home-main">
@@ -348,12 +432,14 @@ export function ExplorerHome({
         </main>
       </div>
       {pendingDelete && (
-        <DeleteConversationDialog
-          conversation={pendingDelete}
+        <DeleteConversationsDialog
+          conversations={pendingDelete}
           onCancel={() => setPendingDelete(null)}
           onConfirm={() => {
-            removeConversationHistory(pendingDelete);
+            removeConversationsHistory(pendingDelete);
             setPendingDelete(null);
+            setSelectingConversations(false);
+            setSelectedConversationIds(new Set());
           }}
         />
       )}
@@ -444,67 +530,170 @@ function PromptComposer({
 
 function ChatHistory({
   open,
+  collapsed: collapsedPreference,
+  onToggleCollapsed,
   conversations,
   activeKey,
+  selecting,
+  selectedIds,
+  onToggleSelecting,
+  onToggleSelected,
+  onSelectAll,
+  onClearSelected,
+  onDeleteSelected,
   onNew,
   onSelect,
   onDelete,
   onClose
 }: {
   open: boolean;
+  collapsed: boolean;
+  onToggleCollapsed: () => void;
   conversations: ConversationSummary[];
   activeKey: string | null;
+  selecting: boolean;
+  selectedIds: Set<string>;
+  onToggleSelecting: () => void;
+  onToggleSelected: (conversationId: string) => void;
+  onSelectAll: () => void;
+  onClearSelected: () => void;
+  onDeleteSelected: () => void;
   onNew: () => void;
   onSelect: (conversation: ConversationSummary) => void;
-  onDelete: (conversation: ConversationSummary) => void;
+  onDelete: (conversations: ConversationSummary[]) => void;
   onClose: () => void;
 }) {
+  const collapsed = collapsedPreference && !open;
+  const allSelected = conversations.length > 0 && selectedIds.size === conversations.length;
   return (
     <>
-      <aside className={`chat-history ${open ? "open" : ""}`} aria-label="Chat history">
+      <aside
+        className={`chat-history ${open ? "open" : ""} ${collapsed ? "collapsed" : ""}`}
+        aria-label="Chat history"
+      >
         <header>
-          <button className="chat-history-new" onClick={onNew}>
-            <SquarePen size={17} /> New chat
+          {!collapsed && (
+            <button className="chat-history-new" onClick={onNew}>
+              <SquarePen size={17} /> New chat
+            </button>
+          )}
+          <button
+            className="chat-history-collapse"
+            aria-label={collapsed ? "Expand chat history" : "Collapse chat history"}
+            title={collapsed ? "Expand chat history" : "Collapse chat history"}
+            aria-expanded={!collapsed}
+            aria-controls="chat-history-recent"
+            onClick={onToggleCollapsed}
+          >
+            {collapsed ? <PanelLeftOpen size={17} /> : <PanelLeftClose size={17} />}
           </button>
           <button className="chat-history-close" aria-label="Close chat history" onClick={onClose}>
             <X size={17} />
           </button>
         </header>
-        <nav aria-label="Conversation history">
-          <span>Recent</span>
-          {conversations.length ? conversations.map((conversation) => (
-            <div key={conversation.conversationId} className={`chat-history-row ${conversation.firstRecord.key === activeKey ? "active" : ""}`}>
-              <button className="chat-history-open" onClick={() => onSelect(conversation)}>
-                <strong>{conversation.title}</strong>
-                <small>
-                  {shortModelName(conversation.firstRecord.modelName)}
-                  {conversation.turnCount > 1 ? ` · ${conversation.turnCount} turns` : ""}
-                </small>
-              </button>
-              <button
-                className="chat-history-delete"
-                aria-label={`Delete conversation ${conversation.title}`}
-                title="Delete conversation"
-                onClick={() => onDelete(conversation)}
-              >
-                <Trash2 size={15} />
-              </button>
+        {collapsed && (
+          <button
+            className="chat-history-collapsed-new"
+            aria-label="New chat"
+            title="New chat"
+            onClick={onNew}
+          >
+            <SquarePen size={17} />
+          </button>
+        )}
+        {!collapsed && (
+          <nav id="chat-history-recent" aria-label="Conversation history">
+            <div className="chat-history-section-heading">
+              <span>Recent</span>
+              {conversations.length > 0 && (
+                <button
+                  type="button"
+                  className="chat-history-manage"
+                  aria-label={selecting ? "Done selecting conversations" : "Manage conversations"}
+                  onClick={onToggleSelecting}
+                >
+                  {selecting ? "Done" : "Manage"}
+                </button>
+              )}
             </div>
-          )) : (
-            <p>No conversations yet.</p>
-          )}
-        </nav>
+            {selecting && (
+              <div className="chat-history-selection-toolbar" role="group" aria-label="Conversation selection">
+                <button type="button" onClick={allSelected ? onClearSelected : onSelectAll}>
+                  {allSelected ? "Clear all" : "Select all"}
+                </button>
+                <span>{selectedIds.size} selected</span>
+                <button
+                  type="button"
+                  className="danger"
+                  aria-label="Delete selected conversations"
+                  disabled={selectedIds.size === 0}
+                  onClick={onDeleteSelected}
+                >
+                  <Trash2 size={14} /> Delete
+                </button>
+              </div>
+            )}
+            {conversations.length ? conversations.map((conversation) => {
+              const selected = selectedIds.has(conversation.conversationId);
+              return (
+                <div
+                  key={conversation.conversationId}
+                  className={`chat-history-row ${conversation.firstRecord.key === activeKey ? "active" : ""} ${selecting ? "selecting" : ""} ${selected ? "selected" : ""}`}
+                >
+                  {selecting && (
+                    <button
+                      type="button"
+                      className="chat-history-select"
+                      role="checkbox"
+                      aria-checked={selected}
+                      aria-label={`Select conversation ${conversation.title}`}
+                      onClick={() => onToggleSelected(conversation.conversationId)}
+                    >
+                      {selected ? <CheckSquare2 size={16} /> : <Square size={16} />}
+                    </button>
+                  )}
+                  <button
+                    className="chat-history-open"
+                    onClick={() => selecting
+                      ? onToggleSelected(conversation.conversationId)
+                      : onSelect(conversation)}
+                  >
+                    <strong>{conversation.title}</strong>
+                    <small>
+                      {shortModelName(conversation.firstRecord.modelName)}
+                      {conversation.turnCount > 1 ? ` · ${conversation.turnCount} turns` : ""}
+                    </small>
+                  </button>
+                  {!selecting && (
+                    <button
+                      className="chat-history-delete"
+                      aria-label={`Delete conversation ${conversation.title}`}
+                      title="Delete conversation"
+                      onClick={() => onDelete([conversation])}
+                    >
+                      <Trash2 size={15} />
+                    </button>
+                  )}
+                </div>
+              );
+            }) : (
+              <p>No conversations yet.</p>
+            )}
+          </nav>
+        )}
       </aside>
       {open && <button className="chat-history-backdrop" aria-label="Close chat history" onClick={onClose} />}
     </>
   );
 }
 
-function DeleteConversationDialog({ conversation, onCancel, onConfirm }: {
-  conversation: ConversationSummary;
+function DeleteConversationsDialog({ conversations, onCancel, onConfirm }: {
+  conversations: ConversationSummary[];
   onCancel: () => void;
   onConfirm: () => void;
 }) {
+  const count = conversations.length;
+  const title = count === 1 ? "Delete this conversation?" : `Delete ${count} conversations?`;
   return (
     <div className="chat-delete-backdrop" role="presentation" onMouseDown={(event) => {
       if (event.target === event.currentTarget) onCancel();
@@ -513,14 +702,22 @@ function DeleteConversationDialog({ conversation, onCancel, onConfirm }: {
         <header>
           <div>
             <span>Chat history</span>
-            <h2 id="chat-delete-title">Delete this conversation?</h2>
+            <h2 id="chat-delete-title">{title}</h2>
           </div>
           <button aria-label="Close remove confirmation" onClick={onCancel}><X size={18} /></button>
         </header>
-        <p>This removes <strong>{conversation.title}</strong> from Chat history. Workspace source files are not modified.</p>
+        <p>
+          This removes{" "}
+          {count === 1
+            ? <strong>{conversations[0].title}</strong>
+            : <strong>{count} conversations</strong>}{" "}
+          from Chat history. Workspace source files are not modified.
+        </p>
         <footer>
           <button autoFocus onClick={onCancel}>Cancel</button>
-          <button className="danger" onClick={onConfirm}><Trash2 size={15} /> Delete conversation</button>
+          <button className="danger" onClick={onConfirm}>
+            <Trash2 size={15} /> {count === 1 ? "Delete conversation" : `Delete ${count} conversations`}
+          </button>
         </footer>
       </section>
     </div>
@@ -582,5 +779,13 @@ function loadHiddenRunKeys() {
     return new Set(Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : []);
   } catch {
     return new Set<string>();
+  }
+}
+
+function loadHistoryCollapsed() {
+  try {
+    return window.localStorage.getItem(HISTORY_COLLAPSED_STORAGE_KEY) === "true";
+  } catch {
+    return false;
   }
 }

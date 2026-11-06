@@ -56,6 +56,7 @@ import type {
 import { generatedResponseText } from "../generatedResponse";
 import { ChatAttentionWorkbench } from "./ChatAttentionWorkbench";
 import { ChatExplanationWorkbench } from "./ChatExplanationWorkbench";
+import { MLPActivationHeatmap, ResidualStreamHeatmap } from "./ChatFeatureHeatmaps";
 import { PresetSuggestTextarea } from "./PresetSuggestTextarea";
 import { ResponseTokenPicker } from "./ResponseTokenPicker";
 
@@ -222,6 +223,27 @@ function NeuronInterventionWorkbench({
         <label><span>MLP neuron</span><select aria-label="MLP neuron" value={neuron} disabled={running} onChange={(event) => setNeuron(Number(event.target.value))}>{neurons.map((item) => <option key={item.neuron} value={item.neuron}>N{item.neuron} · {item.label}</option>)}</select></label>
         <label><span>Tracked output token</span><select aria-label="Neuron tracked output token" value={targetTokenId} disabled={running} onChange={(event) => setTargetTokenId(Number(event.target.value))}>{targetOptions.map((option) => <option key={option.tokenId} value={option.tokenId}>{visibleToken(option.tokenText)} · #{option.tokenId}</option>)}</select></label>
         <label className="chat-feature-strength"><span>Activation factor <b>{scale.toFixed(1)}</b></span><input aria-label="Neuron activation factor" type="range" min={-2} max={4} step={0.1} value={scale} disabled={running} onChange={(event) => setScale(Number(event.target.value))} /></label>
+      </div>
+      <div className="chat-feature-visuals">
+        <MLPActivationHeatmap
+          tokens={run.tokens}
+          neurons={neurons}
+          layer={layer}
+          selectedNeuron={neuron}
+          selectedRange={[positionStart, positionEnd]}
+          onSelectNeuron={setNeuron}
+          onSelectToken={(tokenIndex) => setRange(tokenIndex, tokenIndex + 1)}
+        />
+        <ResidualStreamHeatmap
+          tokens={run.tokens}
+          cells={run.residualCells}
+          selectedLayer={layer}
+          selectedRange={[positionStart, positionEnd]}
+          onSelectLayer={(nextLayer) => {
+            if (featureLayers.includes(nextLayer)) setLayer(nextLayer);
+          }}
+          onSelectToken={(tokenIndex) => setRange(tokenIndex, tokenIndex + 1)}
+        />
       </div>
       <div className="chat-feature-operations" role="group" aria-label="Neuron intervention operation">
         {[{ label: "Suppress", value: 0 }, { label: "Reduce", value: 0.25 }, { label: "Enhance", value: 2 }, { label: "Invert", value: -1 }].map((item) => <button key={item.label} type="button" className={Math.abs(scale - item.value) < 1e-6 ? "active" : ""} aria-pressed={Math.abs(scale - item.value) < 1e-6} disabled={running} onClick={() => setScale(item.value)}>{item.label}</button>)}
