@@ -413,7 +413,11 @@ def main() -> None:
                     if mode == "sae_feature" and feature is not None
                     else {}
                 ),
-                **_logit_delta_summary(original_logits, steered_logits),
+                **_logit_delta_summary(
+                    original_logits,
+                    steered_logits,
+                    decode=_token_decoder(wrapper),
+                ),
                 "probeScore": None,
                 "probeReason": (
                     "No trained probe was configured for this Explorer intervention job."
@@ -903,7 +907,32 @@ def _neuron_operation(factor: float) -> str:
     return "enhance"
 
 
-def _logit_delta_summary(original: Any, steered: Any) -> dict[str, Any]:
+def _token_decoder(wrapper: Any) -> Callable[[int], str]:
+    tokenizer = getattr(wrapper, "tokenizer", None)
+    if tokenizer is None:
+        return lambda token_id: str(token_id)
+
+    def decode(token_id: int) -> str:
+        try:
+            return str(
+                tokenizer.decode(
+                    [token_id],
+                    clean_up_tokenization_spaces=False,
+                )
+            )
+        except Exception:
+            return str(token_id)
+
+    return decode
+
+
+def _logit_delta_summary(
+    original: Any,
+    steered: Any,
+    *,
+    decode: Callable[[int], str] | None = None,
+    top_k: int = 5,
+) -> dict[str, Any]:
     if original.shape[-1] != steered.shape[-1]:
         raise ValueError("Original and steered generation scores have different vocabularies.")
     if original.ndim > 1 or steered.ndim > 1:
@@ -923,6 +952,27 @@ def _logit_delta_summary(original: Any, steered: Any) -> dict[str, Any]:
         if delta.ndim > 1
         else int((delta > 1e-6).sum().item())
     )
+    series_delta = signed_delta.reshape(1, -1) if signed_delta.ndim == 1 else signed_delta
+    top_changed_tokens: list[dict[str, Any]] = []
+    if series_delta.numel():
+        per_token = series_delta.abs().max(dim=0).values
+        count = min(max(0, int(top_k)), int(per_token.numel()))
+        if count:
+            token_ids = [int(value) for value in per_token.topk(count).indices.tolist()]
+            for token_id in token_ids:
+                values = series_delta[:, token_id]
+                step = int(values.abs().argmax().item())
+                if float(values.abs().max().item()) <= 1e-6:
+                    continue
+                top_changed_tokens.append(
+                    {
+                        "tokenId": token_id,
+                        "token": decode(token_id) if decode is not None else str(token_id),
+                        "step": step,
+                        "delta": round(float(values[step].item()), 10),
+                        "deltas": [round(float(value), 10) for value in values.tolist()],
+                    }
+                )
     return {
         "maxAbsLogit": round(maximum, 10),
         "meanAbsLogit": round(float(delta.mean().item()) if delta.numel() else 0.0, 10),
@@ -932,6 +982,7 @@ def _logit_delta_summary(original: Any, steered: Any) -> dict[str, Any]:
             float(signed_delta.reshape(-1)[top_flat_index].item()) if signed_delta.numel() else 0.0,
             10,
         ),
+        "topChangedTokens": top_changed_tokens,
         "effectStatus": "changed" if maximum > 1e-6 else "no_change",
     }
 

@@ -1,3 +1,4 @@
+import { lazy, Suspense } from "react";
 import {
   Activity,
   BrainCircuit,
@@ -15,7 +16,10 @@ import {
 import type { RemoteRunSummary } from "../api/explorerClient";
 import type { ExplorerRun } from "../types";
 import { generatedResponseText } from "../generatedResponse";
-import { ChatAnalysisWorkbench } from "./ChatAnalysisWorkbench";
+
+const ChatAnalysisWorkbench = lazy(() =>
+  import("./ChatAnalysisWorkbench").then((module) => ({ default: module.ChatAnalysisWorkbench }))
+);
 
 export type AnalysisId = "steering" | "attribution" | "patching" | "neuron" | "feature" | "explanation" | "attention";
 
@@ -174,15 +178,17 @@ export function TurnCard({
           </div>
           {analysisOpen && (
             <div className="chat-turn-analysis">
-              <ChatAnalysisWorkbench
-                key={`${turn.run.runId}:${turn.run.sampleId}:${analysisOpen}`}
-                mode={analysisOpen}
-                run={turn.run}
-                remoteSummary={remoteSummary}
-                savedRun={savedRun}
-                suggestionQuery={turn.prompt}
-                onRunReady={onRunReady}
-              />
+              <Suspense fallback={<div className="chat-analysis-loading">Loading analysis…</div>}>
+                <ChatAnalysisWorkbench
+                  key={`${turn.run.runId}:${turn.run.sampleId}:${analysisOpen}`}
+                  mode={analysisOpen}
+                  run={turn.run}
+                  remoteSummary={remoteSummary}
+                  savedRun={savedRun}
+                  suggestionQuery={turn.prompt}
+                  onRunReady={onRunReady}
+                />
+              </Suspense>
             </div>
           )}
         </>

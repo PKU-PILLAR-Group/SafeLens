@@ -1,11 +1,12 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Activity, RefreshCw, X } from "lucide-react";
 
-import { cancelJob, fetchJobs, type JobSummary } from "../api/explorerClient";
+import { cancelJob, fetchJobs, retryJob, type JobSummary } from "../api/explorerClient";
 
 interface JobCenterProps {
   onOpenDatasetJob?: (jobId: string) => void;
   inline?: boolean;
+  compact?: boolean;
 }
 
 const JOB_KIND_LABELS: Record<string, string> = {
@@ -54,11 +55,20 @@ function datasetPartial(job: JobSummary) {
     (Array.isArray(record.missingTasks) && record.missingTasks.length > 0);
 }
 
-export function JobCenter({ onOpenDatasetJob, inline = false }: JobCenterProps) {
+export function JobCenter({ onOpenDatasetJob, inline = false, compact = false }: JobCenterProps) {
   const [open, setOpen] = useState(false);
   const [jobs, setJobs] = useState<JobSummary[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const toggleRef = useRef<HTMLButtonElement>(null);
+  const closeRef = useRef<HTMLButtonElement>(null);
+
+  function closePanel(restoreFocus = true) {
+    setOpen(false);
+    if (restoreFocus) {
+      window.requestAnimationFrame(() => toggleRef.current?.focus());
+    }
+  }
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -81,8 +91,9 @@ export function JobCenter({ onOpenDatasetJob, inline = false }: JobCenterProps) 
 
   useEffect(() => {
     if (!open) return;
+    closeRef.current?.focus();
     function closeOnEscape(event: KeyboardEvent) {
-      if (event.key === "Escape") setOpen(false);
+      if (event.key === "Escape") closePanel();
     }
     window.addEventListener("keydown", closeOnEscape);
     return () => window.removeEventListener("keydown", closeOnEscape);
@@ -97,11 +108,21 @@ export function JobCenter({ onOpenDatasetJob, inline = false }: JobCenterProps) 
     }
   }
 
+  async function retry(job: JobSummary) {
+    try {
+      await retryJob(job.id);
+      await refresh();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "The job could not be retried.");
+    }
+  }
+
   const activeCount = jobs.filter(activeJob).length;
 
   return (
-    <div className={`job-center${inline ? " inline" : ""}`}>
+    <div className={`job-center${inline ? " inline" : ""}${compact ? " compact" : ""}`}>
       <button
+        ref={toggleRef}
         type="button"
         className={`job-center-toggle${open ? " open" : ""}`}
         aria-label={open ? "Close job center" : "Open job center"}
@@ -118,6 +139,7 @@ export function JobCenter({ onOpenDatasetJob, inline = false }: JobCenterProps) 
           id="job-center-panel"
           className="job-center-panel"
           role="dialog"
+          aria-modal="false"
           aria-label="Local job center"
         >
           <header>
@@ -134,7 +156,7 @@ export function JobCenter({ onOpenDatasetJob, inline = false }: JobCenterProps) 
               >
                 <RefreshCw size={14} className={loading ? "spin" : ""} />
               </button>
-              <button type="button" aria-label="Close job center panel" onClick={() => setOpen(false)}>
+              <button ref={closeRef} type="button" aria-label="Close job center panel" onClick={() => closePanel()}>
                 <X size={15} />
               </button>
             </div>
@@ -147,7 +169,7 @@ export function JobCenter({ onOpenDatasetJob, inline = false }: JobCenterProps) 
             {jobs.map((job) => (
               <article key={job.id} className={`job-center-card ${job.status}`}>
                 <header>
-                  <span>{JOB_KIND_LABELS[job.kind] ?? job.kind}</span>
+                  <span>{job.label ?? JOB_KIND_LABELS[job.kind] ?? job.kind}</span>
                   <b>{jobStatusLabel(job)}</b>
                 </header>
                 <p>{job.detail}</p>
@@ -168,12 +190,15 @@ export function JobCenter({ onOpenDatasetJob, inline = false }: JobCenterProps) 
                     {activeJob(job) && (
                       <button type="button" onClick={() => void cancel(job)}>Cancel</button>
                     )}
+                    {!activeJob(job) && (job.kind === "dataset-test" || job.kind === "prompt-run") && (
+                      <button type="button" onClick={() => void retry(job)}>Retry</button>
+                    )}
                     {job.kind === "dataset-test" && onOpenDatasetJob && (
                       <button
                         type="button"
                         onClick={() => {
                           onOpenDatasetJob(job.id);
-                          setOpen(false);
+                          closePanel(false);
                         }}
                       >
                         Open

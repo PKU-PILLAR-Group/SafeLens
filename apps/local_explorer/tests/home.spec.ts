@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "@playwright/test";
 
 import { realRun } from "../src/realRunData";
 import type { ExplorerRun } from "../src/types";
@@ -128,6 +128,11 @@ const steeringRun = {
       tokenEditDistance: 2,
       generationChanged: true,
       firstDivergenceIndex: 0,
+      maxAbsLogit: 2.5,
+      topChangedTokens: [
+        { tokenId: 1, token: "Yes", step: 0, delta: 2.5, deltas: [2.5, 1.2] },
+        { tokenId: 2, token: "No", step: 1, delta: -1.4, deltas: [0.1, -1.4] }
+      ],
       probeScore: null,
       probeReason: "No probe configured."
     },
@@ -301,6 +306,9 @@ async function prepareHome(page: Page) {
         diagnostics: []
       }
     });
+  });
+  await page.route("**/api/version", async (route) => {
+    await route.fulfill({ json: { version: "0.1.0", commit: "testcommit" } });
   });
   await page.route("**/api/prompt/options", async (route) => {
     await route.fulfill({
@@ -525,6 +533,10 @@ function promptJob(
     result,
     error: null
   };
+}
+
+async function openConversationMenu(row: Locator) {
+  await row.getByRole("button", { name: /Conversation actions for/ }).click();
 }
 
 async function runReadyAnalysis(page: Page, prompt = generatedRun.prompt) {
@@ -1105,6 +1117,76 @@ test("runs the real prompt-job protocol and keeps the conversation above two foc
   });
 });
 
+test("resumes a background chat job after a page reload", async ({ page }) => {
+  await prepareHome(page);
+  const request = {
+    prompt: generatedRun.prompt,
+    template: "chat" as const,
+    model: "sshleifer/tiny-gpt2",
+    seed: 0,
+    maxNewTokens: 8,
+    temperature: 0
+  };
+  await page.addInitScript((pending) => {
+    window.localStorage.setItem(
+      "safelens.localExplorer.pendingPrompt.v1",
+      JSON.stringify(pending)
+    );
+  }, {
+    turnId: "restored-turn",
+    prompt: generatedRun.prompt,
+    jobId: "resume-job",
+    conversationId: "resume-conversation",
+    model: "sshleifer/tiny-gpt2",
+    maxNewTokens: 8,
+    startedAt: "2026-11-07T00:00:00Z"
+  });
+  await page.route("**/api/jobs/resume-job", (route) => route.fulfill({
+    json: promptJob("resume-job", request, null, "idle")
+  }));
+  await page.route("**/api/jobs/resume-job/events", (route) => route.fulfill({
+    status: 200,
+    contentType: "text/event-stream",
+    headers: { "Cache-Control": "no-cache" },
+    body: `event: job\ndata: ${JSON.stringify(promptJob("resume-job", request, generatedRun, "ready"))}\n\n`
+  }));
+
+  await page.goto("/");
+
+  await expect(page.locator(".chat-user-message")).toHaveText(generatedRun.prompt);
+  await expect(page.locator(".chat-assistant-message")).toContainText("strongest residual alignment");
+  await expect(page.getByText("Activation cache ready")).toBeVisible();
+  expect(await page.evaluate(() => window.localStorage.getItem("safelens.localExplorer.pendingPrompt.v1"))).toBeNull();
+});
+
+test("marks an interrupted background chat job and offers retry", async ({ page }) => {
+  await prepareHome(page);
+  await page.addInitScript((pending) => {
+    window.localStorage.setItem(
+      "safelens.localExplorer.pendingPrompt.v1",
+      JSON.stringify(pending)
+    );
+  }, {
+    turnId: "interrupted-turn",
+    prompt: "This job was interrupted.",
+    jobId: "missing-job",
+    conversationId: "interrupted-conversation",
+    model: "sshleifer/tiny-gpt2",
+    maxNewTokens: 8,
+    startedAt: "2026-11-07T00:00:00Z"
+  });
+  await page.route("**/api/jobs/missing-job", (route) => route.fulfill({
+    status: 404,
+    json: { detail: { code: "job_not_found" } }
+  }));
+
+  await page.goto("/");
+
+  await expect(page.getByText("This job was interrupted.")).toBeVisible();
+  await expect(page.getByText(/background prompt job is no longer available/i)).toBeVisible();
+  await expect(page.getByRole("button", { name: "Retry" })).toBeVisible();
+});
+
 test("sends prior user and assistant turns as real model context", async ({ page }) => {
   await prepareHome(page);
   const submissions = await mockReadyPromptSequence(page);
@@ -1372,6 +1454,9 @@ test("hydrates every available attention head for a restored workspace turn", as
       }
     });
   });
+  await page.route("**/api/version", async (route) => {
+    await route.fulfill({ json: { version: "0.1.0", commit: "testcommit" } });
+  });
   await page.route("**/api/prompt/options", async (route) => {
     await route.fulfill({ json: { models: [generatedRun.modelName], templates: ["plain", "chat"], maxNewTokens: 512 } });
   });
@@ -1458,10 +1543,15 @@ test("runs steering from Chat and compares original with steered generation", as
   await expect(page.getByRole("button", { name: "Run steering" })).toBeEnabled();
   await page.getByRole("button", { name: "Run steering" }).click();
 
+  await expect(page.getByText("Run configuration")).toBeVisible();
+  await page.getByText("Run configuration").click();
+  await expect(page.getByText("v0.1.0 · testcommit")).toBeVisible();
   const result = page.getByLabel("Steering comparison");
   await expect(result).toContainText("Original model response.");
   await expect(result).toContainText("Safer steered response.");
   await expect(result).toContainText("+0.250");
+  await expect(result.getByText("Output logit change")).toBeVisible();
+  await expect(result.getByRole("table", { name: "Next-token logit change matrix" })).toBeVisible();
   await expect(page).toHaveURL(/\/$/);
   await expect(page.locator(".chat-history-row")).toHaveCount(2);
   const steeringRecords = await page.evaluate(() => JSON.parse(
@@ -1491,8 +1581,26 @@ test("opens real MLP neuron intervention from Chat", async ({ page }) => {
   await expect(page.getByLabel("Neuron activation factor")).toHaveValue("0");
   await expect(page.getByRole("heading", { name: "MLP activation heatmap" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Residual stream heatmap" })).toBeVisible();
-  await expect(page.getByLabel("MLP activation heatmap").locator("tbody tr")).toHaveCount(8);
+  const mlp = page.getByLabel("MLP activation heatmap");
+  await expect(mlp.locator("tbody tr")).toHaveCount(8);
   await expect(page.getByLabel("Residual stream heatmap").locator("tbody tr")).toHaveCount(2);
+  const firstNeuron = (await mlp.locator("tbody tr").first().locator("th").innerText()).replace("N", "");
+  await page.getByLabel("Search MLP neurons").fill(firstNeuron);
+  await expect(mlp.locator("tbody tr")).toHaveCount(1);
+  await page.getByLabel("Search MLP neurons").fill("");
+  const firstCell = mlp.locator("button.feature-heatmap-cell").first();
+  const firstCellLabel = await firstCell.getAttribute("aria-label");
+  await firstCell.focus();
+  await firstCell.press("ArrowRight");
+  const nextCellLabel = await page.evaluate(() => document.activeElement?.getAttribute("aria-label"));
+  expect(nextCellLabel).toBeTruthy();
+  expect(nextCellLabel).not.toBe(firstCellLabel);
+  const csvDownload = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Export MLP activation heatmap CSV" }).click();
+  expect((await csvDownload).suggestedFilename()).toMatch(/mlp-activation-heatmap\.csv$/);
+  const pngDownload = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Export MLP activation heatmap PNG" }).click();
+  expect((await pngDownload).suggestedFilename()).toMatch(/mlp-activation-heatmap\.png$/);
   await page.getByLabel("Residual stream heatmap").locator("tbody tr").first()
     .locator("button.feature-heatmap-cell").first().click();
   await expect(page.getByLabel("Neuron intervention layer")).toHaveValue("0");
@@ -1659,9 +1767,9 @@ test("hides the bundled example conversation without deleting its artifact", asy
   await prepareHome(page);
   await page.goto("/");
 
-  await page.getByLabel(
-    `Delete conversation ${realRun.prompt.slice(0, 45).trimEnd()}...`
-  ).click();
+  const historyRow = page.locator(".chat-history-row").first();
+  await openConversationMenu(historyRow);
+  await historyRow.getByRole("menuitem", { name: "Delete" }).click();
   const dialog = page.getByRole("dialog", { name: "Delete this conversation?" });
   await expect(dialog).toContainText("Compare a benign safety explanation");
   await dialog.getByRole("button", { name: "Delete conversation" }).click();
@@ -1696,27 +1804,83 @@ test("restores and deletes a generated conversation after explicit confirmation"
   await page.getByRole("button", { name: "Run attribution" }).click();
   await expect(page.getByLabel("Input attribution result")).toBeVisible();
 
-  await page.getByLabel(
-    `Delete conversation ${generatedRun.prompt}`
-  ).click();
+  const generatedRow = page.locator(".chat-history-row").filter({ hasText: generatedRun.prompt });
+  await openConversationMenu(generatedRow);
+  await generatedRow.getByRole("menuitem", { name: "Delete" }).click();
   const dialog = page.getByRole("dialog", { name: "Delete this conversation?" });
   await expect(dialog).toContainText("Why does the model focus");
   await expect(dialog.getByRole("button", { name: "Cancel" })).toBeFocused();
 
   await dialog.getByRole("button", { name: "Cancel" }).click();
   await expect(dialog).toBeHidden();
-  await page.getByLabel(
-    `Delete conversation ${generatedRun.prompt}`
-  ).click();
+  await openConversationMenu(generatedRow);
+  await generatedRow.getByRole("menuitem", { name: "Delete" }).click();
   await page.getByRole("dialog", { name: "Delete this conversation?" })
     .getByRole("button", { name: "Delete conversation" }).click();
 
   await expect(page.locator(".chat-history-row")).toHaveCount(1);
-  await expect(page.getByRole("heading", { name: "What would you like to inspect?" })).toBeVisible();
+  await expect(page.getByText(/Removed 1 conversation/)).toBeVisible();
+  await expect(page.getByRole("heading", { name: "What would you like to inspect?" })).toBeVisible({ timeout: 8000 });
   await expect(page.getByText("chat-home-generated")).toHaveCount(0);
   const saved = await page.evaluate(() => window.localStorage.getItem("safelens.localExplorer.importedRuns.v1"));
   expect(saved).not.toContain("chat-home-generated");
   expect(saved).not.toContain("chat-attribution-derived");
+});
+
+test("renames, pins, and exports a conversation", async ({ page }) => {
+  await prepareHome(page);
+  await mockReadyPromptJob(page);
+  await page.goto("/");
+  await runReadyAnalysis(page);
+
+  const originalRow = page.locator(".chat-history-row").filter({ hasText: generatedRun.prompt });
+  await openConversationMenu(originalRow);
+  await originalRow.getByRole("menuitem", { name: "Rename" }).click();
+  await page.getByLabel(`New name for ${generatedRun.prompt}`).fill("Safety review");
+  await page.getByRole("button", { name: "Save conversation name" }).click();
+  const row = page.locator(".chat-history-row").filter({ hasText: "Safety review" });
+  await expect(row).toBeVisible();
+
+  await openConversationMenu(row);
+  await row.getByRole("menuitem", { name: "Pin" }).click();
+  await openConversationMenu(row);
+  await expect(row.getByRole("menuitem", { name: "Unpin" })).toBeVisible();
+  const meta = await page.evaluate(() => JSON.parse(
+    window.localStorage.getItem("safelens.localExplorer.conversationMeta.v1") ?? "{}"
+  ));
+  expect(Object.values(meta)).toContainEqual({ title: "Safety review", pinned: true });
+  await page.keyboard.press("Escape");
+
+  await openConversationMenu(row);
+  const markdown = page.waitForEvent("download");
+  await row.getByRole("menuitem", { name: "Export Markdown" }).click();
+  expect((await markdown).suggestedFilename()).toBe("safelens-safety-review.md");
+  await openConversationMenu(row);
+  const json = page.waitForEvent("download");
+  await row.getByRole("menuitem", { name: "Export JSON" }).click();
+  expect((await json).suggestedFilename()).toBe("safelens-safety-review.json");
+});
+
+test("undoes a staged conversation deletion", async ({ page }) => {
+  await prepareHome(page);
+  await mockReadyPromptJob(page);
+  await page.goto("/");
+  await runReadyAnalysis(page);
+  await expect(page.locator(".chat-history-row")).toHaveCount(2);
+
+  const undoRow = page.locator(".chat-history-row").filter({ hasText: generatedRun.prompt });
+  await openConversationMenu(undoRow);
+  await undoRow.getByRole("menuitem", { name: "Delete" }).click();
+  await page.getByRole("dialog", { name: "Delete this conversation?" })
+    .getByRole("button", { name: "Delete conversation" }).click();
+  await expect(page.locator(".chat-history-row")).toHaveCount(1);
+  await expect(page.getByText(/Removed 1 conversation/)).toBeVisible();
+
+  await page.getByRole("button", { name: "Undo" }).click();
+  await expect(page.locator(".chat-history-row")).toHaveCount(2);
+  await expect(page.getByText(/Removed 1 conversation/)).toHaveCount(0);
+  const saved = await page.evaluate(() => window.localStorage.getItem("safelens.localExplorer.importedRuns.v1"));
+  expect(saved).toContain("chat-home-generated");
 });
 
 test("filters conversations by title", async ({ page }) => {
@@ -1796,6 +1960,9 @@ test("persists removal of a read-only workspace entry from Chat", async ({ page 
       }
     });
   });
+  await page.route("**/api/version", async (route) => {
+    await route.fulfill({ json: { version: "0.1.0", commit: "testcommit" } });
+  });
   await page.route("**/api/prompt/options", async (route) => {
     await route.fulfill({ json: { models: ["sshleifer/tiny-gpt2"], templates: ["plain", "chat"], maxNewTokens: 512 } });
   });
@@ -1810,7 +1977,9 @@ test("persists removal of a read-only workspace entry from Chat", async ({ page 
   await expect(page.locator(".chat-user-message")).toHaveText(workspaceConversation.prompt);
   await expect(page.locator(".chat-assistant-message")).toContainText("restored from the workspace");
 
-  await page.getByLabel("Delete conversation Inspect this saved workspace conversation.").click();
+  const readOnlyRow = page.locator(".chat-history-row").filter({ hasText: "Inspect this saved workspace conversation." });
+  await openConversationMenu(readOnlyRow);
+  await readOnlyRow.getByRole("menuitem", { name: "Delete" }).click();
   await page.getByRole("dialog", { name: "Delete this conversation?" })
     .getByRole("button", { name: "Delete conversation" }).click();
   await expect(page.getByText("workspace-history-run")).toHaveCount(0);

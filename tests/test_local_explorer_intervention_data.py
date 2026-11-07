@@ -122,6 +122,10 @@ def test_logit_delta_summary_detects_full_vocabulary_effect() -> None:
         "changedVocabularyLogits": 2,
         "topChangedTokenId": 1,
         "topChangedTokenDelta": 0.5,
+        "topChangedTokens": [
+            {"tokenId": 1, "token": "1", "step": 0, "delta": 0.5, "deltas": [0.5]},
+            {"tokenId": 3, "token": "3", "step": 0, "delta": -0.25, "deltas": [-0.25]},
+        ],
         "effectStatus": "changed",
     }
 
@@ -139,6 +143,10 @@ def test_logit_delta_summary_uses_real_generation_steps_and_vocab_ids() -> None:
         "changedVocabularyLogits": 2,
         "topChangedTokenId": 2,
         "topChangedTokenDelta": 2.0,
+        "topChangedTokens": [
+            {"tokenId": 2, "token": "2", "step": 1, "delta": 2.0, "deltas": [0.0, 2.0]},
+            {"tokenId": 1, "token": "1", "step": 1, "delta": -0.5, "deltas": [0.0, -0.5]},
+        ],
         "effectStatus": "changed",
     }
 

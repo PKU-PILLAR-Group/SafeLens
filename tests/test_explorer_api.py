@@ -246,6 +246,81 @@ def test_run_index_uses_original_user_prompt_instead_of_chat_template(tmp_path: 
     }
 
 
+def test_version_endpoint_exposes_package_and_commit(tmp_path: Path) -> None:
+    response = TestClient(create_app(tmp_path)).get("/api/version")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["version"]
+    assert payload["commit"] is None or isinstance(payload["commit"], str)
+
+
+def test_dataset_job_can_be_retried_after_history_reload(tmp_path: Path) -> None:
+    def runner(request, _cancel_event, progress):
+        progress(50, "baseline", "Fixture.")
+        return {
+            "dataset": {
+                "id": request.datasetId,
+                "name": "SafeLens final_300",
+                "version": "1.1",
+                "sampleCount": 1,
+            },
+            "algorithm": {
+                "id": request.algorithmId,
+                "name": "PCA steering",
+                "implementation": request.algorithmId,
+            },
+            "execution": {"source": "real-local-model", "model": request.model},
+            "metric": {
+                "name": "Fixture",
+                "shortName": "fixture",
+                "definition": "fixture",
+                "threshold": 0.6,
+                "passed": 1,
+                "completed": 1,
+                "errors": 0,
+                "accuracy": 1.0,
+                "meetsThreshold": True,
+            },
+            "rows": [],
+        }
+
+    history_dir = tmp_path / "dataset-history"
+    client = TestClient(
+        create_app(
+            tmp_path,
+            dataset_test_runner=runner,
+            dataset_history_dir=history_dir,
+            allowed_models=("google/gemma-2-9b-it",),
+        )
+    )
+    response = client.post(
+        "/api/jobs/dataset-test",
+        json={
+            "datasetId": "safelens-final-300-v1.1",
+            "algorithmId": "pca_minus_neg",
+            "model": "google/gemma-2-9b-it",
+            "sampleIds": ["final-001"],
+        },
+    )
+    first_id = response.json()["id"]
+    _wait_for_job(client, first_id, "ready")
+
+    reloaded = TestClient(
+        create_app(
+            tmp_path,
+            dataset_test_runner=runner,
+            dataset_history_dir=history_dir,
+            allowed_models=("google/gemma-2-9b-it",),
+        )
+    )
+    retried = reloaded.post(f"/api/jobs/{first_id}/retry")
+    assert retried.status_code == 202
+    assert retried.json()["id"] != first_id
+    retried_job = _wait_for_job(reloaded, retried.json()["id"], "ready")
+    assert retried_job["request"]["sampleIds"] == ["final-001"]
+
+
 def test_dataset_catalog_exposes_versioned_samples_and_paper_sources(tmp_path: Path) -> None:
     client = TestClient(create_app(tmp_path))
 
@@ -437,6 +512,10 @@ def test_dataset_job_list_keeps_metrics_and_persists_completed_runs(tmp_path: Pa
     assert "rows" not in jobs[0]["result"]
     assert jobs[0]["result"]["metric"]["accuracy"] == 1.0
 
+    renamed = client.patch(f"/api/jobs/{job_id}", json={"label": "Baseline PCA"})
+    assert renamed.status_code == 200
+    assert renamed.json()["label"] == "Baseline PCA"
+
     # A fresh API process reloads completed dataset history from disk.
     reloaded = TestClient(
         create_app(
@@ -449,6 +528,12 @@ def test_dataset_job_list_keeps_metrics_and_persists_completed_runs(tmp_path: Pa
     history = reloaded.get("/api/jobs?kind=dataset-test").json()["jobs"]
     assert [item["id"] for item in history] == [job_id]
     assert "rows" not in history[0]["result"]
+    assert history[0]["label"] == "Baseline PCA"
+
+    deleted = reloaded.delete(f"/api/jobs/{job_id}/history")
+    assert deleted.status_code == 204
+    assert reloaded.get("/api/jobs?kind=dataset-test").json()["jobs"] == []
+    assert not (history_dir / f"{job_id}.json").exists()
 
 
 def test_explorer_api_serves_metadata_and_range_filtered_chunks(tmp_path: Path) -> None:
@@ -819,6 +904,14 @@ def test_prompt_job_completes_with_progress_and_sse_snapshot(tmp_path: Path) -> 
         body = "\n".join(stream.iter_lines())
     assert "event: job" in body
     assert '"status":"ready"' in body
+
+    reloaded = TestClient(create_app(tmp_path, prompt_runner=runner))
+    history = reloaded.get("/api/jobs?kind=prompt-run").json()["jobs"]
+    assert [item["id"] for item in history] == [job_id]
+    assert history[0]["result"] is None
+    retried = reloaded.post(f"/api/jobs/{job_id}/retry")
+    assert retried.status_code == 202
+    assert _wait_for_job(reloaded, retried.json()["id"], "ready")["status"] == "ready"
 
 
 def test_chat_prompt_renders_prior_turns_in_order() -> None:

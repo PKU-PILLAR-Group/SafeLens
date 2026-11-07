@@ -184,6 +184,11 @@ const historyJobs = [
   historyJob("dataset-job-1", "pca_minus_neg", "PCA steering", 0.5, "2026-08-26T00:00:00Z"),
   historyJob("dataset-job-2", "mean_minus_neg", "Mean steering", 0.75, "2026-08-27T00:00:00Z")
 ];
+historyJobs[1].result!.rows[1] = {
+  ...historyJobs[1].result!.rows[1],
+  passed: true,
+  detail: "Mean steering repaired the baseline failure."
+};
 
 function runningJob() {
   const base = job("idle");
@@ -224,7 +229,18 @@ async function mockDatasetApi(
     json: { models: [request.model, "sshleifer/tiny-gpt2"], templates: ["plain", "chat"], maxNewTokens: 512 }
   }));
   await page.route("**/api/jobs/dataset-test", (route) => route.fulfill({ status: 202, json: job("idle") }));
-  await page.route("**/api/jobs/dataset-job-1", (route) => route.fulfill({ json: historyJobs[0] }));
+  await page.route("**/api/jobs/dataset-job-1", (route) => {
+    if (route.request().method() === "PATCH") {
+      const payload = route.request().postDataJSON() as { label?: string | null };
+      return route.fulfill({ json: { ...historyJobs[0], label: payload.label ?? null } });
+    }
+    return route.fulfill({ json: historyJobs[0] });
+  });
+  await page.route("**/api/jobs/dataset-job-1/history", (route) => route.fulfill({ status: 204 }));
+  await page.route("**/api/jobs/dataset-job-1/retry", (route) => route.fulfill({
+    status: 202,
+    json: { ...job("idle"), id: "dataset-job-retried" }
+  }));
   await page.route("**/api/jobs/dataset-job-2", (route) => route.fulfill({ json: historyJobs[1] }));
   await page.route("**/api/jobs/dataset-job-running", (route) => route.fulfill({ json: runningJob() }));
   await page.route(/\/api\/jobs\?kind=dataset-test&limit=30$/, (route) => route.fulfill({
@@ -286,11 +302,22 @@ test("opens a saved dataset run from the global job center", async ({ page }) =>
   await mockDatasetApi(page);
   await page.goto("/dataset-test");
 
-  await page.getByRole("button", { name: "Open job center" }).click();
+  const toggle = page.getByRole("button", { name: "Open job center" });
+  await toggle.click();
   const center = page.getByRole("dialog", { name: "Local job center" });
   await expect(center).toBeVisible();
+  await expect(center.getByRole("button", { name: "Close job center panel" })).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(center).toHaveCount(0);
+  await expect(toggle).toBeFocused();
+  await toggle.click();
   await expect(center.getByText("Dataset test").first()).toBeVisible();
   await expect(center.getByText("50.00%")).toBeVisible();
+
+  const retryRequest = page.waitForRequest("**/api/jobs/dataset-job-1/retry");
+  await center.getByRole("button", { name: "Retry" }).first().click();
+  await retryRequest;
+  await expect(center.getByRole("button", { name: "Retry" }).first()).toBeVisible();
 
   await center.getByRole("button", { name: "Open" }).first().click();
   await expect(center).toHaveCount(0);
@@ -316,4 +343,26 @@ test("opens a saved dataset run and compares two runs by category", async ({ pag
   await expect(comparison).toContainText("Overall score");
   await expect(comparison).toContainText("+25.00 pp");
   await expect(page.getByText("Positive Δ means run B repaired")).toBeVisible();
+
+  const sampleDiff = page.getByRole("table", { name: "Sample-level run comparison" });
+  await expect(sampleDiff).toBeVisible();
+  await expect(sampleDiff).toContainText("steer-02");
+  await expect(sampleDiff).toContainText("Newly fixed");
+});
+
+test("renames and deletes a saved dataset run", async ({ page }) => {
+  await mockDatasetApi(page);
+  await page.goto("/dataset-test");
+
+  const card = page.locator(".dataset-history-card").filter({ hasText: "PCA steering" }).first();
+  await card.getByRole("button", { name: "Rename PCA steering" }).click();
+  await page.getByLabel("New name for PCA steering").fill("Baseline PCA");
+  await page.getByRole("button", { name: "Save run name" }).click();
+  await expect(page.locator(".dataset-history-card").filter({ hasText: "Baseline PCA" })).toBeVisible();
+
+  const renamed = page.locator(".dataset-history-card").filter({ hasText: "Baseline PCA" });
+  await renamed.getByRole("button", { name: "Delete Baseline PCA" }).click();
+  await expect(renamed.getByRole("button", { name: "Confirm deleting Baseline PCA" })).toBeVisible();
+  await renamed.getByRole("button", { name: "Confirm deleting Baseline PCA" }).click();
+  await expect(page.locator(".dataset-history-card").filter({ hasText: "Baseline PCA" })).toHaveCount(0);
 });

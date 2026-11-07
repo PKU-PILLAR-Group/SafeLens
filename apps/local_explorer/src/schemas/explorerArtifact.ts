@@ -307,6 +307,13 @@ const interventionExperimentSchema = z.object({
     changedVocabularyLogits: z.number().int().nonnegative().optional(),
     topChangedTokenId: z.number().int().nonnegative().optional(),
     topChangedTokenDelta: z.number().finite().optional(),
+    topChangedTokens: z.array(z.object({
+      tokenId: z.number().int().nonnegative(),
+      token: z.string(),
+      step: z.number().int().nonnegative(),
+      delta: z.number().finite(),
+      deltas: z.array(z.number().finite())
+    })).optional(),
     directionProjectionDelta: z.number().finite().optional(),
     featureActivationDelta: z.number().finite().optional(),
     effectStatus: z.enum(["changed", "no_change"]).optional(),

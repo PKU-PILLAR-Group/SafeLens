@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.metadata
 import importlib.util
 import json
 import os
@@ -150,6 +151,11 @@ class RunChunkResponse(BaseModel):
     layer: int | None
     selector: str | None
     data: Any
+
+
+class VersionResponse(BaseModel):
+    version: str
+    commit: str | None = None
 
 
 class HealthResponse(BaseModel):
@@ -676,10 +682,15 @@ class JobSnapshot(BaseModel):
     result: dict[str, Any] | None = None
     error: str | None = None
     taskProgress: dict[str, dict[str, int]] | None = None
+    label: str | None = None
 
 
 class JobListResponse(BaseModel):
     jobs: list[JobSnapshot]
+
+
+class JobLabelRequest(BaseModel):
+    label: str | None = Field(default=None, max_length=80)
 
 
 def _job_list_summary(snapshot: JobSnapshot) -> JobSnapshot:
@@ -743,12 +754,14 @@ class ExplorerJobManager:
         ready_detail: str,
         error_detail: str,
         history_dir: Path | None = None,
+        persist_result: bool = True,
     ) -> None:
         self._runner = runner
         self._kind = kind
         self._ready_detail = ready_detail
         self._error_detail = error_detail
         self._history_dir = history_dir
+        self._persist_result = persist_result
         self._jobs: dict[str, _ExplorerJob] = {}
         self._queue: queue.Queue[str | None] = queue.Queue()
         self._pending_job_ids: set[str] = set()
@@ -781,16 +794,40 @@ class ExplorerJobManager:
     def _persist(self, snapshot: JobSnapshot) -> None:
         if self._history_dir is None:
             return
+        if not self._persist_result and snapshot.result is not None:
+            snapshot = snapshot.model_copy(update={"result": None})
         try:
             self._history_dir.mkdir(parents=True, exist_ok=True)
             target = self._history_dir / f"{snapshot.id}.json"
             temporary = target.with_suffix(".json.tmp")
             temporary.write_text(snapshot.model_dump_json(indent=2), encoding="utf-8")
             temporary.replace(target)
+            self._prune_history()
         except OSError:
             # History is a convenience; a read-only or full artifact root must
             # not turn a completed evaluation into a failed one.
             return
+
+    def _prune_history(self, keep: int = 200) -> None:
+        if self._history_dir is None:
+            return
+
+        def modified(path: Path) -> float:
+            try:
+                return path.stat().st_mtime
+            except OSError:
+                return 0.0
+
+        files = sorted(
+            self._history_dir.glob("*.json"),
+            key=modified,
+            reverse=True,
+        )
+        for stale in files[keep:]:
+            try:
+                stale.unlink()
+            except OSError:
+                continue
 
     def list_jobs(
         self,
@@ -806,6 +843,56 @@ class ExplorerJobManager:
             ]
         snapshots.sort(key=lambda item: (item.createdAt, item.id), reverse=True)
         return snapshots[:limit]
+
+    def set_label(self, job_id: str, label: str | None) -> JobSnapshot:
+        cleaned = label.strip() if label else None
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                raise KeyError(job_id)
+            job.snapshot = job.snapshot.model_copy(
+                update={
+                    "label": cleaned or None,
+                    "updatedAt": _utc_now(),
+                }
+            )
+            snapshot = job.snapshot.model_copy(deep=True)
+        if snapshot.status in TERMINAL_JOB_STATES:
+            self._persist(snapshot)
+        return snapshot
+
+    def retry(self, job_id: str) -> JobSnapshot:
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                raise KeyError(job_id)
+            if job.snapshot.status not in TERMINAL_JOB_STATES:
+                raise ValueError("Only completed, failed, or cancelled jobs can be retried.")
+            payload = job.payload
+            public_request = job.snapshot.request
+        if payload is None:
+            request_model: type[BaseModel] | None = {
+                "dataset-test": DatasetTestRequest,
+                "prompt-run": PromptRunRequest,
+            }.get(self._kind)
+            if request_model is None:
+                raise ValueError("This saved job cannot be retried after a service restart.")
+            payload = request_model.model_validate(public_request)
+        return self.submit(payload, public_request=public_request)
+
+    def delete_history(self, job_id: str) -> None:
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                raise KeyError(job_id)
+            if job.snapshot.status not in TERMINAL_JOB_STATES:
+                raise ValueError("Only completed, failed, or cancelled jobs can be deleted.")
+            del self._jobs[job_id]
+        if self._history_dir is not None:
+            try:
+                (self._history_dir / f"{job_id}.json").unlink(missing_ok=True)
+            except OSError:
+                pass
 
     def submit(
         self,
@@ -992,6 +1079,7 @@ def create_app(
         .expanduser()
         .resolve()
     )
+    job_history_root = root / ".safelens" / "jobs"
     app = FastAPI(
         title="SafeLens Explorer API",
         version="0.1.0",
@@ -1001,7 +1089,7 @@ def create_app(
         CORSMiddleware,
         allow_origin_regex=r"^https?://(127\.0\.0\.1|localhost)(:\d+)?$",
         allow_credentials=False,
-        allow_methods=["GET", "POST", "DELETE"],
+        allow_methods=["GET", "POST", "DELETE", "PATCH"],
         allow_headers=["Accept", "Content-Type", "If-None-Match", "Last-Event-ID"],
     )
     prompt_manager = ExplorerJobManager(
@@ -1009,6 +1097,8 @@ def create_app(
         kind="prompt-run",
         ready_detail="Explorer run is ready and indexed in the workspace.",
         error_detail="Prompt analysis failed. Inspect the diagnostic and retry.",
+        history_dir=job_history_root / "prompt-run",
+        persist_result=False,
     )
     attribution_manager = ExplorerJobManager(
         attribution_runner or _subprocess_attribution_runner(root=root),
@@ -1017,18 +1107,24 @@ def create_app(
         error_detail=(
             "Attribution failed. Inspect the target, baseline, and diagnostic before retrying."
         ),
+        history_dir=job_history_root / "attribution",
+        persist_result=False,
     )
     nla_manager = ExplorerJobManager(
         nla_runner or _subprocess_nla_runner(root=root),
         kind="nla",
         ready_detail="Exact NLA explanations and fidelity rows are ready in a derived run.",
         error_detail="NLA failed. Inspect profile compatibility, authorization, and diagnostics.",
+        history_dir=job_history_root / "nla",
+        persist_result=False,
     )
     jlens_manager = ExplorerJobManager(
         jlens_runner or _subprocess_jlens_runner(root=root),
         kind="jlens",
         ready_detail="Jacobian Lens vocabulary readout is ready in a derived run.",
         error_detail="Jacobian Lens failed. Inspect the lens artifact and model compatibility.",
+        history_dir=job_history_root / "jlens",
+        persist_result=False,
     )
     patching_manager = ExplorerJobManager(
         patching_runner or _subprocess_patching_runner(root=root),
@@ -1037,18 +1133,24 @@ def create_app(
         error_detail=(
             "Activation patching failed. Inspect token alignment, objective, and diagnostics."
         ),
+        history_dir=job_history_root / "patching",
+        persist_result=False,
     )
     intervention_manager = ExplorerJobManager(
         intervention_runner or _subprocess_intervention_runner(root=root),
         kind="intervention",
         ready_detail="Intervention comparison is ready in a derived Explorer run.",
         error_detail="Intervention failed. Inspect the vector references, range, and diagnostic.",
+        history_dir=job_history_root / "intervention",
+        persist_result=False,
     )
     sae_discovery_manager = ExplorerJobManager(
         sae_discovery_runner or _subprocess_sae_discovery_runner(root=root),
         kind="sae-discovery",
         ready_detail="Active SAE features are ready for selection.",
         error_detail="SAE feature discovery failed. Inspect the checkpoint and token range.",
+        history_dir=job_history_root / "sae-discovery",
+        persist_result=False,
     )
     dataset_manager = ExplorerJobManager(
         dataset_test_runner or _local_dataset_test_runner(allowed_models=allowed_models),
@@ -1109,6 +1211,11 @@ def create_app(
     def health() -> HealthResponse:
         candidates = list(_artifact_candidates(root))
         return HealthResponse(rootExists=root.is_dir(), artifactCount=len(candidates))
+
+    @app.get("/api/version", response_model=VersionResponse)
+    def version() -> VersionResponse:
+        package_version, commit = _build_version()
+        return VersionResponse(version=package_version, commit=commit)
 
     @app.get("/api/prompt/options", response_model=PromptOptionsResponse)
     def prompt_options() -> PromptOptionsResponse:
@@ -1924,6 +2031,41 @@ def create_app(
             snapshots.extend(manager.list_jobs(statuses=statuses, limit=limit))
         snapshots.sort(key=lambda item: (item.createdAt, item.id), reverse=True)
         return JobListResponse(jobs=[_job_list_summary(snapshot) for snapshot in snapshots[:limit]])
+
+    @app.patch("/api/jobs/{job_id}", response_model=JobSnapshot)
+    def rename_job(job_id: str, payload: JobLabelRequest) -> JobSnapshot:
+        try:
+            manager = _manager_for_job(managers, job_id)
+            return manager.set_label(job_id, payload.label)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail={"code": "job_not_found"}) from exc
+
+    @app.delete("/api/jobs/{job_id}/history", status_code=204)
+    def delete_job_history(job_id: str) -> Response:
+        try:
+            manager = _manager_for_job(managers, job_id)
+            manager.delete_history(job_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail={"code": "job_not_found"}) from exc
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "job_not_terminal", "message": str(exc)},
+            ) from exc
+        return Response(status_code=204)
+
+    @app.post("/api/jobs/{job_id}/retry", response_model=JobSnapshot, status_code=202)
+    def retry_job(job_id: str) -> JobSnapshot:
+        try:
+            manager = _manager_for_job(managers, job_id)
+            return manager.retry(job_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail={"code": "job_not_found"}) from exc
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "job_not_retryable", "message": str(exc)},
+            ) from exc
 
     @app.get("/api/jobs/{job_id}", response_model=JobSnapshot)
     def get_job(job_id: str) -> JobSnapshot:
@@ -3307,6 +3449,29 @@ def _require_not_cancelled(cancel_event: threading.Event) -> None:
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+@lru_cache(maxsize=1)
+def _build_version() -> tuple[str, str | None]:
+    try:
+        version = importlib.metadata.version("safelens")
+    except importlib.metadata.PackageNotFoundError:
+        version = "0.1.0"
+    commit = os.environ.get("SAFELENS_BUILD_COMMIT", "").strip() or None
+    if commit is None:
+        try:
+            result = subprocess.run(
+                ["git", "rev-parse", "--short", "HEAD"],
+                cwd=Path(__file__).resolve().parents[2],
+                capture_output=True,
+                text=True,
+                timeout=1,
+                check=False,
+            )
+            commit = result.stdout.strip() or None
+        except (OSError, subprocess.SubprocessError):
+            commit = None
+    return version, commit
 
 
 def _scan_artifacts(

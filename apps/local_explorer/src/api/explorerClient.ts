@@ -686,7 +686,8 @@ export const datasetTestJobSchema = z.object({
   request: datasetTestRequestSchema,
   result: datasetTestResultSchema.nullable(),
   error: z.string().nullable(),
-  taskProgress: jobTaskProgressSchema.nullable().optional()
+  taskProgress: jobTaskProgressSchema.nullable().optional(),
+  label: z.string().nullable().optional()
 });
 
 const datasetTestResultSummarySchema = datasetTestResultSchema.omit({ rows: true });
@@ -703,7 +704,8 @@ export const datasetTestJobSummarySchema = z.object({
   request: datasetTestRequestSchema,
   result: datasetTestResultSummarySchema.nullable(),
   error: z.string().nullable(),
-  taskProgress: jobTaskProgressSchema.nullable().optional()
+  taskProgress: jobTaskProgressSchema.nullable().optional(),
+  label: z.string().nullable().optional()
 });
 
 export const jobSummarySchema = z.object({
@@ -718,7 +720,8 @@ export const jobSummarySchema = z.object({
   request: z.record(z.string(), z.unknown()),
   result: z.record(z.string(), z.unknown()).nullable().optional(),
   error: z.string().nullable(),
-  taskProgress: jobTaskProgressSchema.nullable().optional()
+  taskProgress: jobTaskProgressSchema.nullable().optional(),
+  label: z.string().nullable().optional()
 });
 
 export type DatasetCatalog = z.infer<typeof datasetCatalogSchema>;
@@ -1348,6 +1351,33 @@ export async function fetchPromptOptions(signal?: AbortSignal): Promise<PromptOp
   return parsed.data;
 }
 
+const buildVersionSchema = z.object({
+  version: z.string().min(1),
+  commit: z.string().nullable().optional()
+});
+
+export type BuildVersion = z.infer<typeof buildVersionSchema>;
+
+export async function fetchBuildVersion(signal?: AbortSignal): Promise<BuildVersion> {
+  const response = await fetch(`${API_BASE}/version`, {
+    headers: { Accept: "application/json" },
+    signal,
+    cache: "no-store"
+  });
+  if (!response.ok) {
+    throw await jobResponseError(response, "build_version_error");
+  }
+  const parsed = buildVersionSchema.safeParse(await response.json());
+  if (!parsed.success) {
+    throw new ExplorerApiError(
+      "build_version_invalid_schema",
+      "Build version failed validation.",
+      response.status
+    );
+  }
+  return parsed.data;
+}
+
 export async function fetchDatasetCatalog(signal?: AbortSignal): Promise<DatasetCatalog> {
   const response = await fetch(`${API_BASE}/datasets`, {
     signal,
@@ -1429,12 +1459,38 @@ export async function fetchJobs(limit = 30): Promise<JobSummary[]> {
   return parsed.data.jobs;
 }
 
+export async function retryJob(jobId: string): Promise<void> {
+  const response = await fetch(`${API_BASE}/jobs/${encodeURIComponent(jobId)}/retry`, {
+    method: "POST",
+    headers: { Accept: "application/json" }
+  });
+  if (!response.ok) throw await jobResponseError(response, "job_retry_error");
+}
+
 export async function cancelJob(jobId: string): Promise<void> {
   const response = await fetch(`${API_BASE}/jobs/${encodeURIComponent(jobId)}`, {
     method: "DELETE",
     headers: { Accept: "application/json" }
   });
   if (!response.ok) throw await jobResponseError(response, "job_cancel_error");
+}
+
+export async function renameDatasetTestJob(jobId: string, label: string | null): Promise<DatasetTestJob> {
+  const response = await fetch(`${API_BASE}/jobs/${encodeURIComponent(jobId)}`, {
+    method: "PATCH",
+    headers: { Accept: "application/json", "Content-Type": "application/json" },
+    body: JSON.stringify({ label })
+  });
+  if (!response.ok) throw await jobResponseError(response, "dataset_history_rename_error");
+  return parseDatasetTestJob(await response.json());
+}
+
+export async function deleteDatasetTestJob(jobId: string): Promise<void> {
+  const response = await fetch(`${API_BASE}/jobs/${encodeURIComponent(jobId)}/history`, {
+    method: "DELETE",
+    headers: { Accept: "application/json" }
+  });
+  if (!response.ok) throw await jobResponseError(response, "dataset_history_delete_error");
 }
 
 export async function fetchTokenizedResponse(
@@ -1456,6 +1512,17 @@ export async function fetchTokenizedResponse(
     throw new ExplorerApiError("tokenize_invalid_schema", "Response tokenization failed validation.", response.status);
   }
   return parsed.data;
+}
+
+export async function fetchPromptJob(jobId: string): Promise<PromptJob> {
+  const response = await fetch(`${API_BASE}/jobs/${encodeURIComponent(jobId)}`, {
+    headers: { Accept: "application/json" },
+    cache: "no-store"
+  });
+  if (!response.ok) {
+    throw await jobResponseError(response, "prompt_status_error");
+  }
+  return parsePromptJob(await response.json());
 }
 
 export async function cancelPromptJob(jobId: string): Promise<PromptJob> {

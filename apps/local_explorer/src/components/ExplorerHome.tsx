@@ -1,14 +1,20 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  Braces,
   BrainCircuit,
+  Check,
   CheckSquare2,
   Database,
+  FileText,
   MessageSquareText,
   PanelLeftClose,
   PanelLeftOpen,
   Paperclip,
   Play,
   LoaderCircle,
+  MoreHorizontal,
+  Pencil,
+  Pin,
   Search,
   Square,
   SquarePen,
@@ -17,7 +23,9 @@ import {
 } from "lucide-react";
 
 import { fetchPromptOptions } from "../api/explorerClient";
+import { generatedResponseText } from "../generatedResponse";
 import { useTurnManager } from "../state/useTurnManager";
+import { loadPendingPromptTurn } from "../state/pendingPromptTurn";
 import {
   listConversations,
   type ConversationSummary,
@@ -45,6 +53,19 @@ const DEFAULT_MAX_NEW_TOKENS = 128;
 const MAX_NEW_TOKENS_LIMIT = 512;
 const HIDDEN_RUN_STORAGE_KEY = "safelens.localExplorer.hiddenWork.v1";
 const HISTORY_COLLAPSED_STORAGE_KEY = "safelens.localExplorer.historyCollapsed.v1";
+const CONVERSATION_META_STORAGE_KEY = "safelens.localExplorer.conversationMeta.v1";
+
+interface ConversationMeta {
+  title?: string;
+  pinned?: boolean;
+}
+
+type ConversationMetaMap = Record<string, ConversationMeta>;
+
+interface PendingConversationDeletion {
+  items: ConversationSummary[];
+  keys: Set<string>;
+}
 
 interface ExplorerHomeProps {
   records: RunRecord[];
@@ -84,6 +105,9 @@ export function ExplorerHome({
   const [selectingConversations, setSelectingConversations] = useState(false);
   const [selectedConversationIds, setSelectedConversationIds] = useState<Set<string>>(new Set());
   const [conversationQuery, setConversationQuery] = useState("");
+  const [conversationMeta, setConversationMeta] = useState<ConversationMetaMap>(loadConversationMeta);
+  const [undoDeletion, setUndoDeletion] = useState<PendingConversationDeletion | null>(null);
+  const undoDeletionTimerRef = useRef<number | null>(null);
 
   const visibleRecords = useMemo(
     () => records.filter((record) => !hiddenRunKeys.has(record.key)),
@@ -93,10 +117,23 @@ export function ExplorerHome({
   const visibleConversations = useMemo(() => {
     const query = conversationQuery.trim().toLowerCase();
     if (!query) return conversations;
-    return conversations.filter((conversation) =>
-      `${conversation.title} ${conversation.firstRecord.modelName}`.toLowerCase().includes(query)
-    );
-  }, [conversationQuery, conversations]);
+    return conversations.filter((conversation) => {
+      const title = conversationMeta[conversation.conversationId]?.title ?? conversation.title;
+      return `${title} ${conversation.firstRecord.modelName}`.toLowerCase().includes(query);
+    });
+  }, [conversationMeta, conversationQuery, conversations]);
+  const displayedConversations = useMemo(() => {
+    return visibleConversations
+      .map((conversation) => ({
+        ...conversation,
+        title: conversationMeta[conversation.conversationId]?.title ?? conversation.title
+      }))
+      .sort((left, right) => {
+        const leftPinned = conversationMeta[left.conversationId]?.pinned ? 1 : 0;
+        const rightPinned = conversationMeta[right.conversationId]?.pinned ? 1 : 0;
+        return rightPinned - leftPinned || right.lastUsedAt.localeCompare(left.lastUsedAt);
+      });
+  }, [conversationMeta, visibleConversations]);
   useEffect(() => {
     setSelectedConversationIds(new Set());
   }, [conversationQuery]);
@@ -112,6 +149,32 @@ export function ExplorerHome({
   }, [conversations, selectingConversations]);
   const selectedSource = visibleRecords.find((record) => record.key === sourceKey) ??
     visibleRecords.find((record) => record.key === activeRecord.key) ?? visibleRecords[0] ?? activeRecord;
+  const pendingRestore = useMemo(() => {
+    const pending = loadPendingPromptTurn();
+    if (!pending) return null;
+    const conversation = conversations.find(
+      (item) => item.conversationId === pending.conversationId
+    );
+    const existingTurns = conversation
+      ? turnsForConversation(conversation).filter((turn) => turn.id !== pending.turnId)
+      : [];
+    const pendingTurn: TurnView = {
+      id: pending.turnId,
+      prompt: pending.prompt,
+      run: null,
+      jobId: pending.jobId,
+      status: "pending",
+      startedAt: pending.startedAt
+    };
+    return {
+      conversationId: pending.conversationId,
+      turnId: pending.turnId,
+      jobId: pending.jobId,
+      model: pending.model,
+      maxNewTokens: pending.maxNewTokens,
+      turns: [...existingTurns, pendingTurn]
+    };
+  }, [conversations]);
 
   const turnsRef = useRef<TurnView[]>([]);
   const turnManager = useTurnManager({
@@ -119,6 +182,7 @@ export function ExplorerHome({
     maxNewTokens,
     conversationId,
     onConversationStart: setConversationId,
+    initialRestore: pendingRestore,
     onRunReady: (run, job, turnId) => {
       const turnIndex = turnsRef.current.findIndex((turn) => turn.id === turnId);
       onRunReady({
@@ -148,6 +212,12 @@ export function ExplorerHome({
     });
     return () => controller.abort();
   }, []);
+
+  useEffect(() => {
+    if (!pendingRestore) return;
+    if (models.includes(pendingRestore.model)) setModel(pendingRestore.model);
+    setMaxNewTokens(Math.min(pendingRestore.maxNewTokens, maxNewTokensLimit));
+  }, [maxNewTokensLimit, models, pendingRestore?.jobId]);
 
   useEffect(() => {
     if (!visibleRecords.some((record) => record.key === sourceKey)) {
@@ -266,21 +336,7 @@ export function ExplorerHome({
 
   function removeConversationsHistory(items: ConversationSummary[]) {
     if (items.length === 0) return;
-    const relatedKeys = new Set<string>();
-    for (const conversation of items) {
-      for (const record of conversation.records) relatedKeys.add(record.key);
-    }
-    let foundChild = true;
-    while (foundChild) {
-      foundChild = false;
-      for (const candidate of records) {
-        const parentKey = parentRunKey(candidate);
-        if (parentKey && relatedKeys.has(parentKey) && !relatedKeys.has(candidate.key)) {
-          relatedKeys.add(candidate.key);
-          foundChild = true;
-        }
-      }
-    }
+    const relatedKeys = conversationRelatedKeys(items, records);
     const fallback = visibleRecords.find((record) => !relatedKeys.has(record.key));
     if (fallback) setSourceKey(fallback.key);
     setHiddenRunKeys((current) => {
@@ -309,6 +365,121 @@ export function ExplorerHome({
     window.history.replaceState(null, "", "/");
   }
 
+  function updateConversationMeta(next: ConversationMetaMap) {
+    setConversationMeta(next);
+    try {
+      window.localStorage.setItem(CONVERSATION_META_STORAGE_KEY, JSON.stringify(next));
+    } catch {
+      // The in-memory preference still applies for this tab.
+    }
+  }
+
+  function renameConversation(conversationId: string, title: string) {
+    updateConversationMeta({
+      ...conversationMeta,
+      [conversationId]: {
+        ...conversationMeta[conversationId],
+        title: title.trim() || undefined
+      }
+    });
+  }
+
+  function toggleConversationPin(conversationId: string) {
+    updateConversationMeta({
+      ...conversationMeta,
+      [conversationId]: {
+        ...conversationMeta[conversationId],
+        pinned: !conversationMeta[conversationId]?.pinned
+      }
+    });
+  }
+
+  function exportConversation(conversation: ConversationSummary, format: "md" | "json") {
+    const turns = conversation.turnRecords.flatMap((record) => {
+      if (!record.run) return [];
+      return [{
+        prompt: userPromptForRun(record.run),
+        response: generatedResponseText(record.run)
+      }];
+    });
+    const filename = `safelens-${conversation.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "conversation"}`;
+    if (format === "json") {
+      downloadTextFile(
+        `${filename}.json`,
+        "application/json",
+        JSON.stringify({
+          conversationId: conversation.conversationId,
+          title: conversation.title,
+          model: conversation.firstRecord.modelName,
+          turns
+        }, null, 2)
+      );
+      return;
+    }
+    const markdown = [
+      `# ${conversation.title}`,
+      "",
+      `Model: ${conversation.firstRecord.modelName}`,
+      "",
+      ...turns.flatMap((turn, index) => [
+        `## Turn ${index + 1}`,
+        "",
+        "### User",
+        turn.prompt,
+        "",
+        "### Assistant",
+        turn.response || "No visible continuation.",
+        ""
+      ])
+    ].join("\n");
+    downloadTextFile(`${filename}.md`, "text/markdown", markdown);
+  }
+
+  function stageConversationDeletion(items: ConversationSummary[]) {
+    if (items.length === 0) return;
+    const relatedKeys = conversationRelatedKeys(items, records);
+    const addedKeys = new Set([...relatedKeys].filter((key) => !hiddenRunKeys.has(key)));
+    setHiddenRunKeys((current) => {
+      const next = new Set(current);
+      for (const key of relatedKeys) next.add(key);
+      persistHiddenRunKeys(next);
+      return next;
+    });
+    const mergedItems = [
+      ...(undoDeletion?.items ?? []),
+      ...items.filter((item) =>
+        !(undoDeletion?.items ?? []).some(
+          (existing) => existing.conversationId === item.conversationId
+        )
+      )
+    ];
+    const mergedKeys = new Set([...(undoDeletion?.keys ?? []), ...addedKeys]);
+    setUndoDeletion({ items: mergedItems, keys: mergedKeys });
+    if (undoDeletionTimerRef.current !== null) {
+      window.clearTimeout(undoDeletionTimerRef.current);
+    }
+    undoDeletionTimerRef.current = window.setTimeout(() => {
+      removeConversationsHistory(mergedItems);
+      setUndoDeletion(null);
+      undoDeletionTimerRef.current = null;
+    }, 6000);
+  }
+
+  function undoConversationDeletion() {
+    if (!undoDeletion) return;
+    if (undoDeletionTimerRef.current !== null) {
+      window.clearTimeout(undoDeletionTimerRef.current);
+      undoDeletionTimerRef.current = null;
+    }
+    setHiddenRunKeys((current) => {
+      const next = new Set(current);
+      for (const key of undoDeletion.keys) next.delete(key);
+      persistHiddenRunKeys(next);
+      return next;
+    });
+    setUndoDeletion(null);
+  }
+
   function toggleConversationSelection(conversationId: string) {
     setSelectedConversationIds((current) => {
       const next = new Set(current);
@@ -320,7 +491,7 @@ export function ExplorerHome({
 
   function selectAllConversations() {
     setSelectedConversationIds(
-      new Set(visibleConversations.map((conversation) => conversation.conversationId))
+      new Set(displayedConversations.map((conversation) => conversation.conversationId))
     );
   }
 
@@ -371,8 +542,12 @@ export function ExplorerHome({
           open={historyOpen}
           collapsed={historyCollapsed}
           onToggleCollapsed={toggleHistoryCollapsed}
-          conversations={visibleConversations}
+          conversations={displayedConversations}
           totalConversations={conversations.length}
+          conversationMeta={conversationMeta}
+          onRenameConversation={renameConversation}
+          onTogglePin={toggleConversationPin}
+          onExportConversation={exportConversation}
           query={conversationQuery}
           onQueryChange={setConversationQuery}
           activeKey={null}
@@ -450,12 +625,21 @@ export function ExplorerHome({
         />
         </main>
       </div>
+      {undoDeletion && (
+        <div className="chat-undo-toast" role="status">
+          <span>
+            Removed {undoDeletion.items.length} conversation
+            {undoDeletion.items.length === 1 ? "" : "s"} from Chat history.
+          </span>
+          <button type="button" onClick={undoConversationDeletion}>Undo</button>
+        </div>
+      )}
       {pendingDelete && (
         <DeleteConversationsDialog
           conversations={pendingDelete}
           onCancel={() => setPendingDelete(null)}
           onConfirm={() => {
-            removeConversationsHistory(pendingDelete);
+            stageConversationDeletion(pendingDelete);
             setPendingDelete(null);
             setSelectingConversations(false);
             setSelectedConversationIds(new Set());
@@ -519,9 +703,18 @@ function PromptComposer({
         </button>
         <label>
           <span>Model</span>
-          <select aria-label="Analysis model" value={model} onChange={(event) => onModelChange(event.target.value)}>
+          <select
+            aria-label="Analysis model"
+            aria-describedby="chat-model-capability"
+            title={modelCapabilityHint(model)}
+            value={model}
+            onChange={(event) => onModelChange(event.target.value)}
+          >
             {models.map((item) => <option key={item} value={item}>{shortModelName(item)}</option>)}
           </select>
+          <span id="chat-model-capability" className="visually-hidden">
+            {modelCapabilityHint(model)}
+          </span>
         </label>
         <label className="chat-token-budget">
           <span>Max</span>
@@ -553,6 +746,10 @@ function ChatHistory({
   onToggleCollapsed,
   conversations,
   totalConversations,
+  conversationMeta,
+  onRenameConversation,
+  onTogglePin,
+  onExportConversation,
   query,
   onQueryChange,
   activeKey,
@@ -573,6 +770,10 @@ function ChatHistory({
   onToggleCollapsed: () => void;
   conversations: ConversationSummary[];
   totalConversations: number;
+  conversationMeta: ConversationMetaMap;
+  onRenameConversation: (conversationId: string, title: string) => void;
+  onTogglePin: (conversationId: string) => void;
+  onExportConversation: (conversation: ConversationSummary, format: "md" | "json") => void;
   query: string;
   onQueryChange: (query: string) => void;
   activeKey: string | null;
@@ -588,8 +789,32 @@ function ChatHistory({
   onDelete: (conversations: ConversationSummary[]) => void;
   onClose: () => void;
 }) {
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [renameValue, setRenameValue] = useState("");
+  const [menuId, setMenuId] = useState<string | null>(null);
   const collapsed = collapsedPreference && !open;
   const allSelected = conversations.length > 0 && selectedIds.size === conversations.length;
+
+  useEffect(() => {
+    if (!menuId) return;
+    function closeOnEscape(event: KeyboardEvent) {
+      if (event.key === "Escape") setMenuId(null);
+    }
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [menuId]);
+
+  function startRename(conversation: ConversationSummary) {
+    setMenuId(null);
+    setRenamingId(conversation.conversationId);
+    setRenameValue(conversation.title);
+  }
+
+  function saveRename(conversation: ConversationSummary) {
+    onRenameConversation(conversation.conversationId, renameValue);
+    setRenamingId(null);
+    setRenameValue("");
+  }
   return (
     <>
       <aside
@@ -699,9 +924,11 @@ function ChatHistory({
                   )}
                   <button
                     className="chat-history-open"
-                    onClick={() => selecting
-                      ? onToggleSelected(conversation.conversationId)
-                      : onSelect(conversation)}
+                    onClick={() => {
+                      setMenuId(null);
+                      if (selecting) onToggleSelected(conversation.conversationId);
+                      else onSelect(conversation);
+                    }}
                   >
                     <strong>{conversation.title}</strong>
                     <small>
@@ -711,13 +938,106 @@ function ChatHistory({
                   </button>
                   {!selecting && (
                     <button
-                      className="chat-history-delete"
-                      aria-label={`Delete conversation ${conversation.title}`}
-                      title="Delete conversation"
-                      onClick={() => onDelete([conversation])}
+                      type="button"
+                      className="chat-history-more"
+                      aria-label={`Conversation actions for ${conversation.title}`}
+                      aria-expanded={menuId === conversation.conversationId}
+                      title="Conversation actions"
+                      onClick={() => setMenuId((current) =>
+                        current === conversation.conversationId ? null : conversation.conversationId
+                      )}
                     >
-                      <Trash2 size={15} />
+                      <MoreHorizontal size={16} />
                     </button>
+                  )}
+                  {!selecting && menuId === conversation.conversationId && (
+                    <div className="chat-history-menu" role="menu" aria-label={`Actions for ${conversation.title}`}>
+                      <button
+                        type="button"
+                        role="menuitem"
+                        onClick={() => {
+                          onTogglePin(conversation.conversationId);
+                          setMenuId(null);
+                        }}
+                      >
+                        <Pin size={13} fill={conversationMeta[conversation.conversationId]?.pinned ? "currentColor" : "none"} />
+                        {conversationMeta[conversation.conversationId]?.pinned ? "Unpin" : "Pin"}
+                      </button>
+                      <button
+                        type="button"
+                        role="menuitem"
+                        onClick={() => startRename(conversation)}
+                      >
+                        <Pencil size={13} /> Rename
+                      </button>
+                      <button
+                        type="button"
+                        role="menuitem"
+                        onClick={() => {
+                          onExportConversation(conversation, "md");
+                          setMenuId(null);
+                        }}
+                      >
+                        <FileText size={13} /> Export Markdown
+                      </button>
+                      <button
+                        type="button"
+                        role="menuitem"
+                        onClick={() => {
+                          onExportConversation(conversation, "json");
+                          setMenuId(null);
+                        }}
+                      >
+                        <Braces size={13} /> Export JSON
+                      </button>
+                      <button
+                        type="button"
+                        role="menuitem"
+                        className="danger"
+                        onClick={() => {
+                          setMenuId(null);
+                          onDelete([conversation]);
+                        }}
+                      >
+                        <Trash2 size={13} /> Delete
+                      </button>
+                    </div>
+                  )}
+                  {renamingId === conversation.conversationId && (
+                    <form
+                      className="chat-history-rename"
+                      onSubmit={(event) => {
+                        event.preventDefault();
+                        saveRename(conversation);
+                      }}
+                    >
+                      <input
+                        autoFocus
+                        aria-label={`New name for ${conversation.title}`}
+                        maxLength={80}
+                        value={renameValue}
+                        onChange={(event) => setRenameValue(event.target.value)}
+                        onKeyDown={(event) => {
+                          if (event.key === "Escape") {
+                            setRenamingId(null);
+                            setRenameValue("");
+                          }
+                        }}
+                      />
+                      <button type="submit" aria-label="Save conversation name">
+                        <Check size={13} />
+                      </button>
+                      <button
+                        type="button"
+                        aria-label="Cancel conversation rename"
+                        onClick={() => {
+                          setRenamingId(null);
+                          setRenameValue("");
+                        }}
+                      >
+                        <X size={13} />
+                      </button>
+                    </form>
                   )}
                 </div>
               );
@@ -769,6 +1089,22 @@ function DeleteConversationsDialog({ conversations, onCancel, onConfirm }: {
   );
 }
 
+function modelCapabilityHint(model: string) {
+  if (model.includes("Qwen2.5-7B")) {
+    return "Qwen2.5-7B supports neuron, residual, attention, patching, steering, NLA, and J-Lens analysis from bundled local artifacts.";
+  }
+  if (model.includes("gemma-2-9b")) {
+    return "Gemma-2-9B-it adds Neuronpedia SAE presets on top of neuron, residual, attention, patching, and steering analysis.";
+  }
+  if (model.includes("gemma-3")) {
+    return "Gemma-3 models support residual, attention, MLP, patching, and steering; SAE and NLA need matching local artifacts.";
+  }
+  if (model.includes("tiny-gpt2")) {
+    return "tiny-gpt2 is a lightweight smoke-test model; deeper evidence depends on the local caches available for it.";
+  }
+  return "Available analyses depend on the local artifacts and NLA/SAE profiles bundled for this model.";
+}
+
 function shortModelName(model: string) {
   const parts = model.split("/");
   return parts[parts.length - 1] ?? model;
@@ -816,6 +1152,64 @@ function promptTextFromTemplate(prompt: string) {
     if (value) return value;
   }
   return prompt;
+}
+
+function conversationRelatedKeys(items: ConversationSummary[], records: RunRecord[]) {
+  const relatedKeys = new Set<string>();
+  for (const conversation of items) {
+    for (const record of conversation.records) relatedKeys.add(record.key);
+  }
+  let foundChild = true;
+  while (foundChild) {
+    foundChild = false;
+    for (const candidate of records) {
+      const parentKey = parentRunKey(candidate);
+      if (parentKey && relatedKeys.has(parentKey) && !relatedKeys.has(candidate.key)) {
+        relatedKeys.add(candidate.key);
+        foundChild = true;
+      }
+    }
+  }
+  return relatedKeys;
+}
+
+function persistHiddenRunKeys(keys: Set<string>) {
+  try {
+    window.localStorage.setItem(HIDDEN_RUN_STORAGE_KEY, JSON.stringify([...keys]));
+  } catch {
+    // The current tab still hides the entries when storage is unavailable.
+  }
+}
+
+function loadConversationMeta(): ConversationMetaMap {
+  try {
+    const value: unknown = JSON.parse(
+      window.localStorage.getItem(CONVERSATION_META_STORAGE_KEY) ?? "{}"
+    );
+    if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+    const result: ConversationMetaMap = {};
+    for (const [key, entry] of Object.entries(value)) {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+      const record = entry as Record<string, unknown>;
+      result[key] = {
+        title: typeof record.title === "string" && record.title.trim() ? record.title : undefined,
+        pinned: record.pinned === true
+      };
+    }
+    return result;
+  } catch {
+    return {};
+  }
+}
+
+function downloadTextFile(name: string, mime: string, content: string) {
+  const blob = new Blob([content], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = name;
+  anchor.click();
+  URL.revokeObjectURL(url);
 }
 
 function loadHiddenRunKeys() {

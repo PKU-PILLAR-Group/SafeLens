@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import {
   AlertCircle,
   Activity,
@@ -59,6 +59,7 @@ import { ChatExplanationWorkbench } from "./ChatExplanationWorkbench";
 import { MLPActivationHeatmap, ResidualStreamHeatmap } from "./ChatFeatureHeatmaps";
 import { PresetSuggestTextarea } from "./PresetSuggestTextarea";
 import { ResponseTokenPicker } from "./ResponseTokenPicker";
+import { RunProvenanceCard } from "./RunProvenanceCard";
 
 interface ChatAnalysisWorkbenchProps {
   mode: "steering" | "attribution" | "patching" | "neuron" | "feature" | "explanation" | "attention";
@@ -70,25 +71,32 @@ interface ChatAnalysisWorkbenchProps {
 }
 
 export function ChatAnalysisWorkbench({ mode, run, remoteSummary, savedRun, suggestionQuery, onRunReady }: ChatAnalysisWorkbenchProps) {
+  const provenanceRun = savedRun ?? run;
+  const frame = (content: ReactNode) => (
+    <>
+      <RunProvenanceCard run={provenanceRun} mode={mode} />
+      {content}
+    </>
+  );
   if (mode === "steering") {
-    return <SteeringWorkbench run={run} savedRun={savedRun} suggestionQuery={suggestionQuery} onRunReady={onRunReady} />;
+    return frame(<SteeringWorkbench run={run} savedRun={savedRun} suggestionQuery={suggestionQuery} onRunReady={onRunReady} />);
   }
   if (mode === "attribution") {
-    return <AttributionWorkbench run={run} savedRun={savedRun} onRunReady={onRunReady} />;
+    return frame(<AttributionWorkbench run={run} savedRun={savedRun} onRunReady={onRunReady} />);
   }
   if (mode === "patching") {
-    return <PatchingWorkbench run={run} savedRun={savedRun} onRunReady={onRunReady} />;
+    return frame(<PatchingWorkbench run={run} savedRun={savedRun} onRunReady={onRunReady} />);
   }
   if (mode === "neuron") {
-    return <NeuronInterventionWorkbench run={run} savedRun={savedRun} onRunReady={onRunReady} />;
+    return frame(<NeuronInterventionWorkbench run={run} savedRun={savedRun} onRunReady={onRunReady} />);
   }
   if (mode === "feature") {
-    return <FeatureInterventionWorkbench run={run} savedRun={savedRun} onRunReady={onRunReady} />;
+    return frame(<FeatureInterventionWorkbench run={run} savedRun={savedRun} onRunReady={onRunReady} />);
   }
   if (mode === "explanation") {
-    return <ChatExplanationWorkbench run={run} savedRun={savedRun} onRunReady={onRunReady} />;
+    return frame(<ChatExplanationWorkbench run={run} savedRun={savedRun} onRunReady={onRunReady} />);
   }
-  return <ChatAttentionWorkbench run={run} remoteSummary={remoteSummary} />;
+  return frame(<ChatAttentionWorkbench run={run} remoteSummary={remoteSummary} />);
 }
 
 function NeuronInterventionWorkbench({
@@ -1526,8 +1534,77 @@ function SteeringResult({ experiment }: { experiment: InterventionExperiment }) 
         {maxLogitDelta !== undefined && <span><b>{maxLogitDelta.toFixed(3)}</b> max vocabulary change</span>}
         {relativeStrength !== undefined && <span><b>{(relativeStrength * 100).toFixed(1)}%</b> relative injection</span>}
       </footer>
+      {experiment.deltas.topChangedTokens && experiment.deltas.topChangedTokens.length > 0 && (
+        <InterventionLogitDiff tokens={experiment.deltas.topChangedTokens} />
+      )}
     </section>
   );
+}
+
+function InterventionLogitDiff({
+  tokens
+}: {
+  tokens: NonNullable<InterventionExperiment["deltas"]["topChangedTokens"]>;
+}) {
+  const steps = Math.max(...tokens.map((token) => token.deltas.length));
+  const bound = Math.max(
+    1e-9,
+    ...tokens.flatMap((token) => token.deltas.map((value) => Math.abs(value)))
+  );
+  return (
+    <section className="chat-logit-diff" aria-label="Next-token logit change">
+      <header>
+        <div>
+          <strong>Output logit change</strong>
+          <span>steered − original · top changed vocabulary tokens × generated steps</span>
+        </div>
+        <small>red raises · blue lowers</small>
+      </header>
+      <div className="chat-logit-diff-scroll">
+        <table aria-label="Next-token logit change matrix">
+          <thead>
+            <tr>
+              <th scope="col">Token</th>
+              {Array.from({ length: steps }, (_, step) => (
+                <th key={step} scope="col">{step}</th>
+              ))}
+              <th scope="col">Peak Δ</th>
+            </tr>
+          </thead>
+          <tbody>
+            {tokens.map((token) => (
+              <tr key={`${token.tokenId}:${token.step}`}>
+                <th scope="row" title={token.token}>
+                  {visibleToken(token.token)}
+                </th>
+                {token.deltas.map((value, step) => (
+                  <td key={step} title={`Step ${step} · ${signed(value)}`}>
+                    <i style={{ backgroundColor: logitDeltaColor(value, bound) }} />
+                  </td>
+                ))}
+                <td className={token.delta >= 0 ? "positive" : "negative"}>
+                  {signed(token.delta)}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <p>
+        Each cell is the signed next-token logit change at that generation step. The peak column
+        reports the largest change for the token.
+      </p>
+    </section>
+  );
+}
+
+function logitDeltaColor(value: number, bound: number) {
+  const ratio = Math.max(-1, Math.min(1, value / bound));
+  if (Math.abs(ratio) < 0.01) return "#f5f6f6";
+  const alpha = 0.12 + 0.78 * Math.abs(ratio);
+  return ratio > 0
+    ? `rgba(190, 40, 70, ${alpha.toFixed(3)})`
+    : `rgba(38, 92, 190, ${alpha.toFixed(3)})`;
 }
 
 function AttributionResult({

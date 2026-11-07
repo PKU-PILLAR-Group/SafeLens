@@ -6,6 +6,10 @@ import type { ExplorerRun } from "../types";
 import type { TurnView } from "../components/TurnCard";
 import { generatedResponseText } from "../generatedResponse";
 import { createClientId } from "../clientId";
+import {
+  clearPendingPromptTurn,
+  savePendingPromptTurn
+} from "./pendingPromptTurn";
 
 export type { TurnView };
 
@@ -15,6 +19,12 @@ interface UseTurnManagerOptions {
   conversationId: string | null;
   onConversationStart: (id: string) => void;
   onRunReady: (run: ExplorerRun, job: PromptJob, turnId: string) => void;
+  initialRestore?: {
+    conversationId: string;
+    turnId: string;
+    jobId: string;
+    turns: TurnView[];
+  } | null;
 }
 
 export function useTurnManager({
@@ -22,7 +32,8 @@ export function useTurnManager({
   maxNewTokens,
   conversationId,
   onConversationStart,
-  onRunReady
+  onRunReady,
+  initialRestore
 }: UseTurnManagerOptions) {
   const [turns, setTurns] = useState<TurnView[]>([]);
   const [activeTurnId, setActiveTurnId] = useState<string | null>(null);
@@ -32,6 +43,7 @@ export function useTurnManager({
   conversationIdRef.current = conversationId;
   const activeTurnIdRef = useRef<string | null>(null);
   activeTurnIdRef.current = activeTurnId;
+  const restoredRef = useRef(false);
 
   function contextMessages(sourceTurns: TurnView[], excludeId?: string): PromptMessage[] {
     return sourceTurns
@@ -64,6 +76,7 @@ export function useTurnManager({
         : turn
     ));
     setActiveTurnId(null);
+    clearPendingPromptTurn();
     onRunReady(persistedRun, job, turnId);
   }, [onRunReady]);
 
@@ -78,6 +91,7 @@ export function useTurnManager({
         : turn
     ));
     setActiveTurnId(null);
+    clearPendingPromptTurn();
   }, [activeTurnId, runner.error]);
 
   useEffect(() => {
@@ -107,8 +121,44 @@ export function useTurnManager({
     }
   }, [activeTurnId, runner.job]);
 
+  useEffect(() => {
+    if (!runner.job || !activeTurnId) return;
+    const turn = turnsRef.current.find((item) => item.id === activeTurnId);
+    const conversation = conversationIdRef.current;
+    if (!turn || !conversation) return;
+    if (runner.job.status === "idle" || runner.job.status === "loading") {
+      savePendingPromptTurn({
+        turnId: turn.id,
+        prompt: turn.prompt,
+        jobId: runner.job.id,
+        conversationId: conversation,
+        model,
+        maxNewTokens,
+        startedAt: turn.startedAt
+      });
+    } else {
+      clearPendingPromptTurn();
+    }
+  }, [activeTurnId, maxNewTokens, model, runner.job?.id, runner.job?.status]);
+
+  useEffect(() => {
+    if (!initialRestore || restoredRef.current) return;
+    if (turnsRef.current.length > 0 || activeTurnIdRef.current) return;
+    restoredRef.current = true;
+    runner.reset();
+    conversationIdRef.current = initialRestore.conversationId;
+    onConversationStart(initialRestore.conversationId);
+    turnsRef.current = initialRestore.turns;
+    setTurns(initialRestore.turns);
+    activeTurnIdRef.current = initialRestore.turnId;
+    setActiveTurnId(initialRestore.turnId);
+    void runner.resume(initialRestore.jobId);
+  }, [initialRestore, onConversationStart, runner]);
+
   const submit = useCallback((prompt: string) => {
     if (activeTurnIdRef.current) return;
+    restoredRef.current = true;
+    clearPendingPromptTurn();
     const hadConversation = Boolean(conversationIdRef.current);
     const nextConversationId = conversationIdRef.current ?? createClientId();
     conversationIdRef.current = nextConversationId;
@@ -146,6 +196,7 @@ export function useTurnManager({
 
   const retry = useCallback((turnId: string) => {
     if (activeTurnIdRef.current) return;
+    restoredRef.current = true;
     const turn = turns.find((item) => item.id === turnId);
     if (!turn || turn.status === "pending") return;
     setTurns((current) => current.map((item) =>
@@ -168,6 +219,9 @@ export function useTurnManager({
   }, [maxNewTokens, model, runner, turns]);
 
   const reset = useCallback(() => {
+    restoredRef.current = true;
+    clearPendingPromptTurn();
+    if (activeTurnIdRef.current) void runner.cancel();
     runner.reset();
     activeTurnIdRef.current = null;
     setTurns([]);
@@ -175,6 +229,9 @@ export function useTurnManager({
   }, [runner]);
 
   const hydrate = useCallback((nextTurns: TurnView[], nextConversationId: string) => {
+    restoredRef.current = true;
+    clearPendingPromptTurn();
+    if (activeTurnIdRef.current) void runner.cancel();
     runner.reset();
     activeTurnIdRef.current = null;
     setTurns(nextTurns);

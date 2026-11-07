@@ -3,6 +3,7 @@ import {
   AlertTriangle,
   ArrowLeft,
   BrainCircuit,
+  Check,
   CheckCircle2,
   CheckSquare2,
   Clock3,
@@ -12,10 +13,13 @@ import {
   FileCheck2,
   GitCompareArrows,
   LoaderCircle,
+  Pencil,
   Play,
   RefreshCw,
+  RotateCcw,
   Search,
   Square,
+  Trash2,
   StopCircle,
   X,
   XCircle
@@ -23,9 +27,11 @@ import {
 
 import {
   cancelDatasetTestJob,
+  deleteDatasetTestJob,
   fetchDatasetCatalog,
   fetchDatasetTestJob,
   fetchDatasetTestJobs,
+  renameDatasetTestJob,
   submitDatasetTestJob,
   type DatasetAlgorithm,
   type DatasetDefinition,
@@ -57,7 +63,16 @@ export function DatasetTestScreen({
   const [history, setHistory] = useState<DatasetTestJobSummary[]>([]);
   const [historyLoading, setHistoryLoading] = useState(true);
   const [historyError, setHistoryError] = useState<string | null>(null);
+  const [historyQuery, setHistoryQuery] = useState("");
+  const [historyAlgorithm, setHistoryAlgorithm] = useState<"all" | DatasetAlgorithm["id"]>("all");
+  const [historyActionError, setHistoryActionError] = useState<string | null>(null);
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [renameValue, setRenameValue] = useState("");
+  const [deletingId, setDeletingId] = useState<string | null>(null);
   const [compareIds, setCompareIds] = useState<string[]>([]);
+  const [comparisonJobs, setComparisonJobs] = useState<[DatasetTestJob, DatasetTestJob] | null>(null);
+  const [comparisonLoading, setComparisonLoading] = useState(false);
+  const [comparisonLoadError, setComparisonLoadError] = useState<string | null>(null);
   const bootstrapRef = useRef(true);
   const resultsRef = useRef<HTMLDivElement>(null);
 
@@ -68,6 +83,16 @@ export function DatasetTestScreen({
   );
   const dataset = compatibleDatasets.find((item) => item.id === datasetId) ?? compatibleDatasets[0];
   const running = job?.status === "idle" || job?.status === "loading";
+  const visibleHistory = useMemo(() => {
+    const query = historyQuery.trim().toLowerCase();
+    return history.filter((item) => {
+      if (historyAlgorithm !== "all" && item.request.algorithmId !== historyAlgorithm) return false;
+      if (!query) return true;
+      return `${item.label ?? ""} ${item.request.algorithmId} ${item.request.model} ${item.id}`
+        .toLowerCase()
+        .includes(query);
+    });
+  }, [history, historyAlgorithm, historyQuery]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -149,6 +174,36 @@ export function DatasetTestScreen({
     void refreshHistory();
   }, [job?.id, job?.status, refreshHistory]);
 
+  useEffect(() => {
+    if (compareIds.length !== 2) {
+      setComparisonJobs(null);
+      setComparisonLoadError(null);
+      setComparisonLoading(false);
+      return;
+    }
+    let disposed = false;
+    setComparisonLoading(true);
+    setComparisonLoadError(null);
+    Promise.all(compareIds.map((id) => fetchDatasetTestJob(id)))
+      .then((loaded) => {
+        if (!disposed) setComparisonJobs([loaded[0], loaded[1]]);
+      })
+      .catch((error) => {
+        if (!disposed) {
+          setComparisonJobs(null);
+          setComparisonLoadError(
+            error instanceof Error ? error.message : "Full sample results could not be loaded."
+          );
+        }
+      })
+      .finally(() => {
+        if (!disposed) setComparisonLoading(false);
+      });
+    return () => {
+      disposed = true;
+    };
+  }, [compareIds]);
+
   async function openHistoryJob(jobId: string) {
     setRunError(null);
     setResultFilter("all");
@@ -171,6 +226,59 @@ export function DatasetTestScreen({
       if (current.length < 2) return [...current, jobId];
       return [current[1], jobId];
     });
+  }
+
+  function startRename(item: DatasetTestJobSummary) {
+    setHistoryActionError(null);
+    setDeletingId(null);
+    setRenamingId(item.id);
+    setRenameValue(item.label ?? "");
+  }
+
+  async function saveRename(item: DatasetTestJobSummary) {
+    try {
+      const updated = await renameDatasetTestJob(item.id, renameValue.trim() || null);
+      setHistory((current) => current.map((entry) =>
+        entry.id === item.id ? { ...entry, label: updated.label } : entry
+      ));
+      setJob((current) => current?.id === item.id ? updated : current);
+      setRenamingId(null);
+      setRenameValue("");
+    } catch (error) {
+      setHistoryActionError(error instanceof Error ? error.message : "The run could not be renamed.");
+    }
+  }
+
+  async function deleteHistory(item: DatasetTestJobSummary) {
+    if (deletingId !== item.id) {
+      setDeletingId(item.id);
+      setRenamingId(null);
+      return;
+    }
+    try {
+      await deleteDatasetTestJob(item.id);
+      setHistory((current) => current.filter((entry) => entry.id !== item.id));
+      setCompareIds((current) => current.filter((id) => id !== item.id));
+      setJob((current) => current?.id === item.id ? null : current);
+      setDeletingId(null);
+      setHistoryActionError(null);
+    } catch (error) {
+      setHistoryActionError(error instanceof Error ? error.message : "The run could not be deleted.");
+    }
+  }
+
+  async function rerunHistory(item: DatasetTestJobSummary) {
+    bootstrapRef.current = false;
+    setRunError(null);
+    try {
+      const next = await submitDatasetTestJob(item.request);
+      setJob(next);
+      setAlgorithmId(next.request.algorithmId);
+      setDatasetId(next.request.datasetId);
+      void refreshHistory();
+    } catch (error) {
+      setRunError(error instanceof Error ? error.message : "The dataset run could not be restarted.");
+    }
   }
 
   function chooseAlgorithm(next: DatasetAlgorithm) {
@@ -362,8 +470,9 @@ export function DatasetTestScreen({
                 </div>
               )}
               <div className="dataset-run-controls">
-                <label className="wide"><span>Local model</span><select value={model} disabled><option value={DEFAULT_MODEL}>{shortModelName(DEFAULT_MODEL)}</option></select></label>
+                <label className="wide"><span>Local model</span><select value={model} disabled title="The final_300 protocol bundles vectors only for Gemma-2-9B-it"><option value={DEFAULT_MODEL}>{shortModelName(DEFAULT_MODEL)}</option></select></label>
                 <p className="wide">The run first evaluates every selected sample without intervention, then applies steering only to baseline failures. Layer, alpha, and injection scope use the fixed final_300 protocol.</p>
+                <p className="wide dataset-model-hint">The model is fixed because the final_300 vectors are bundled for Gemma-2-9B-it only.</p>
               </div>
               <button className="dataset-run-button" disabled={running || !dataset || selectedIds.size === 0} onClick={runTest}>
                 {running ? <LoaderCircle size={18} className="spin" /> : <Play size={18} fill="currentColor" />}
@@ -396,18 +505,52 @@ export function DatasetTestScreen({
           {historyError && (
             <div className="dataset-error" role="alert"><XCircle size={17} /> {historyError}</div>
           )}
+          {history.length > 0 && (
+            <div className="dataset-history-filters">
+              <div className="dataset-history-search">
+                <Search size={14} />
+                <input
+                  aria-label="Search dataset runs"
+                  placeholder="Search saved runs"
+                  value={historyQuery}
+                  onChange={(event) => setHistoryQuery(event.target.value)}
+                />
+                {historyQuery && (
+                  <button type="button" aria-label="Clear dataset history search" onClick={() => setHistoryQuery("")}>
+                    <X size={13} />
+                  </button>
+                )}
+              </div>
+              <select
+                aria-label="Filter history by algorithm"
+                value={historyAlgorithm}
+                onChange={(event) => setHistoryAlgorithm(event.target.value as "all" | DatasetAlgorithm["id"])}
+              >
+                <option value="all">All algorithms</option>
+                <option value="pca_minus_neg">PCA steering</option>
+                <option value="mean_minus_neg">Mean steering</option>
+              </select>
+              <span>{visibleHistory.length} of {history.length} runs</span>
+            </div>
+          )}
+          {historyActionError && (
+            <div className="dataset-error" role="alert"><XCircle size={17} /> {historyActionError}</div>
+          )}
           {historyLoading && history.length === 0 ? (
             <p className="dataset-history-empty">Loading saved runs...</p>
           ) : history.length === 0 ? (
             <p className="dataset-history-empty">
               No saved runs yet. Start a test above; completed runs stay available here.
             </p>
+          ) : visibleHistory.length === 0 ? (
+            <p className="dataset-history-empty">No saved runs match the current filters.</p>
           ) : (
             <div className="dataset-history-list">
-              {history.map((item) => {
+              {visibleHistory.map((item) => {
                 const metric = item.result?.metric;
                 const active = job?.id === item.id;
                 const selectedForComparison = compareIds.includes(item.id);
+                const displayName = item.label ?? datasetAlgorithmName(item.request.algorithmId, algorithms);
                 const statusLabel = metric
                   ? metric.partial
                     ? "Partial"
@@ -415,6 +558,7 @@ export function DatasetTestScreen({
                       ? "Threshold met"
                       : "Below threshold"
                   : historyStatusLabel(item.status);
+                const confirmingDelete = deletingId === item.id;
                 return (
                   <article
                     key={item.id}
@@ -423,12 +567,10 @@ export function DatasetTestScreen({
                     <button
                       type="button"
                       className="dataset-history-open"
-                      aria-label={`Open dataset run ${datasetAlgorithmName(item.request.algorithmId, algorithms)} from ${formatDate(item.createdAt)}`}
+                      aria-label={`Open dataset run ${displayName} from ${formatDate(item.createdAt)}`}
                       onClick={() => void openHistoryJob(item.id)}
                     >
-                      <span className="dataset-history-algorithm">
-                        {datasetAlgorithmName(item.request.algorithmId, algorithms)}
-                      </span>
+                      <span className="dataset-history-algorithm">{displayName}</span>
                       <strong>{metric ? formatPercent(metric.accuracy) : historyStatusLabel(item.status)}</strong>
                       <small>{formatDate(item.createdAt)} · {shortModelName(item.request.model)}</small>
                       <small>
@@ -442,11 +584,70 @@ export function DatasetTestScreen({
                       <input
                         type="checkbox"
                         checked={selectedForComparison}
-                        aria-label={`Select ${datasetAlgorithmName(item.request.algorithmId, algorithms)} run from ${formatDate(item.createdAt)} for comparison`}
+                        aria-label={`Select ${displayName} run from ${formatDate(item.createdAt)} for comparison`}
                         onChange={() => toggleComparison(item.id)}
                       />
                       Compare
                     </label>
+                    {renamingId === item.id ? (
+                      <div className="dataset-history-rename">
+                        <input
+                          autoFocus
+                          aria-label={`New name for ${displayName}`}
+                          maxLength={80}
+                          value={renameValue}
+                          onChange={(event) => setRenameValue(event.target.value)}
+                          onKeyDown={(event) => {
+                            if (event.key === "Enter") void saveRename(item);
+                            if (event.key === "Escape") {
+                              setRenamingId(null);
+                              setRenameValue("");
+                            }
+                          }}
+                        />
+                        <button type="button" aria-label="Save run name" onClick={() => void saveRename(item)}>
+                          <Check size={13} />
+                        </button>
+                        <button
+                          type="button"
+                          aria-label="Cancel run rename"
+                          onClick={() => {
+                            setRenamingId(null);
+                            setRenameValue("");
+                          }}
+                        >
+                          <X size={13} />
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="dataset-history-actions">
+                        <button
+                          type="button"
+                          aria-label={`Rename ${displayName}`}
+                          title="Rename run"
+                          onClick={() => startRename(item)}
+                        >
+                          <Pencil size={12} />
+                        </button>
+                        <button
+                          type="button"
+                          aria-label={`Rerun ${displayName}`}
+                          title="Run again with the same settings"
+                          onClick={() => void rerunHistory(item)}
+                        >
+                          <RotateCcw size={12} />
+                        </button>
+                        <button
+                          type="button"
+                          className={confirmingDelete ? "danger" : ""}
+                          aria-label={`${confirmingDelete ? "Confirm deleting" : "Delete"} ${displayName}`}
+                          title={confirmingDelete ? "Click again to delete this saved run" : "Delete from history"}
+                          onClick={() => void deleteHistory(item)}
+                        >
+                          <Trash2 size={12} />{confirmingDelete ? "Confirm" : ""}
+                        </button>
+                      </div>
+                    )}
                   </article>
                 );
               })}
@@ -461,7 +662,12 @@ export function DatasetTestScreen({
             </div>
           )}
           {comparisonRuns.length === 2 && (
-            <DatasetRunComparison runs={[comparisonRuns[0], comparisonRuns[1]]} />
+            <DatasetRunComparison
+              runs={[comparisonRuns[0], comparisonRuns[1]]}
+              fullJobs={comparisonJobs}
+              loading={comparisonLoading}
+              loadError={comparisonLoadError}
+            />
           )}
         </section>
 
@@ -528,9 +734,15 @@ function DatasetTaskSummary({ tasks }: { tasks: DatasetTestResult["metric"]["tas
 }
 
 function DatasetRunComparison({
-  runs
+  runs,
+  fullJobs,
+  loading,
+  loadError
 }: {
   runs: [DatasetTestJobSummary, DatasetTestJobSummary];
+  fullJobs: [DatasetTestJob, DatasetTestJob] | null;
+  loading: boolean;
+  loadError: string | null;
 }) {
   const [left, right] = runs;
   const leftResult = left.result;
@@ -589,7 +801,7 @@ function DatasetRunComparison({
         </p>
       )}
       <div className="dataset-comparison-scroll">
-        <table aria-label="Dataset run comparison">
+        <table className="dataset-comparison-summary-table" aria-label="Dataset run comparison">
           <thead>
             <tr>
               <th scope="col">Category</th>
@@ -631,7 +843,203 @@ function DatasetRunComparison({
         Positive Δ means run B repaired a larger share of baseline failures. Overall score is the
         benchmark macro score, not raw sample accuracy.
       </p>
+      {loading && <p className="dataset-comparison-empty">Loading sample-level results...</p>}
+      {loadError && (
+        <p className="dataset-comparison-empty" role="alert">
+          Sample-level comparison is unavailable: {loadError}
+        </p>
+      )}
+      {fullJobs && <DatasetSampleDiff left={fullJobs[0]} right={fullJobs[1]} />}
     </section>
+  );
+}
+
+type SampleOutcome =
+  | "newly_fixed"
+  | "regressed"
+  | "both_failed"
+  | "both_passed"
+  | "error"
+  | "only_a"
+  | "only_b";
+
+const SAMPLE_OUTCOME_LABELS: Record<SampleOutcome, string> = {
+  newly_fixed: "Newly fixed",
+  regressed: "Regressed",
+  both_failed: "Both failed",
+  both_passed: "Both passed",
+  error: "Error",
+  only_a: "Only in A",
+  only_b: "Only in B"
+};
+
+function DatasetSampleDiff({ left, right }: { left: DatasetTestJob; right: DatasetTestJob }) {
+  const [showAll, setShowAll] = useState(false);
+  const [query, setQuery] = useState("");
+  const leftRows = useMemo(
+    () => new Map((left.result?.rows ?? []).map((row) => [row.sampleId, row])),
+    [left.result]
+  );
+  const rightRows = useMemo(
+    () => new Map((right.result?.rows ?? []).map((row) => [row.sampleId, row])),
+    [right.result]
+  );
+  const diffRows = useMemo(() => {
+    const sampleIds = [...new Set([
+      ...(left.result?.rows ?? []).map((row) => row.sampleId),
+      ...(right.result?.rows ?? []).map((row) => row.sampleId)
+    ])].sort();
+    return sampleIds.map((sampleId) => {
+      const a = leftRows.get(sampleId);
+      const b = rightRows.get(sampleId);
+      let outcome: SampleOutcome;
+      if (!a) outcome = "only_b";
+      else if (!b) outcome = "only_a";
+      else if (a.status === "error" || b.status === "error") outcome = "error";
+      else if (!a.passed && b.passed) outcome = "newly_fixed";
+      else if (a.passed && !b.passed) outcome = "regressed";
+      else if (!a.passed && !b.passed) outcome = "both_failed";
+      else outcome = "both_passed";
+      return {
+        sampleId,
+        category: a?.task ?? b?.task ?? a?.category ?? b?.category ?? "unknown",
+        a,
+        b,
+        outcome
+      };
+    });
+  }, [left.result, leftRows, right.result, rightRows]);
+
+  if (!left.result || !right.result) return null;
+  const counts = diffRows.reduce<Record<SampleOutcome, number>>((result, row) => {
+    result[row.outcome] += 1;
+    return result;
+  }, {
+    newly_fixed: 0,
+    regressed: 0,
+    both_failed: 0,
+    both_passed: 0,
+    error: 0,
+    only_a: 0,
+    only_b: 0
+  });
+  const normalizedQuery = query.trim().toLowerCase();
+  const changedRows = diffRows.filter((row) =>
+    row.outcome === "newly_fixed" || row.outcome === "regressed" || row.outcome === "error"
+  );
+  const visibleRows = (showAll ? diffRows : changedRows).filter((row) =>
+    !normalizedQuery ||
+    `${row.sampleId} ${row.category}`.toLowerCase().includes(normalizedQuery)
+  );
+  return (
+    <section className="dataset-sample-diff" aria-labelledby="dataset-sample-diff-title">
+      <header>
+        <div>
+          <span>Sample-level diff</span>
+          <h4 id="dataset-sample-diff-title">Which samples changed?</h4>
+          <p>Outcome compares run A with run B for every shared sample.</p>
+        </div>
+        <button
+          type="button"
+          aria-label="Export sample comparison CSV"
+          onClick={() => exportSampleDiffCsv(left, right, diffRows)}
+        >
+          <Download size={14} /> Export CSV
+        </button>
+      </header>
+      <div className="dataset-sample-diff-counts">
+        <span className="newly-fixed"><b>{counts.newly_fixed}</b> newly fixed</span>
+        <span className="regressed"><b>{counts.regressed}</b> regressed</span>
+        <span className="error"><b>{counts.error}</b> errors</span>
+        <span><b>{counts.both_failed}</b> both failed</span>
+        <span><b>{counts.both_passed}</b> both passed</span>
+        {(counts.only_a > 0 || counts.only_b > 0) && (
+          <span><b>{counts.only_a + counts.only_b}</b> single-run samples</span>
+        )}
+      </div>
+      <div className="dataset-sample-diff-toolbar">
+        <div className="dataset-sample-diff-search">
+          <Search size={13} />
+          <input
+            aria-label="Search sample comparison"
+            placeholder="Search sample or category"
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+          />
+        </div>
+        <button type="button" onClick={() => setShowAll((current) => !current)}>
+          {showAll ? `Changed only (${changedRows.length})` : `Show all samples (${diffRows.length})`}
+        </button>
+      </div>
+      {visibleRows.length === 0 ? (
+        <p className="dataset-comparison-empty">
+          No sample-level changes match the current view.
+        </p>
+      ) : (
+        <div className="dataset-comparison-scroll">
+          <table aria-label="Sample-level run comparison">
+            <thead>
+              <tr>
+                <th scope="col">Sample</th>
+                <th scope="col">Category</th>
+                <th scope="col">A · {left.id.slice(0, 8)}</th>
+                <th scope="col">B · {right.id.slice(0, 8)}</th>
+                <th scope="col">Outcome</th>
+              </tr>
+            </thead>
+            <tbody>
+              {visibleRows.map((row) => (
+                <tr key={row.sampleId} className={row.outcome}>
+                  <th scope="row">{row.sampleId}</th>
+                  <td>{formatKey(row.category)}</td>
+                  <td title={row.a?.detail}>{sampleResultLabel(row.a)}</td>
+                  <td title={row.b?.detail}>{sampleResultLabel(row.b)}</td>
+                  <td className={`dataset-sample-outcome ${row.outcome}`}>
+                    {SAMPLE_OUTCOME_LABELS[row.outcome]}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function sampleResultLabel(row: DatasetTestResult["rows"][number] | undefined) {
+  if (!row) return "Not run";
+  if (row.status === "error") return "Error";
+  return row.passed ? "Correct" : "Incorrect";
+}
+
+function exportSampleDiffCsv(
+  left: DatasetTestJob,
+  right: DatasetTestJob,
+  rows: Array<{
+    sampleId: string;
+    category: string;
+    a: DatasetTestResult["rows"][number] | undefined;
+    b: DatasetTestResult["rows"][number] | undefined;
+    outcome: SampleOutcome;
+  }>
+) {
+  const lines = [
+    ["sampleId", "category", "aPassed", "aDetail", "bPassed", "bDetail", "outcome"].join(","),
+    ...rows.map((row) => [
+      row.sampleId,
+      row.category,
+      row.a?.passed ?? "",
+      row.a?.detail ?? "",
+      row.b?.passed ?? "",
+      row.b?.detail ?? "",
+      row.outcome
+    ].map(csvValue).join(","))
+  ];
+  downloadTextFile(
+    `dataset-compare-${left.id.slice(0, 8)}-${right.id.slice(0, 8)}.csv`,
+    "text/csv",
+    lines.join("\n")
   );
 }
 

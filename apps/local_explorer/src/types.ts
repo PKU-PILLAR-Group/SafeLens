@@ -437,6 +437,13 @@ export interface InterventionExperiment {
     changedVocabularyLogits?: number;
     topChangedTokenId?: number;
     topChangedTokenDelta?: number;
+    topChangedTokens?: Array<{
+      tokenId: number;
+      token: string;
+      step: number;
+      delta: number;
+      deltas: number[];
+    }>;
     directionProjectionDelta?: number;
     featureActivationDelta?: number;
     effectStatus?: "changed" | "no_change";

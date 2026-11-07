@@ -47,7 +47,11 @@ import { OverviewEvidenceGraph } from "./components/OverviewEvidenceGraph";
 import { QuickActionsDialog } from "./components/QuickActionsDialog";
 import { ActionableEmptyState } from "./components/ActionableEmptyState";
 import { ExplorerHome } from "./components/ExplorerHome";
-import { DatasetTestScreen } from "./components/DatasetTestScreen";
+import { JobCenter } from "./components/JobCenter";
+
+const DatasetTestScreen = React.lazy(() =>
+  import("./components/DatasetTestScreen").then((module) => ({ default: module.DatasetTestScreen }))
+);
 import {
   LayerSelector,
   SelectionWorkbench,
@@ -305,7 +309,9 @@ function App() {
           onRemoveRuns={library.removeRuns}
         />
       ) : screen === "dataset-test" ? (
-        <DatasetTestScreen onOpenChat={openHome} initialJobId={datasetJobId} />
+        <React.Suspense fallback={<div className="screen-loading">Loading dataset evaluation…</div>}>
+          <DatasetTestScreen onOpenChat={openHome} initialJobId={datasetJobId} />
+        </React.Suspense>
       ) : (
         <ExplorerWorkspace
           key={library.activeRecord.key}
@@ -1403,6 +1409,7 @@ function ExplorerWorkspace({
           <Metric label="NLA cosine" shortLabel="NLA cosine" value={nlaMetric} tone="green" />
         </div>
         <div className="topbar-actions">
+          <JobCenter inline compact />
           <button
             className="icon-button desktop-inspector-trigger"
             title="Inspect selected evidence"

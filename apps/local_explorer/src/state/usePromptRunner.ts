@@ -2,6 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
   cancelPromptJob,
+  ExplorerApiError,
+  fetchPromptJob,
   promptJobEventsUrl,
   promptJobSchema,
   submitPromptJob,
@@ -53,6 +55,51 @@ export function usePromptRunner(onRunReady: (run: ExplorerRun, job: PromptJob) =
     }
   }, [closeStream, onRunReady]);
 
+  const connect = useCallback((jobId: string, generation: number) => {
+    const stream = new EventSource(promptJobEventsUrl(jobId));
+    streamRef.current = stream;
+    stream.addEventListener("job", (event) => {
+      if (!(event instanceof MessageEvent)) return;
+      let input: unknown;
+      try {
+        input = JSON.parse(event.data);
+      } catch {
+        closeStream();
+        setState((current) => ({
+          ...current,
+          error: jobProtocolFailure(
+            "Prompt progress stream returned invalid JSON.",
+            "prompt_stream_invalid_json"
+          )
+        }));
+        return;
+      }
+      const parsed = promptJobSchema.safeParse(input);
+      if (!parsed.success) {
+        closeStream();
+        setState((current) => ({
+          ...current,
+          error: jobProtocolFailure(
+            "Prompt progress payload failed validation.",
+            "prompt_stream_invalid_schema"
+          )
+        }));
+        return;
+      }
+      applySnapshot(parsed.data, generation);
+    });
+    stream.onerror = () => {
+      if (activeRef.current?.generation !== generation) return;
+      closeStream();
+      setState((current) => ({
+        ...current,
+        error: current.job?.status === "ready" || current.job?.status === "cancelled"
+          ? current.error
+          : current.error ?? jobStreamFailure("Prompt progress stream disconnected. Retry the job.")
+      }));
+    };
+  }, [applySnapshot, closeStream]);
+
   const submit = useCallback(async (input: PromptRunInput) => {
     closeStream();
     const generation = ++generationRef.current;
@@ -79,48 +126,7 @@ export function usePromptRunner(onRunReady: (run: ExplorerRun, job: PromptJob) =
         }
         return;
       }
-      const stream = new EventSource(promptJobEventsUrl(submitted.id));
-      streamRef.current = stream;
-      stream.addEventListener("job", (event) => {
-        if (!(event instanceof MessageEvent)) return;
-        let input: unknown;
-        try {
-          input = JSON.parse(event.data);
-        } catch {
-          closeStream();
-          setState((current) => ({
-            ...current,
-            error: jobProtocolFailure(
-              "Prompt progress stream returned invalid JSON.",
-              "prompt_stream_invalid_json"
-            )
-          }));
-          return;
-        }
-        const parsed = promptJobSchema.safeParse(input);
-        if (!parsed.success) {
-          closeStream();
-          setState((current) => ({
-            ...current,
-            error: jobProtocolFailure(
-              "Prompt progress payload failed validation.",
-              "prompt_stream_invalid_schema"
-            )
-          }));
-          return;
-        }
-        applySnapshot(parsed.data, generation);
-      });
-      stream.onerror = () => {
-        if (activeRef.current?.generation !== generation) return;
-        closeStream();
-        setState((current) => ({
-          ...current,
-          error: current.job?.status === "ready" || current.job?.status === "cancelled"
-            ? current.error
-            : current.error ?? jobStreamFailure("Prompt progress stream disconnected. Retry the job.")
-        }));
-      };
+      connect(submitted.id, generation);
     } catch (error) {
       if (activeRef.current?.generation !== generation) return;
       activeRef.current = null;
@@ -130,7 +136,38 @@ export function usePromptRunner(onRunReady: (run: ExplorerRun, job: PromptJob) =
         error: jobFailureFromError(error, "submission", "Prompt job submission failed.")
       });
     }
-  }, [applySnapshot, closeStream]);
+  }, [applySnapshot, closeStream, connect]);
+
+  const resume = useCallback(async (jobId: string) => {
+    closeStream();
+    const generation = ++generationRef.current;
+    activeRef.current = { id: jobId, generation };
+    cancelRequestedRef.current = false;
+    setSubmitting(false);
+    setState({ job: null, error: null });
+    try {
+      const snapshot = await fetchPromptJob(jobId);
+      if (activeRef.current?.generation !== generation) return;
+      applySnapshot(snapshot, generation);
+      if (snapshot.status === "idle" || snapshot.status === "loading") {
+        connect(jobId, generation);
+      }
+    } catch (error) {
+      if (activeRef.current?.generation !== generation) return;
+      activeRef.current = null;
+      const interrupted = error instanceof ExplorerApiError && error.httpStatus === 404;
+      setState({
+        job: null,
+        error: jobFailureFromError(
+          interrupted
+            ? new Error("The background prompt job is no longer available. Retry the prompt.")
+            : error,
+          "submission",
+          "The background prompt job is no longer available. Retry the prompt."
+        )
+      });
+    }
+  }, [applySnapshot, closeStream, connect]);
 
   const cancel = useCallback(async () => {
     const active = activeRef.current;
@@ -160,10 +197,8 @@ export function usePromptRunner(onRunReady: (run: ExplorerRun, job: PromptJob) =
   }, [closeStream]);
 
   useEffect(() => () => {
-    const active = activeRef.current;
     closeStream();
-    if (active && active.id !== "submitting") void cancelPromptJob(active.id).catch(() => undefined);
   }, [closeStream]);
 
-  return { ...state, submit, cancel, reset, submitting };
+  return { ...state, submit, resume, cancel, reset, submitting };
 }
